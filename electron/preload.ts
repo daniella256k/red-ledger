@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AttachmentParseResult, RedLedgerAPI, StreamChunk } from '../src/types'
+import type { AttachmentParseResult, MenuAction, RedLedgerAPI, StreamChunk } from '../src/types'
 
 function getFileName(value: unknown): string {
   if (!value || typeof value !== 'object') return 'Unknown file'
@@ -183,6 +183,26 @@ const api: RedLedgerAPI = {
     return {
       attachments: result.attachments,
       failed: [...result.failed, ...unresolved]
+    }
+  },
+
+  // ─── Chat Export / Import ────────────────────────────────────────────────
+
+  exportChat: (conversationId, format) =>
+    ipcRenderer.invoke('chat:export', conversationId, format),
+
+  importChat: () =>
+    ipcRenderer.invoke('chat:import'),
+
+  onMenuAction: (handler) => {
+    const listener = (_event: Electron.IpcRendererEvent, action: unknown) => {
+      if (action === 'exportChat' || action === 'importChat') {
+        handler(action as MenuAction)
+      }
+    }
+    ipcRenderer.on('menu:action', listener)
+    return () => {
+      ipcRenderer.removeListener('menu:action', listener)
     }
   }
 }

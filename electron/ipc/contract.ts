@@ -10,6 +10,18 @@ import type {
   Attachment, AttachmentParseResult, LLMRequest, StreamChunk, ContextProfile, TitleGenerationRequest
 } from '../../src/types'
 
+export type ChatExportFormat = 'markdown' | 'xml'
+
+export type ChatExportResult =
+  | { ok: true; path: string }
+  | { ok: false; canceled: true }
+  | { ok: false; canceled: false; error: string }
+
+export type ChatImportResult =
+  | { ok: true; conversation: Conversation; importedMessageCount: number }
+  | { ok: false; canceled: true }
+  | { ok: false; canceled: false; error: string }
+
 // ─── Helper types used only by the contract ─────────────────────────────────
 
 export type ContextType = 'system' | 'user' | 'org'
@@ -76,6 +88,10 @@ export interface IpcContract {
   'dialog:openTextFile':        { params: [];                                          result: string | null }
   'dialog:openAttachmentFiles': { params: [];                                          result: Attachment[] }
   'attachment:parseFiles':      { params: [filePaths: string[]];                       result: AttachmentParseResult }
+
+  // Chat import/export
+  'chat:export':                { params: [conversationId: string, format: ChatExportFormat]; result: ChatExportResult }
+  'chat:import':                { params: [];                                          result: ChatImportResult }
 }
 
 // ─── Streaming contract (event-based, not invoke/handle) ────────────────────

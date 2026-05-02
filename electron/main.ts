@@ -12,8 +12,16 @@ import { registerSettingsHandlers, getCurrentSettings } from './ipc/settings'
 import { registerFsHandlers, getWorkspaceService } from './ipc/fs'
 import { registerLlmHandlers } from './ipc/llm'
 import { registerSearchHandlers } from './ipc/search'
+import { registerTransferHandlers } from './ipc/transfer'
 import { handleIpc } from './ipc/typedIpc'
 import { assertObject } from './ipc/validate'
+
+type RendererMenuAction = 'exportChat' | 'importChat'
+
+function sendMenuAction(action: RendererMenuAction): void {
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  mainWindow.webContents.send('menu:action', action)
+}
 
 let mainWindow: BrowserWindow | null = null
 let ipcHandlersRegistered = false
@@ -56,11 +64,30 @@ function setApplicationMenu(): void {
     '5. Set the System Prompt in the Context section.'
   ].join('\n')
 
+  const isMac = process.platform === 'darwin'
+  const fileMenu: MenuItemConstructorOptions = {
+    label: 'File',
+    submenu: [
+      {
+        label: 'Export Chat…',
+        accelerator: isMac ? 'Cmd+E' : 'Ctrl+E',
+        click: () => sendMenuAction('exportChat')
+      },
+      {
+        label: 'Import Chat…',
+        accelerator: isMac ? 'Cmd+I' : 'Ctrl+I',
+        click: () => sendMenuAction('importChat')
+      },
+      { type: 'separator' },
+      isMac ? { role: 'close' } : { role: 'quit' }
+    ]
+  }
+
   const menuTemplate: MenuItemConstructorOptions[] = [
-    ...(process.platform === 'darwin'
+    ...(isMac
       ? [{ role: 'appMenu' as const }]
       : []),
-    { role: 'fileMenu' },
+    fileMenu,
     { role: 'editMenu' },
     { role: 'viewMenu' },
     { role: 'windowMenu' },
@@ -380,7 +407,10 @@ function registerIpcHandlers(): void {
     getSystemPrompt: () => getContextService().assembleSystemPrompt()
   })
 
-  // 7. Dialog handlers (remain inline — they're simple and window-dependent)
+  // 7. Chat import/export
+  registerTransferHandlers(getConversationService())
+
+  // 8. Dialog handlers (remain inline — they're simple and window-dependent)
   handleIpc('dialog:confirm', async (_event, options) => {
     assertObject(options, 'options')
     if (!mainWindow) return false

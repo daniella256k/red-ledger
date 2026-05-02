@@ -173,6 +173,22 @@ export type ErrorCode =
   | 'USER_DENIED'
   | 'UNKNOWN'
 
+// ─── Chat Import/Export ─────────────────────────────────────────────────────
+
+export type ChatExportFormat = 'markdown' | 'xml'
+
+export type ChatExportResult =
+  | { ok: true; path: string }
+  | { ok: false; canceled: true }
+  | { ok: false; canceled: false; error: string }
+
+export type ChatImportResult =
+  | { ok: true; conversation: Conversation; importedMessageCount: number }
+  | { ok: false; canceled: true }
+  | { ok: false; canceled: false; error: string }
+
+export type MenuAction = 'exportChat' | 'importChat'
+
 // ─── Toast ───────────────────────────────────────────────────────────────────
 
 export interface Toast {
@@ -232,6 +248,11 @@ export interface RedLedgerAPI {
   openTextFile(): Promise<string | null>
   openAttachmentFiles(): Promise<Attachment[]>
   parseAttachmentFiles(files: File[]): Promise<AttachmentParseResult>
+
+  // Chat Export / Import
+  exportChat(conversationId: string, format: ChatExportFormat): Promise<ChatExportResult>
+  importChat(): Promise<ChatImportResult>
+  onMenuAction(handler: (action: MenuAction) => void): () => void
 }
 
 // Extend Window interface for the renderer
