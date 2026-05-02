@@ -15,6 +15,84 @@ const SKIP_PATTERNS = new Set([
   'Thumbs.db'
 ])
 
+export interface GrepMatch {
+  path: string
+  line: number
+  column: number
+  text: string
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+export function buildGrepMatcher(
+  pattern: string,
+  isRegex: boolean,
+  caseSensitive: boolean
+): (line: string) => number {
+  if (isRegex) {
+    let re: RegExp
+    try {
+      re = new RegExp(pattern, caseSensitive ? '' : 'i')
+    } catch (err) {
+      throw new PathJailError(
+        'INVALID_INPUT',
+        `Invalid regex pattern: ${err instanceof Error ? err.message : String(err)}`
+      )
+    }
+    return (line) => {
+      const m = re.exec(line)
+      return m ? m.index : -1
+    }
+  }
+
+  if (caseSensitive) {
+    return (line) => line.indexOf(pattern)
+  }
+
+  const needle = pattern.toLowerCase()
+  return (line) => line.toLowerCase().indexOf(needle)
+}
+
+export function buildGlobMatcher(glob: string): (relativePath: string) => boolean {
+  const trimmed = glob.trim()
+  if (!trimmed) return () => true
+
+  const isPathAware = trimmed.includes('/')
+
+  let compiled = ''
+  let i = 0
+  while (i < trimmed.length) {
+    const ch = trimmed[i]
+    const next = trimmed[i + 1]
+    const after = trimmed[i + 2]
+
+    if (ch === '*' && next === '*' && after === '/') {
+      // **/ — zero or more directory segments (matches "" or "a/" or "a/b/")
+      compiled += '(?:.*/)?'
+      i += 3
+    } else if (ch === '*' && next === '*') {
+      // ** — match across directories
+      compiled += '.*'
+      i += 2
+    } else if (ch === '*') {
+      compiled += '[^/]*'
+      i += 1
+    } else if (ch === '?') {
+      compiled += '[^/]'
+      i += 1
+    } else {
+      compiled += escapeRegex(ch)
+      i += 1
+    }
+  }
+
+  const pattern = isPathAware ? `^${compiled}$` : `(?:^|/)${compiled}$`
+  const re = new RegExp(pattern)
+  return (relativePath) => re.test(relativePath)
+}
+
 /**
  * Adapter for user confirmation dialogs.
  * In production, backed by Electron's dialog.showMessageBox.
@@ -213,6 +291,148 @@ export class WorkspaceService {
 
     mkdirSync(dirname(fullPath), { recursive: true })
     writeFileSync(fullPath, content)
+  }
+
+  grepFiles(options: {
+    pattern: string
+    isRegex?: boolean
+    caseSensitive?: boolean
+    path?: string
+    glob?: string
+    maxResults?: number
+  }): GrepMatch[] {
+    if (!this.workspacePath) {
+      throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
+    }
+
+    const targetDir = options.path
+      ? resolveWorkspacePath(this.workspacePath, options.path)
+      : this.workspacePath
+
+    if (!existsSync(targetDir) || !statSync(targetDir).isDirectory()) {
+      throw new PathJailError('FILE_NOT_FOUND', 'Directory not found')
+    }
+
+    const matcher = buildGrepMatcher(options.pattern, options.isRegex === true, options.caseSensitive !== false)
+    const globMatcher = options.glob ? buildGlobMatcher(options.glob) : null
+    const maxResults = Math.max(1, Math.min(options.maxResults ?? 200, 1000))
+    const matches: GrepMatch[] = []
+
+    this.walkForGrep(
+      targetDir,
+      this.workspacePath,
+      matches,
+      maxResults,
+      matcher,
+      globMatcher
+    )
+
+    return matches
+  }
+
+  private walkForGrep(
+    dirPath: string,
+    rootPath: string,
+    matches: GrepMatch[],
+    maxResults: number,
+    matcher: (line: string) => number,
+    globMatcher: ((relativePath: string) => boolean) | null,
+    gitignoreRules?: GitignoreRule[]
+  ): void {
+    if (matches.length >= maxResults) return
+
+    if (gitignoreRules === undefined) {
+      gitignoreRules = loadGitignoreRules(rootPath)
+    }
+
+    let entries
+    try {
+      entries = readdirSync(dirPath, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      if (matches.length >= maxResults) return
+      if (entry.name.startsWith('.') || SKIP_PATTERNS.has(entry.name)) continue
+
+      const fullPath = resolve(dirPath, entry.name)
+
+      try {
+        const stat = lstatSync(fullPath)
+        if (stat.isSymbolicLink()) continue
+      } catch {
+        continue
+      }
+
+      const relativePath = fullPath
+        .slice(rootPath.length + 1)
+        .replace(/\\/g, '/')
+
+      const isDir = entry.isDirectory()
+
+      if (isIgnoredByGitignore(relativePath, isDir, gitignoreRules)) continue
+
+      if (isDir) {
+        this.walkForGrep(fullPath, rootPath, matches, maxResults, matcher, globMatcher, gitignoreRules)
+        continue
+      }
+
+      if (globMatcher && !globMatcher(relativePath)) continue
+
+      this.grepOneFile(fullPath, relativePath, matcher, matches, maxResults)
+    }
+  }
+
+  private grepOneFile(
+    fullPath: string,
+    relativePath: string,
+    matcher: (line: string) => number,
+    matches: GrepMatch[],
+    maxResults: number
+  ): void {
+    let stat
+    try {
+      stat = statSync(fullPath)
+    } catch {
+      return
+    }
+    if (stat.size > 2_000_000) return
+
+    let raw: Buffer
+    try {
+      raw = readFileSync(fullPath)
+    } catch {
+      return
+    }
+
+    const probeLength = Math.min(raw.length, 4096)
+    for (let i = 0; i < probeLength; i++) {
+      if (raw[i] === 0) return
+    }
+
+    const text = raw.toString('utf-8')
+    const lines = text.split(/\r?\n/)
+    const perFileCap = 30
+    let perFileCount = 0
+
+    for (let lineNum = 0; lineNum < lines.length; lineNum++) {
+      if (matches.length >= maxResults) return
+      if (perFileCount >= perFileCap) return
+
+      const line = lines[lineNum]
+      const column = matcher(line)
+      if (column === -1) continue
+
+      const display = line.length > 400 ? line.slice(0, 400) + '…' : line
+      matches.push({
+        path: relativePath,
+        line: lineNum + 1,
+        column: column + 1,
+        text: display
+      })
+      perFileCount++
+    }
   }
 
   listFiles(relativePath?: string): FileNode[] {
