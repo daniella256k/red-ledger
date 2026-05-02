@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { Plus, Trash2, Pencil, Check, X, Star } from 'lucide-react'
+import { useEffect, useRef, useState } from 'react'
+import { Plus, Trash2, Pencil, Check, X, Star, Search } from 'lucide-react'
 import { useConversationStore, useUIStore } from '@/store'
 import { cn, formatTimestamp } from '@/lib/utils'
 
@@ -11,6 +11,7 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
   const conversations = useConversationStore((s) => s.conversations)
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
   const loadConversations = useConversationStore((s) => s.loadConversations)
+  const searchConversations = useConversationStore((s) => s.searchConversations)
   const createConversation = useConversationStore((s) => s.createConversation)
   const deleteConversation = useConversationStore((s) => s.deleteConversation)
   const renameConversation = useConversationStore((s) => s.renameConversation)
@@ -20,10 +21,29 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
 
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
+  const [searchQuery, setSearchQuery] = useState('')
+  const searchSeqRef = useRef(0)
 
   useEffect(() => {
     loadConversations()
   }, [loadConversations])
+
+  useEffect(() => {
+    const seq = ++searchSeqRef.current
+    const trimmed = searchQuery.trim()
+
+    if (trimmed.length === 0) {
+      void loadConversations()
+      return
+    }
+
+    const handle = window.setTimeout(() => {
+      if (seq !== searchSeqRef.current) return
+      void searchConversations(trimmed)
+    }, 150)
+
+    return () => window.clearTimeout(handle)
+  }, [searchQuery, loadConversations, searchConversations])
 
   const handleCreate = async () => {
     await createConversation({ workspacePath })
@@ -81,11 +101,40 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
         </button>
       </div>
 
+      {/* Search */}
+      <div className="px-3 pb-2">
+        <div className="relative">
+          <Search
+            size={12}
+            className="absolute left-2 top-1/2 -translate-y-1/2 text-soft-charcoal/40 pointer-events-none"
+          />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search chats…"
+            className="input input-xs input-bordered w-full bg-base-100 pl-7 pr-7"
+            aria-label="Search chats"
+          />
+          {searchQuery.length > 0 && (
+            <button
+              type="button"
+              onClick={() => setSearchQuery('')}
+              className="absolute right-1.5 top-1/2 -translate-y-1/2 p-0.5 rounded text-soft-charcoal/40 hover:text-soft-charcoal hover:bg-base-300 transition-colors"
+              title="Clear search"
+              aria-label="Clear search"
+            >
+              <X size={12} />
+            </button>
+          )}
+        </div>
+      </div>
+
       {/* Conversation List */}
       <div className="flex-1 overflow-y-auto py-1">
         {conversations.length === 0 ? (
           <div className="px-4 py-8 text-center text-xs text-soft-charcoal/40">
-            No conversations yet
+            {searchQuery.trim().length > 0 ? 'No matching chats' : 'No conversations yet'}
           </div>
         ) : (
           conversations.map((conv) => (

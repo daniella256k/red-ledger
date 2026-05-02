@@ -202,6 +202,7 @@ export interface RedLedgerAPI {
 
   // Conversations
   listConversations(): Promise<Conversation[]>
+  searchConversations(query: string): Promise<Conversation[]>
   getConversation(id: string): Promise<Conversation | null>
   createConversation(data: Partial<Conversation>): Promise<Conversation>
   updateConversation(id: string, data: Partial<Conversation>): Promise<void>

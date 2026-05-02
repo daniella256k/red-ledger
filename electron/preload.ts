@@ -79,6 +79,9 @@ const api: RedLedgerAPI = {
   listConversations: () =>
     ipcRenderer.invoke('db:listConversations'),
 
+  searchConversations: (query: string) =>
+    ipcRenderer.invoke('db:searchConversations', query),
+
   getConversation: (id: string) =>
     ipcRenderer.invoke('db:getConversation', id),
 

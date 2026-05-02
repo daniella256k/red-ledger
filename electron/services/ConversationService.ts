@@ -247,6 +247,29 @@ export class ConversationService {
     return rows.map(r => this.toConversation(r))
   }
 
+  searchConversations(query: string): Conversation[] {
+    const trimmed = query.trim()
+    if (trimmed.length === 0) return this.listConversations()
+
+    const escaped = trimmed.replace(/[\\%_]/g, (ch) => `\\${ch}`)
+    const pattern = `%${escaped}%`
+
+    const rows = this.stmt(
+      'searchConversations',
+      `SELECT c.*
+         FROM conversations c
+        WHERE c.title LIKE ? ESCAPE '\\'
+           OR EXISTS (
+             SELECT 1 FROM messages m
+              WHERE m.conversation_id = c.id
+                AND m.content LIKE ? ESCAPE '\\'
+           )
+        ORDER BY c.is_pinned DESC, c.updated_at DESC`
+    ).all(pattern, pattern) as Record<string, unknown>[]
+
+    return rows.map(r => this.toConversation(r))
+  }
+
   getConversation(id: string): Conversation | null {
     const row = this.stmt(
       'getConversation',

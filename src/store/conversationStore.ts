@@ -18,6 +18,7 @@ interface ConversationState {
   isLoadingMessages: boolean
 
   loadConversations: () => Promise<void>
+  searchConversations: (query: string) => Promise<void>
   createConversation: (partial?: Partial<Conversation>) => Promise<Conversation>
   forkConversationFromMessage: (messageId: string) => Promise<void>
   deleteConversation: (id: string) => Promise<void>
@@ -41,6 +42,20 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     if (!window.redLedger) return
     try {
       const conversations = await window.redLedger.listConversations()
+      set({ conversations: sortConversationsByPriority(conversations) })
+    } catch (err) {
+      notify({ type: 'error', message: formatError(err) })
+    }
+  },
+
+  searchConversations: async (query) => {
+    if (!window.redLedger) return
+    if (query.trim().length === 0) {
+      await get().loadConversations()
+      return
+    }
+    try {
+      const conversations = await window.redLedger.searchConversations(query)
       set({ conversations: sortConversationsByPriority(conversations) })
     } catch (err) {
       notify({ type: 'error', message: formatError(err) })

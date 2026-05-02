@@ -176,6 +176,33 @@ export class WorkspaceService {
     }
   }
 
+  async editFile(
+    dialog: DialogAdapter | null,
+    relativePath: string,
+    content: string
+  ): Promise<void> {
+    const { fullPath, fileExists } = this.resolveWriteTarget(relativePath)
+    if (!fileExists) {
+      throw new PathJailError('FILE_NOT_FOUND', `Cannot edit nonexistent file: ${relativePath}`)
+    }
+
+    if (dialog && this.getSettings().strictMode) {
+      const confirmed = await dialog.showMessageBox({
+        type: 'question',
+        buttons: ['Deny', 'Allow'],
+        defaultId: 0,
+        title: 'File Edit Request',
+        message: `The assistant wants to edit: ${relativePath}`,
+        detail: 'Do you want to allow this file edit?'
+      })
+      if (confirmed.response === 0) {
+        throw new PathJailError('USER_DENIED', 'User denied file edit')
+      }
+    }
+
+    writeFileSync(fullPath, content, 'utf-8')
+  }
+
   async writeBinaryFile(
     dialog: DialogAdapter | null,
     relativePath: string,

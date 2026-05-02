@@ -31,6 +31,7 @@ export interface ConfirmDialogOptions {
 export interface IpcContract {
   // Conversations
   'db:listConversations':       { params: [];                                          result: Conversation[] }
+  'db:searchConversations':     { params: [query: string];                             result: Conversation[] }
   'db:getConversation':         { params: [id: string];                                result: Conversation | null }
   'db:createConversation':      { params: [data: Partial<Conversation>];               result: Conversation }
   'db:updateConversation':      { params: [id: string, data: Partial<Conversation>];   result: void }

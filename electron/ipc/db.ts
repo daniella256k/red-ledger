@@ -25,6 +25,11 @@ export function registerDbHandlers(dbPath: string): void {
     return service.listConversations()
   })
 
+  handleIpc('db:searchConversations', (_e, query) => {
+    assertString(query, 'query')
+    return service.searchConversations(query)
+  })
+
   handleIpc('db:getConversation', (_e, id) => {
     assertString(id, 'id')
     return service.getConversation(id)
