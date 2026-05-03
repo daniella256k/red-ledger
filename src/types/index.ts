@@ -22,7 +22,7 @@ export interface Settings {
   temperature: number     // 0.0–2.0
   maxTokensEnabled: boolean
   maxTokens: number       // 1–128000
-  maxToolCalls: number    // 1-25
+  maxToolCalls: number    // default per-turn estimate when LLM omits declare_estimate; 1-100
   strictMode: boolean
   darkMode: boolean
   tavilyApiKey: string
