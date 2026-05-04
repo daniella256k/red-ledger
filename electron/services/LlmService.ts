@@ -5,7 +5,7 @@ import {
   createBudget,
   ingestRound,
   attachSoftWarning,
-  DECLARE_ESTIMATE_TOOL_NAME
+  PLAN_TOOL_NAME
 } from '../lib/budget/budgetTracker'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
 import { createHash } from 'node:crypto'
@@ -29,25 +29,18 @@ import '../lib/providers/lmstudio'
 const DEFAULT_FALLBACK_ESTIMATE = 5
 const DEFAULT_TITLE_MAX_TOKENS = 24
 
-const BUDGET_PROTOCOL_PROMPT = `## Tool-Call Budget Protocol
+const PLAN_PROTOCOL_PROMPT = `## Planning Protocol
 
-Before using any tool in a turn, call \`declare_estimate(count)\` once with an honest
-integer estimate of how many tool calls the request will need. Sizing guide:
-simple lookup 1-3, multi-step task 5-10, larger exploration or refactor 15-30+.
+When you need to use tools, first call \`plan(count, tasks)\` to declare the
+steps you intend to take and an honest estimate of how many tool calls they
+will need. This keeps you on task and sets the per-turn tool-call budget.
 
-Caps derived from your estimate:
-- Soft warning at ceil(estimate * 1.5) — finish promptly if practical.
-- Hard cut at estimate * 4 — the turn ends regardless of state.
-
-The estimate locks on first declaration; later \`declare_estimate\` calls return
-acknowledged: false and do not change the budget. If you skip the declaration
-and start with another tool, a default estimate is applied automatically. Turns
-that need no tools do not need to declare anything.`
+Sizing guide: simple lookup 1-3, multi-step task 5-8, larger exploration or refactor 10-25+.`
 const TITLE_TEMPERATURE = 0.2
 const SEARCH_TOOLS_REQUIRING_API_KEYS = new Set(['web_search', 'org_search'])
 const ORG_SEARCH_TOOL_NAME = 'org_search'
 const TITLE_GENERATION_SYSTEM_PROMPT =
-  'Generate a concise chat title for the provided user prompt. Return only the title text in 2 to 6 words. No reasoning, no prefix, no quotes, no markdown, and no trailing punctuation.'
+  'Generate a concise chat title for the provided user prompt. Return only the title text in 2 to 6 words. No reasoning, no markdown, and no trailing punctuation.'
 
 function buildTitleGenerationExtraBody(provider: ProviderName): Record<string, unknown> | undefined {
   if (provider !== 'openrouter') return undefined
@@ -290,7 +283,7 @@ export class LlmService {
     // knows about declare_estimate regardless of the user's profile system.md.
     messages.push({
       role: 'system',
-      content: `${BUDGET_PROTOCOL_PROMPT}\n\n${systemPrompt}`
+      content: `${PLAN_PROTOCOL_PROMPT}\n\n${systemPrompt}`
     })
 
     // Append conversation messages from the request, injecting system timestamps
@@ -395,8 +388,8 @@ export class LlmService {
       }
       messages.push(assistantMessage)
 
-      // Synthesize tool_result for declare_estimate calls (never dispatched).
-      for (const ack of round.estimateAcks) {
+      // Synthesize tool_result for plan calls (never dispatched through the registry).
+      for (const ack of round.planAcks) {
         const executed = { ...ack.call, result: ack.result }
         sink.send({ type: 'tool_result', toolCall: executed })
         messages.push({
@@ -423,7 +416,7 @@ export class LlmService {
       const lastIndex = round.actionCalls.length - 1
       for (let i = 0; i < round.actionCalls.length; i++) {
         const tc = round.actionCalls[i]
-        const executed = availableToolNames.has(tc.name) && tc.name !== DECLARE_ESTIMATE_TOOL_NAME
+        const executed = availableToolNames.has(tc.name) && tc.name !== PLAN_TOOL_NAME
           ? await toolExecutor(tc)
           : {
             ...tc,

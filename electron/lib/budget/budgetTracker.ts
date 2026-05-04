@@ -3,33 +3,39 @@ import type { ToolCall } from '../../../src/types'
 /**
  * Per-turn tool-call budget tracker.
  *
- * The model declares an estimate via the `declare_estimate` tool on its first
- * tool-using round. From that estimate we derive:
- *   - soft cap = ceil(estimate * 1.5)  → warning appended to next tool result
- *   - hard cap = estimate * 4          → turn is terminated
+ * The model declares a plan via the `plan` tool on its first tool-using
+ * round. From the declared `count` we derive:
+ *   - soft cap = ceil(estimate * 2)  → warning + plan recall appended to
+ *                                       the next tool result
+ *   - hard cap = estimate * 4        → turn is terminated
  *
- * If the model uses tools without first declaring, a default estimate is
- * applied silently. Re-declarations within the same turn are ignored.
+ * The plan also carries a short task list which is echoed back to the model
+ * in the soft-warning text so it can re-anchor on its original intent.
+ *
+ * If the model uses tools without first declaring a plan, a default estimate
+ * is applied silently (no plan recall in that case). Re-declarations within
+ * the same turn are ignored.
  *
  * This module is a pure state machine — no I/O, no streaming. The orchestrator
  * in LlmService is the sole caller.
  */
 
-export const DECLARE_ESTIMATE_TOOL_NAME = 'declare_estimate'
+export const PLAN_TOOL_NAME = 'plan'
 
 export interface BudgetState {
   estimate: number | null
+  plan: string[] | null
   actionToolCalls: number
   softWarningIssued: boolean
 }
 
-export interface EstimateAck {
+export interface PlanAck {
   call: ToolCall
   result: Record<string, unknown>
 }
 
 export interface RoundIngestion {
-  estimateAcks: EstimateAck[]
+  planAcks: PlanAck[]
   actionCalls: ToolCall[]
   hardCapExceeded: { hardCap: number; estimate: number } | null
   softWarningToAppend: string | null
@@ -38,25 +44,50 @@ export interface RoundIngestion {
 export function createBudget(): BudgetState {
   return {
     estimate: null,
+    plan: null,
     actionToolCalls: 0,
     softWarningIssued: false
   }
 }
 
 export function softCap(estimate: number): number {
-  return Math.ceil(estimate * 1.5)
+  return Math.ceil(estimate * 2)
 }
 
 export function hardCap(estimate: number): number {
   return estimate * 4
 }
 
-function parseDeclaredCount(call: ToolCall): number | null {
-  const raw = (call.arguments as Record<string, unknown> | undefined)?.count
-  const num = typeof raw === 'number' ? raw : Number(raw)
-  if (!Number.isFinite(num)) return null
-  const floored = Math.floor(num)
-  return floored >= 1 ? floored : null
+interface ParsedPlanArgs {
+  count: number | null
+  tasks: string[] | null      // null = invalid (not array, or array became empty after trim)
+}
+
+function parsePlanArgs(call: ToolCall): ParsedPlanArgs {
+  const args = (call.arguments as Record<string, unknown> | undefined) ?? {}
+
+  const rawCount = args.count
+  const numCount = typeof rawCount === 'number' ? rawCount : Number(rawCount)
+  const flooredCount = Number.isFinite(numCount) ? Math.floor(numCount) : NaN
+  const count = Number.isFinite(flooredCount) && flooredCount >= 1 ? flooredCount : null
+
+  const rawTasks = args.tasks
+  let tasks: string[] | null = null
+  if (typeof rawTasks === 'string') {
+    // Coerce a bare string into a single-element list. Models occasionally
+    // pass `tasks` as one comma-joined string instead of an array; treat it
+    // as a single task rather than nacking the whole call.
+    const trimmed = rawTasks.trim()
+    tasks = trimmed.length > 0 ? [trimmed] : null
+  } else if (Array.isArray(rawTasks)) {
+    const cleaned = rawTasks
+      .filter((t): t is string => typeof t === 'string')
+      .map((t) => t.trim())
+      .filter((t) => t.length > 0)
+    tasks = cleaned.length > 0 ? cleaned : null
+  }
+
+  return { count, tasks }
 }
 
 /**
@@ -64,58 +95,62 @@ function parseDeclaredCount(call: ToolCall): number | null {
  * returns the data the orchestrator needs to act on this round.
  *
  * Invariant: caller must dispatch the action calls exactly as returned.
- * The synthesized estimate-ack results are owned by the orchestrator —
- * `declare_estimate` is never sent through normal tool dispatch.
+ * The synthesized plan-ack results are owned by the orchestrator —
+ * `plan` calls are never sent through normal tool dispatch.
  */
 export function ingestRound(
   state: BudgetState,
   collected: ToolCall[],
   defaultEstimate: number
 ): RoundIngestion {
-  const estimateCalls: ToolCall[] = []
+  const planCalls: ToolCall[] = []
   const actionCalls: ToolCall[] = []
   for (const call of collected) {
-    if (call.name === DECLARE_ESTIMATE_TOOL_NAME) {
-      estimateCalls.push(call)
+    if (call.name === PLAN_TOOL_NAME) {
+      planCalls.push(call)
     } else {
       actionCalls.push(call)
     }
   }
 
-  const estimateAcks: EstimateAck[] = []
+  const planAcks: PlanAck[] = []
 
-  for (const call of estimateCalls) {
+  for (const call of planCalls) {
     if (state.estimate === null) {
-      const declared = parseDeclaredCount(call)
-      if (declared !== null) {
-        state.estimate = declared
-        estimateAcks.push({
+      const { count, tasks } = parsePlanArgs(call)
+      if (count !== null && tasks !== null) {
+        state.estimate = count
+        state.plan = tasks
+        planAcks.push({
           call,
           result: {
             acknowledged: true,
-            declared,
-            soft_cap: softCap(declared),
-            hard_cap: hardCap(declared)
+            declared: count,
+            tasks,
+            soft_cap: softCap(count),
+            hard_cap: hardCap(count)
           }
         })
         continue
       }
-      // Invalid count — leave state.estimate null for now; another estimate call
-      // (or the action-fallback below) may set it. Acknowledge as invalid.
-      estimateAcks.push({
+      // Invalid args — leave state unset; ack as invalid so the model can retry.
+      const reasons: string[] = []
+      if (count === null) reasons.push('count must be an integer >= 1')
+      if (tasks === null) reasons.push('tasks must be a non-empty array of non-empty strings')
+      planAcks.push({
         call,
         result: {
           acknowledged: false,
-          reason: 'invalid count; estimate not set'
+          reason: `invalid plan; ${reasons.join('; ')}`
         }
       })
     } else {
-      estimateAcks.push({
+      planAcks.push({
         call,
         result: {
           acknowledged: false,
-          reason: 'estimate locked',
-          locked_at: state.estimate
+          reason: 'plan locked',
+          locked_at: { count: state.estimate, tasks: state.plan ?? [] }
         }
       })
     }
@@ -123,11 +158,12 @@ export function ingestRound(
 
   if (state.estimate === null && actionCalls.length > 0) {
     state.estimate = Math.max(1, Math.floor(defaultEstimate))
+    // No plan to recall in fallback mode — state.plan stays null.
   }
 
   if (state.estimate === null) {
     return {
-      estimateAcks,
+      planAcks,
       actionCalls,
       hardCapExceeded: null,
       softWarningToAppend: null
@@ -139,7 +175,7 @@ export function ingestRound(
 
   if (actionCalls.length > 0 && projected > hard) {
     return {
-      estimateAcks,
+      planAcks,
       actionCalls,
       hardCapExceeded: { hardCap: hard, estimate: state.estimate },
       softWarningToAppend: null
@@ -159,13 +195,14 @@ export function ingestRound(
       state.actionToolCalls,
       state.estimate,
       soft,
-      hard
+      hard,
+      state.plan
     )
     state.softWarningIssued = true
   }
 
   return {
-    estimateAcks,
+    planAcks,
     actionCalls,
     hardCapExceeded: null,
     softWarningToAppend
@@ -176,13 +213,17 @@ function buildSoftWarning(
   used: number,
   estimate: number,
   soft: number,
-  hard: number
+  hard: number,
+  plan: string[] | null
 ): string {
-  return (
-    `Soft cap reached: you have used ${used} tool calls in this turn, ` +
-    `at or above 1.5x your declared estimate of ${estimate} (soft cap = ${soft}). ` +
-    `Hard cut at ${hard}. If you can wrap up cleanly soon, please do so.`
-  )
+  const head =
+    `Soft cap reached: ${used} tool calls used in this turn, at or above 2x your ` +
+    `declared estimate of ${estimate} (soft cap = ${soft}, hard cut at ${hard}).`
+  const recall = plan && plan.length > 0
+    ? ` Your original plan was:\n${plan.map((t, i) => `  ${i + 1}) ${t}`).join('\n')}`
+    : ''
+  const tail = ' If you can wrap up cleanly soon, please do so.'
+  return head + recall + tail
 }
 
 export const SOFT_WARNING_FIELD = '_budget_warning'
