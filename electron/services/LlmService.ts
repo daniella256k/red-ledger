@@ -26,7 +26,6 @@ import '../lib/providers/openrouter'
 import '../lib/providers/ollama'
 import '../lib/providers/lmstudio'
 
-const DEFAULT_FALLBACK_ESTIMATE = 5
 const DEFAULT_TITLE_MAX_TOKENS = 24
 
 const PLAN_PROTOCOL_PROMPT = `## Planning Protocol
@@ -305,13 +304,11 @@ export class LlmService {
       settings.searchToolsEnabled || !SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name)
     )
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
-    const defaultEstimate = Number.isFinite(settings.maxToolCalls)
-      ? Math.max(1, Math.floor(settings.maxToolCalls))
-      : DEFAULT_FALLBACK_ESTIMATE
     const budget = createBudget()
 
     while (true) {
       const collectedToolCalls: ToolCall[] = []
+      const bufferedToolCallChunks: StreamChunk[] = []
       let textAccumulated = ''
 
       const streamDone = await new Promise<'done' | 'tool_calls' | 'error'>((resolve) => {
@@ -337,7 +334,7 @@ export class LlmService {
                 if (chunk.toolCall) {
                   collectedToolCalls.push(chunk.toolCall)
                 }
-                sink.send(chunk)
+                bufferedToolCallChunks.push(chunk)
                 break
 
               case 'error':
@@ -369,7 +366,15 @@ export class LlmService {
       }
 
       // streamDone === 'tool_calls' — apply per-turn budget, then execute.
-      const round = ingestRound(budget, collectedToolCalls, defaultEstimate)
+      const round = ingestRound(budget, collectedToolCalls)
+
+      // Flush buffered tool_call chunks, suppressing any that will be silently
+      // rejected for arriving before a plan was declared.
+      const rejectedIds = new Set(round.rejectedForNoPlan.map((tc) => tc.id))
+      for (const chunk of bufferedToolCallChunks) {
+        if (chunk.toolCall && rejectedIds.has(chunk.toolCall.id)) continue
+        sink.send(chunk)
+      }
 
       // Always append the assistant message with the model's full tool_calls
       // (including any declare_estimate calls) so the conversation matches what
@@ -396,6 +401,21 @@ export class LlmService {
           role: 'tool',
           content: JSON.stringify(ack.result),
           tool_call_id: ack.call.id
+        })
+      }
+
+      // Silently reject any action calls that arrived before a plan was declared.
+      // The error is fed back to the model so it can self-correct, but nothing
+      // is emitted to the renderer — these calls are invisible to the user.
+      for (const tc of round.rejectedForNoPlan) {
+        const errorResult = {
+          error: 'You must call plan() before making any tool calls. Declare your plan and estimated tool count first, then proceed with your tool calls.',
+          code: 'PLAN_REQUIRED'
+        }
+        messages.push({
+          role: 'tool',
+          content: JSON.stringify(errorResult),
+          tool_call_id: tc.id
         })
       }
 

@@ -52,7 +52,7 @@ describe('budgetTracker — caps', () => {
 describe('budgetTracker — ingestRound', () => {
   it('captures count and tasks from plan call and acks them', () => {
     const state = createBudget()
-    const r = ingestRound(state, [validPlan(5, ['step a', 'step b'])], 3)
+    const r = ingestRound(state, [validPlan(5, ['step a', 'step b'])])
     expect(state.estimate).toBe(5)
     expect(state.plan).toEqual(['step a', 'step b'])
     expect(state.actionToolCalls).toBe(0)
@@ -71,9 +71,9 @@ describe('budgetTracker — ingestRound', () => {
 
   it('counts non-plan calls and stays silent under soft cap', () => {
     const state = createBudget()
-    ingestRound(state, [validPlan(5)], 3)
+    ingestRound(state, [validPlan(5)])
     // soft cap = 10 — 3 calls is well below
-    const r = ingestRound(state, [actionCall(), actionCall(), actionCall()], 3)
+    const r = ingestRound(state, [actionCall(), actionCall(), actionCall()])
     expect(state.actionToolCalls).toBe(3)
     expect(r.softWarningToAppend).toBeNull()
     expect(r.hardCapExceeded).toBeNull()
@@ -82,13 +82,13 @@ describe('budgetTracker — ingestRound', () => {
 
   it('emits a soft warning the first time the soft cap is reached', () => {
     const state = createBudget()
-    ingestRound(state, [validPlan(5, ['plan a', 'plan b'])], 3)
+    ingestRound(state, [validPlan(5, ['plan a', 'plan b'])])
     // soft cap = 5 * 2 = 10
     for (let i = 0; i < 9; i++) {
-      const r = ingestRound(state, [actionCall()], 3)
+      const r = ingestRound(state, [actionCall()])
       expect(r.softWarningToAppend).toBeNull()
     }
-    const r10 = ingestRound(state, [actionCall()], 3)
+    const r10 = ingestRound(state, [actionCall()])
     expect(state.actionToolCalls).toBe(10)
     expect(r10.softWarningToAppend).toContain('Soft cap reached')
     expect(r10.softWarningToAppend).toContain('estimate of 5')
@@ -99,63 +99,50 @@ describe('budgetTracker — ingestRound', () => {
 
   it('only emits the soft warning once across rounds', () => {
     const state = createBudget()
-    ingestRound(state, [validPlan(5)], 3)
-    for (let i = 0; i < 10; i++) ingestRound(state, [actionCall()], 3)
+    ingestRound(state, [validPlan(5)])
+    for (let i = 0; i < 10; i++) ingestRound(state, [actionCall()])
     expect(state.softWarningIssued).toBe(true)
-    const r = ingestRound(state, [actionCall()], 3)
+    const r = ingestRound(state, [actionCall()])
     expect(r.softWarningToAppend).toBeNull()
   })
 
   it('signals hardCapExceeded and does not increment when projected count would exceed hard cap', () => {
     const state = createBudget()
-    ingestRound(state, [validPlan(2)], 3)
+    ingestRound(state, [validPlan(2)])
     // hard cap = 8
-    for (let i = 0; i < 8; i++) ingestRound(state, [actionCall()], 3)
+    for (let i = 0; i < 8; i++) ingestRound(state, [actionCall()])
     expect(state.actionToolCalls).toBe(8)
-    const overflow = ingestRound(state, [actionCall()], 3)
+    const overflow = ingestRound(state, [actionCall()])
     expect(overflow.hardCapExceeded).toEqual({ hardCap: 8, estimate: 2 })
     // counter must not advance when hard cap blocks the round
     expect(state.actionToolCalls).toBe(8)
   })
 
-  it('falls back to default estimate when action tool used without prior plan', () => {
+  it('rejects action calls and leaves state unset when no plan has been declared', () => {
     const state = createBudget()
-    const r = ingestRound(state, [actionCall(), actionCall()], 4)
-    expect(state.estimate).toBe(4)
+    const r = ingestRound(state, [actionCall(), actionCall()])
+    expect(state.estimate).toBeNull()
     expect(state.plan).toBeNull()
-    expect(state.actionToolCalls).toBe(2)
+    expect(state.actionToolCalls).toBe(0)
     expect(r.planAcks).toHaveLength(0)
-    expect(r.actionCalls).toHaveLength(2)
+    expect(r.actionCalls).toHaveLength(0)
+    expect(r.rejectedForNoPlan).toHaveLength(2)
   })
 
-  it('soft warning omits plan recall when running on default estimate fallback', () => {
+  it('rejects action calls even when an invalid plan was attempted in the same round', () => {
     const state = createBudget()
-    // default estimate = 2, soft cap = 4
-    for (let i = 0; i < 4; i++) ingestRound(state, [actionCall()], 2)
-    expect(state.softWarningIssued).toBe(true)
-    // The 4th round was the one that crossed; we need to inspect that round's output.
-    // Re-run to verify the structure: rebuild a fresh state.
-    const fresh = createBudget()
-    let warningSeen: string | null = null
-    for (let i = 0; i < 4; i++) {
-      const r = ingestRound(fresh, [actionCall()], 2)
-      if (r.softWarningToAppend) warningSeen = r.softWarningToAppend
-    }
-    expect(warningSeen).toBeTruthy()
-    expect(warningSeen).toContain('Soft cap reached')
-    expect(warningSeen).not.toContain('Your original plan was')
-  })
-
-  it('clamps invalid default estimate to >= 1', () => {
-    const state = createBudget()
-    ingestRound(state, [actionCall()], 0)
-    expect(state.estimate).toBe(1)
+    const r = ingestRound(state, [planCall({ count: -1, tasks: ['x'] }), actionCall()])
+    expect(state.estimate).toBeNull()
+    expect(r.planAcks).toHaveLength(1)
+    expect((r.planAcks[0].result as { acknowledged: boolean }).acknowledged).toBe(false)
+    expect(r.actionCalls).toHaveLength(0)
+    expect(r.rejectedForNoPlan).toHaveLength(1)
   })
 
   it('locks plan after first valid declaration; later plan calls are nacked with locked details', () => {
     const state = createBudget()
-    ingestRound(state, [validPlan(5, ['original'])], 3)
-    const r = ingestRound(state, [validPlan(50, ['new plan'])], 3)
+    ingestRound(state, [validPlan(5, ['original'])])
+    const r = ingestRound(state, [validPlan(50, ['new plan'])])
     expect(state.estimate).toBe(5)
     expect(state.plan).toEqual(['original'])
     expect(r.planAcks).toHaveLength(1)
@@ -170,7 +157,7 @@ describe('budgetTracker — ingestRound', () => {
     const cases: Array<unknown> = ['nope', NaN, -3, 0, 0.5, undefined, null]
     for (const value of cases) {
       const state = createBudget()
-      const r = ingestRound(state, [planCall({ count: value, tasks: ['x'] })], 3)
+      const r = ingestRound(state, [planCall({ count: value, tasks: ['x'] })])
       expect(state.estimate).toBeNull()
       expect(state.plan).toBeNull()
       expect(r.planAcks[0].result).toMatchObject({ acknowledged: false })
@@ -191,7 +178,7 @@ describe('budgetTracker — ingestRound', () => {
     ]
     for (const value of cases) {
       const state = createBudget()
-      const r = ingestRound(state, [planCall({ count: 5, tasks: value })], 3)
+      const r = ingestRound(state, [planCall({ count: 5, tasks: value })])
       expect(state.estimate).toBeNull()
       expect((r.planAcks[0].result as { reason: string }).reason).toContain('tasks must be a non-empty array')
     }
@@ -200,7 +187,7 @@ describe('budgetTracker — ingestRound', () => {
   it('coerces a non-empty string `tasks` into a one-element array', () => {
     const state = createBudget()
     const blurb = 'Search news, scan marxist.com, compile digest'
-    const r = ingestRound(state, [planCall({ count: 5, tasks: blurb })], 3)
+    const r = ingestRound(state, [planCall({ count: 5, tasks: blurb })])
     expect(state.estimate).toBe(5)
     expect(state.plan).toEqual([blurb])
     expect(r.planAcks[0].result).toMatchObject({
@@ -212,12 +199,12 @@ describe('budgetTracker — ingestRound', () => {
 
   it('trims a coerced string and nacks if it is whitespace-only', () => {
     const stateOk = createBudget()
-    const r1 = ingestRound(stateOk, [planCall({ count: 3, tasks: '   real task   ' })], 3)
+    const r1 = ingestRound(stateOk, [planCall({ count: 3, tasks: '   real task   ' })])
     expect(stateOk.plan).toEqual(['real task'])
     expect((r1.planAcks[0].result as { acknowledged: boolean }).acknowledged).toBe(true)
 
     const stateBad = createBudget()
-    const r2 = ingestRound(stateBad, [planCall({ count: 3, tasks: '   ' })], 3)
+    const r2 = ingestRound(stateBad, [planCall({ count: 3, tasks: '   ' })])
     expect(stateBad.estimate).toBeNull()
     expect(stateBad.plan).toBeNull()
     expect((r2.planAcks[0].result as { reason: string }).reason).toContain('tasks must be a non-empty array')
@@ -227,8 +214,7 @@ describe('budgetTracker — ingestRound', () => {
     const state = createBudget()
     const r = ingestRound(
       state,
-      [planCall({ count: 3, tasks: ['', '  real task  ', '\t', 'another'] })],
-      5
+      [planCall({ count: 3, tasks: ['', '  real task  ', '\t', 'another'] })]
     )
     expect(state.estimate).toBe(3)
     expect(state.plan).toEqual(['real task', 'another'])
@@ -240,7 +226,7 @@ describe('budgetTracker — ingestRound', () => {
 
   it('floors fractional valid counts (>=1)', () => {
     const state = createBudget()
-    ingestRound(state, [planCall({ count: 7.9, tasks: ['t'] })], 3)
+    ingestRound(state, [planCall({ count: 7.9, tasks: ['t'] })])
     expect(state.estimate).toBe(7)
   })
 
@@ -248,8 +234,7 @@ describe('budgetTracker — ingestRound', () => {
     const state = createBudget()
     const r = ingestRound(
       state,
-      [validPlan(3, ['inline plan']), actionCall(), actionCall()],
-      5
+      [validPlan(3, ['inline plan']), actionCall(), actionCall()]
     )
     expect(state.estimate).toBe(3)
     expect(state.plan).toEqual(['inline plan'])
@@ -264,8 +249,7 @@ describe('budgetTracker — ingestRound', () => {
     // estimate 2 → soft cap 4, hard cap 8
     const r = ingestRound(
       state,
-      [validPlan(2, ['p']), actionCall(), actionCall(), actionCall(), actionCall()],
-      5
+      [validPlan(2, ['p']), actionCall(), actionCall(), actionCall(), actionCall()]
     )
     expect(state.actionToolCalls).toBe(4)
     expect(r.softWarningToAppend).toContain('Soft cap reached')

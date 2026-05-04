@@ -37,6 +37,7 @@ export interface PlanAck {
 export interface RoundIngestion {
   planAcks: PlanAck[]
   actionCalls: ToolCall[]
+  rejectedForNoPlan: ToolCall[]
   hardCapExceeded: { hardCap: number; estimate: number } | null
   softWarningToAppend: string | null
 }
@@ -100,8 +101,7 @@ function parsePlanArgs(call: ToolCall): ParsedPlanArgs {
  */
 export function ingestRound(
   state: BudgetState,
-  collected: ToolCall[],
-  defaultEstimate: number
+  collected: ToolCall[]
 ): RoundIngestion {
   const planCalls: ToolCall[] = []
   const actionCalls: ToolCall[] = []
@@ -157,14 +157,20 @@ export function ingestRound(
   }
 
   if (state.estimate === null && actionCalls.length > 0) {
-    state.estimate = Math.max(1, Math.floor(defaultEstimate))
-    // No plan to recall in fallback mode — state.plan stays null.
+    return {
+      planAcks,
+      actionCalls: [],
+      rejectedForNoPlan: actionCalls,
+      hardCapExceeded: null,
+      softWarningToAppend: null
+    }
   }
 
   if (state.estimate === null) {
     return {
       planAcks,
       actionCalls,
+      rejectedForNoPlan: [],
       hardCapExceeded: null,
       softWarningToAppend: null
     }
@@ -177,6 +183,7 @@ export function ingestRound(
     return {
       planAcks,
       actionCalls,
+      rejectedForNoPlan: [],
       hardCapExceeded: { hardCap: hard, estimate: state.estimate },
       softWarningToAppend: null
     }
@@ -204,6 +211,7 @@ export function ingestRound(
   return {
     planAcks,
     actionCalls,
+    rejectedForNoPlan: [],
     hardCapExceeded: null,
     softWarningToAppend
   }
