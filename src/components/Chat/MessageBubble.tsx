@@ -3,7 +3,7 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { ChevronDown, ChevronUp, Paperclip } from 'lucide-react'
 import type { Attachment, Message, ToolCall } from '@/types'
-import { ToolCallCard, ToolGroupCard } from './ToolCallCard'
+import { ToolCallCard } from './ToolCallCard'
 import {
   MessageActionsBar,
   useCopyAction,
@@ -31,11 +31,10 @@ interface MessageBubbleProps {
   onFork?: () => void
 }
 
-/** A renderable segment: text, a tool call, or a collapsed group of tool calls. */
+/** A renderable segment: either a block of text or a tool call. */
 type Segment =
   | { kind: 'text'; text: string; html: string }
   | { kind: 'tool'; toolCall: ToolCall }
-  | { kind: 'tool-group'; toolCalls: ToolCall[] }
 
 type CollapsedPreviewBlock =
   | { kind: 'text'; content: string }
@@ -45,8 +44,6 @@ const COPY_MESSAGE_SEPARATOR = '\n\n'
 const ASSISTANT_COLLAPSE_MIN_CHARS = 500
 const ASSISTANT_COLLAPSE_PREVIEW_CHARS = 180
 const ASSISTANT_COLLAPSE_PREVIEW_MAX_BLOCKS = 3
-const TOOL_GROUP_MIN_RUN = 3
-const PLAN_TOOL_NAME = 'plan'
 
 function isImageAttachment(attachment: Attachment): attachment is Extract<Attachment, { kind: 'image' }> {
   return attachment.kind === 'image'
@@ -120,42 +117,6 @@ function buildSegments(content: string, toolCalls: ToolCall[]): Segment[] {
   return segments
 }
 
-/**
- * Fold runs of 3+ consecutive non-plan tool calls into a single `tool-group`
- * segment, regardless of whether each call has resolved yet. Pending calls in
- * the group render a gray status dot until they resolve. Runs of 1 or 2 and
- * the `plan` tool are left untouched; plan acts as a run boundary.
- */
-function groupConsecutiveToolCalls(segments: Segment[]): Segment[] {
-  const result: Segment[] = []
-  let run: ToolCall[] = []
-
-  const flushRun = () => {
-    if (run.length === 0) return
-    if (run.length >= TOOL_GROUP_MIN_RUN) {
-      result.push({ kind: 'tool-group', toolCalls: run })
-    } else {
-      for (const tc of run) result.push({ kind: 'tool', toolCall: tc })
-    }
-    run = []
-  }
-
-  for (const seg of segments) {
-    const isGroupable =
-      seg.kind === 'tool' && seg.toolCall.name !== PLAN_TOOL_NAME
-
-    if (isGroupable) {
-      run.push((seg as Extract<Segment, { kind: 'tool' }>).toolCall)
-    } else {
-      flushRun()
-      result.push(seg)
-    }
-  }
-  flushRun()
-
-  return result
-}
-
 function getToolCallPreviewLabel(toolCall: ToolCall): string {
   const hasError = toolCall.result !== undefined
     && typeof toolCall.result === 'object'
@@ -210,7 +171,7 @@ export function MessageBubble({
   }, [message.attachments, message.content, message.role])
 
   const segments = useMemo(
-    () => groupConsecutiveToolCalls(buildSegments(message.content, toolCalls)),
+    () => buildSegments(message.content, toolCalls),
     [message.content, toolCalls]
   )
 
@@ -233,10 +194,6 @@ export function MessageBubble({
     for (const seg of segments) {
       if (seg.kind === 'tool') {
         blocks.push({ kind: 'tool', content: getToolCallPreviewLabel(seg.toolCall) })
-        continue
-      }
-      if (seg.kind === 'tool-group') {
-        blocks.push({ kind: 'tool', content: `[Tools] ${seg.toolCalls.length} calls` })
         continue
       }
 
@@ -509,10 +466,6 @@ export function MessageBubble({
             {segments.map((seg, i) => {
               if (seg.kind === 'tool') {
                 return <ToolCallCard key={seg.toolCall.id} toolCall={seg.toolCall} />
-              }
-              if (seg.kind === 'tool-group') {
-                const groupKey = seg.toolCalls.map((tc) => tc.id).join(':')
-                return <ToolGroupCard key={`group-${groupKey}`} toolCalls={seg.toolCalls} />
               }
 
               // Text segment

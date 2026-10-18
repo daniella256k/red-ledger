@@ -1,5 +1,5 @@
 import { dirname, resolve } from 'path'
-import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync, renameSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync } from 'fs'
 import { resolveWorkspacePath, PathJailError } from './pathJail'
 import { loadGitignoreRules, isIgnoredByGitignore, type GitignoreRule } from './gitignore'
 import { extractPdfTextWithFallback } from './PdfAttachmentService'
@@ -279,61 +279,6 @@ export class WorkspaceService {
     }
 
     writeFileSync(fullPath, content, 'utf-8')
-  }
-
-  async moveFile(
-    dialog: DialogAdapter | null,
-    fromPath: string,
-    toPath: string
-  ): Promise<void> {
-    if (!this.workspacePath) {
-      throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
-    }
-
-    const fromFull = resolveWorkspacePath(this.workspacePath, fromPath)
-    const toFull = resolveWorkspacePath(this.workspacePath, toPath)
-
-    if (!existsSync(fromFull)) {
-      throw new PathJailError('FILE_NOT_FOUND', `Source file not found: ${fromPath}`)
-    }
-
-    if (fromFull === toFull) {
-      throw new PathJailError('INVALID_INPUT', 'Source and destination are the same')
-    }
-
-    const destExists = existsSync(toFull)
-
-    if (dialog) {
-      const settings = this.getSettings()
-      if (destExists) {
-        const confirmed = await dialog.showMessageBox({
-          type: 'warning',
-          buttons: ['Cancel', 'Overwrite'],
-          defaultId: 0,
-          title: 'Overwrite File',
-          message: `Overwrite existing file at: ${toPath}? This cannot be undone.`,
-          detail: toFull
-        })
-        if (confirmed.response === 0) {
-          throw new PathJailError('USER_DENIED', 'User cancelled file overwrite')
-        }
-      } else if (settings.strictMode) {
-        const confirmed = await dialog.showMessageBox({
-          type: 'question',
-          buttons: ['Deny', 'Allow'],
-          defaultId: 0,
-          title: 'File Move Request',
-          message: `The assistant wants to move: ${fromPath} → ${toPath}`,
-          detail: 'Do you want to allow this file move?'
-        })
-        if (confirmed.response === 0) {
-          throw new PathJailError('USER_DENIED', 'User denied file move')
-        }
-      }
-    }
-
-    mkdirSync(dirname(toFull), { recursive: true })
-    renameSync(fromFull, toFull)
   }
 
   async writeBinaryFile(

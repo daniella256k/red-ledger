@@ -1,12 +1,6 @@
 import type { LLMMessage, AbortHandle, LLMMessageContent, ToolDefinition } from '../lib/providers/base'
 import { createProvider } from '../lib/providers/registry'
 import { getToolDefinitions } from '../lib/tools/registry'
-import {
-  createBudget,
-  ingestRound,
-  attachSoftWarning,
-  PLAN_TOOL_NAME
-} from '../lib/budget/budgetTracker'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
 import { createHash } from 'node:crypto'
 import type {
@@ -26,20 +20,13 @@ import '../lib/providers/openrouter'
 import '../lib/providers/ollama'
 import '../lib/providers/lmstudio'
 
+const DEFAULT_MAX_TOOL_CALLS = 25
 const DEFAULT_TITLE_MAX_TOKENS = 24
-
-const PLAN_PROTOCOL_PROMPT = `## Planning Protocol
-
-When you need to use tools, first call \`plan(count, tasks)\` to declare the
-steps you intend to take and an honest estimate of how many tool calls they
-will need. This keeps you on task and sets the per-turn tool-call budget.
-
-Sizing guide: simple lookup 1-3, multi-step task 5-8, larger exploration or refactor 10-25+.`
 const TITLE_TEMPERATURE = 0.2
 const SEARCH_TOOLS_REQUIRING_API_KEYS = new Set(['web_search', 'org_search'])
 const ORG_SEARCH_TOOL_NAME = 'org_search'
 const TITLE_GENERATION_SYSTEM_PROMPT =
-  'Generate a concise chat title for the provided user prompt. Return only the title text in 2 to 6 words. No reasoning, no markdown, and no trailing punctuation.'
+  'Generate a concise chat title for the provided user prompt. Return only the title text in 2 to 6 words. No reasoning, no prefix, no quotes, no markdown, and no trailing punctuation.'
 
 function buildTitleGenerationExtraBody(provider: ProviderName): Record<string, unknown> | undefined {
   if (provider !== 'openrouter') return undefined
@@ -278,12 +265,8 @@ export class LlmService {
     // Build the conversation history in LLMMessage format
     const messages: LLMMessage[] = []
 
-    // System message first — prepend the tool-call budget protocol so the model
-    // knows about declare_estimate regardless of the user's profile system.md.
-    messages.push({
-      role: 'system',
-      content: `${PLAN_PROTOCOL_PROMPT}\n\n${systemPrompt}`
-    })
+    // System message first
+    messages.push({ role: 'system', content: systemPrompt })
 
     // Append conversation messages from the request, injecting system timestamps
     // into user messages so the LLM always has accurate real-time context
@@ -304,11 +287,13 @@ export class LlmService {
       settings.searchToolsEnabled || !SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name)
     )
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
-    const budget = createBudget()
+    const maxToolCalls = Number.isFinite(settings.maxToolCalls)
+      ? Math.max(1, Math.floor(settings.maxToolCalls))
+      : DEFAULT_MAX_TOOL_CALLS
+    let totalToolCalls = 0
 
     while (true) {
       const collectedToolCalls: ToolCall[] = []
-      const bufferedToolCallChunks: StreamChunk[] = []
       let textAccumulated = ''
 
       const streamDone = await new Promise<'done' | 'tool_calls' | 'error'>((resolve) => {
@@ -334,7 +319,7 @@ export class LlmService {
                 if (chunk.toolCall) {
                   collectedToolCalls.push(chunk.toolCall)
                 }
-                bufferedToolCallChunks.push(chunk)
+                sink.send(chunk)
                 break
 
               case 'error':
@@ -365,20 +350,18 @@ export class LlmService {
         return
       }
 
-      // streamDone === 'tool_calls' — apply per-turn budget, then execute.
-      const round = ingestRound(budget, collectedToolCalls)
-
-      // Flush buffered tool_call chunks, suppressing any that will be silently
-      // rejected for arriving before a plan was declared.
-      const rejectedIds = new Set(round.rejectedForNoPlan.map((tc) => tc.id))
-      for (const chunk of bufferedToolCallChunks) {
-        if (chunk.toolCall && rejectedIds.has(chunk.toolCall.id)) continue
-        sink.send(chunk)
+      // streamDone === 'tool_calls' — execute each tool and loop
+      if (totalToolCalls + collectedToolCalls.length > maxToolCalls) {
+        sink.send({
+          type: 'error',
+          error: `Maximum tool calls (${maxToolCalls}) exceeded. The assistant may be stuck in a loop.`
+        })
+        sink.send({ type: 'done' })
+        return
       }
+      totalToolCalls += collectedToolCalls.length
 
-      // Always append the assistant message with the model's full tool_calls
-      // (including any declare_estimate calls) so the conversation matches what
-      // the model actually emitted.
+      // Append the assistant's response (with tool_calls) to the conversation
       const assistantMessage: LLMMessage = {
         role: 'assistant',
         content: textAccumulated || null,
@@ -393,50 +376,9 @@ export class LlmService {
       }
       messages.push(assistantMessage)
 
-      // Synthesize tool_result for plan calls (never dispatched through the registry).
-      for (const ack of round.planAcks) {
-        const executed = { ...ack.call, result: ack.result }
-        sink.send({ type: 'tool_result', toolCall: executed })
-        messages.push({
-          role: 'tool',
-          content: JSON.stringify(ack.result),
-          tool_call_id: ack.call.id
-        })
-      }
-
-      // Silently reject any action calls that arrived before a plan was declared.
-      // The error is fed back to the model so it can self-correct, but nothing
-      // is emitted to the renderer — these calls are invisible to the user.
-      for (const tc of round.rejectedForNoPlan) {
-        const errorResult = {
-          error: 'You must call plan() before making any tool calls. Declare your plan and estimated tool count first, then proceed with your tool calls.',
-          code: 'PLAN_REQUIRED'
-        }
-        messages.push({
-          role: 'tool',
-          content: JSON.stringify(errorResult),
-          tool_call_id: tc.id
-        })
-      }
-
-      if (round.hardCapExceeded) {
-        const { hardCap, estimate } = round.hardCapExceeded
-        sink.send({
-          type: 'error',
-          error:
-            `Hard cap of ${hardCap} tool calls exceeded for this turn ` +
-            `(declared estimate was ${estimate}). The assistant may be stuck in a loop. ` +
-            `You can take another turn — the count resets per user message.`
-        })
-        sink.send({ type: 'done' })
-        return
-      }
-
-      // Execute each (non-estimate) tool call and collect results.
-      const lastIndex = round.actionCalls.length - 1
-      for (let i = 0; i < round.actionCalls.length; i++) {
-        const tc = round.actionCalls[i]
-        const executed = availableToolNames.has(tc.name) && tc.name !== PLAN_TOOL_NAME
+      // Execute each tool call and collect results
+      for (const tc of collectedToolCalls) {
+        const executed = availableToolNames.has(tc.name)
           ? await toolExecutor(tc)
           : {
             ...tc,
@@ -447,12 +389,6 @@ export class LlmService {
               code: 'PERMISSION_DENIED'
             }
           }
-
-        // If the soft cap was crossed this round, attach the warning to the
-        // last action result so the model sees it on its next turn.
-        if (round.softWarningToAppend && i === lastIndex) {
-          executed.result = attachSoftWarning(executed.result, round.softWarningToAppend)
-        }
 
         // Send tool result chunk to renderer
         sink.send({ type: 'tool_result', toolCall: executed })

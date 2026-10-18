@@ -7,11 +7,9 @@ import type {
 } from '../../src/types'
 
 const DEFAULT_FALLBACK_MODEL = 'moonshotai/kimi-k2.5'
-// `maxToolCalls` is the per-turn fallback estimate used when the model omits
-// `declare_estimate`. Soft cap = ceil(value * 1.5), hard cut = value * 4.
-const DEFAULT_MAX_TOOL_CALLS = 5
+const DEFAULT_MAX_TOOL_CALLS = 25
 const MIN_MAX_TOOL_CALLS = 1
-const MAX_MAX_TOOL_CALLS = 100
+const MAX_MAX_TOOL_CALLS = 25
 
 const DEFAULT_SETTINGS: Settings = {
   activeProvider: 'openrouter',

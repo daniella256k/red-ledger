@@ -156,53 +156,6 @@
     @apply bg-error/10 text-error;
   }
 
-  /* Plan Card (specialized tool card for the `plan` tool) */
-  .plan-card {
-    @apply border border-weathered rounded-card overflow-hidden bg-base-100;
-  }
-
-  .plan-card-header {
-    @apply px-3 py-2 text-sm font-medium flex items-center justify-between
-           cursor-pointer select-none text-soft-charcoal;
-  }
-
-  .plan-card-list {
-    @apply border-t border-weathered/60 bg-base-200/40 px-3 py-2 space-y-1;
-  }
-
-  .plan-card-task {
-    @apply flex items-start gap-2 text-sm leading-snug text-soft-charcoal;
-  }
-
-  .plan-card-task-bullet {
-    @apply text-soft-charcoal/45 mt-[2px] select-none;
-  }
-
-  /* Tool Group Card (collapses runs of 3+ resolved tool calls) */
-  .tool-group-card {
-    @apply border border-weathered rounded-card overflow-hidden;
-  }
-
-  .tool-group-header {
-    @apply bg-base-200 px-3 py-1.5 text-sm flex items-center gap-2
-           cursor-pointer select-none;
-  }
-
-  .tool-group-chip-row {
-    @apply flex-1 flex flex-wrap items-center gap-1.5 min-w-0;
-  }
-
-  .tool-group-chip {
-    @apply inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full
-           bg-base-100 border border-weathered/70 font-mono text-[10px]
-           text-soft-charcoal hover:border-weathered transition-colors
-           cursor-pointer whitespace-nowrap;
-  }
-
-  .tool-group-chip-dot {
-    @apply w-1.5 h-1.5 rounded-full shrink-0;
-  }
-
   /* Editor Container */
   .editor-container {
     @apply border border-weathered rounded-card overflow-hidden;

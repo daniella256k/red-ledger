@@ -4,13 +4,11 @@ import { dispatchTool } from './registry'
 import { PathJailError } from '../../services/pathJail'
 
 // Side-effect imports: each tool self-registers when loaded
-import './plan'
 import './readFile'
 import './writeFile'
 import './writePdf'
 import './appendFile'
 import './editFile'
-import './moveFile'
 import './listFiles'
 import './grepFiles'
 import './webSearch'
