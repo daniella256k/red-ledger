@@ -10,7 +10,8 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 - Tool calling for local file ops + web/wiki/url tools (up to 75 tool calls per turn, with check-in nudges to the model at 25, 40, and 50).
 - Workspace jail for file safety, with optional strict confirmation mode.
 - 3 persistent context files (`system`, `user`, `org`) injected into every run.
-- Text file attachments of any kind: plain text, code, config, and markup (`.py`, `.yaml`, `.json`, `.xml`, `.css`, `Dockerfile`, ...) are detected by content, no renaming needed. PDF text extraction included.
+- Text file attachments of any kind: plain text, code, config, and markup (`.py`, `.yaml`, `.json`, `.xml`, `.css`, `Dockerfile`, ...) are detected by content, no renaming needed. PDF and Word (`.doc`, `.docx`) text extraction included.
+- Spreadsheet attachments: Excel (`.xlsx`, `.xlsm`, `.xlsb`, `.xls`), OpenDocument (`.ods`), Apple Numbers and older formats are converted to CSV per sheet, with cell ranges, hyperlinks (as Markdown links), formulas and named ranges. `.csv` and `.tsv` attach as-is.
 - Image file attachments from `.png`, `.jpeg/.jpg`, `.webp`, and `.gif` for vision capable models.
 - Local SQLite conversation history with retry/copy message actions.
 - Favorite models: star models in Settings for one-click switching.
@@ -107,10 +108,13 @@ red-ledger/
 |   |   |-- AttachmentService.ts
 |   |   |-- ConversationService.ts
 |   |   |-- ContextService.ts
+|   |   |-- DocumentTextService.ts   # PDF/Word/spreadsheet text extraction dispatch
 |   |   |-- LlmService.ts
 |   |   |-- PdfAttachmentService.ts
 |   |   |-- SearchService.ts
 |   |   |-- SettingsService.ts
+|   |   |-- SpreadsheetAttachmentService.ts
+|   |   |-- WordAttachmentService.ts
 |   |   `-- WorkspaceService.ts
 |   `-- lib/
 |       |-- providers/               # openai/openrouter/ollama/lmstudio

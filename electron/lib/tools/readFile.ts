@@ -15,7 +15,7 @@ registerTool({
     type: 'function',
     function: {
       name: 'read_file',
-      description: 'Read a file in the user\'s workspace. For PDF files, returns the extracted text. '
+      description: 'Read a file in the user\'s workspace. For PDF and Word files, returns the extracted text; for spreadsheets (.xlsx, .xls, .ods, ...), returns each sheet as CSV with its cell range (hyperlinked cells as [text](url)), followed by its formulas. '
         + `Small files come back whole. Files over ${READ_FILE_MAX_LINES} lines come back one page at a time with truncated: true and next_offset; call again with that offset to continue. `
         + 'Pass offset/limit to read a specific range: those lines are prefixed with "N | " (the prefix is not part of the file, so leave it out of edit_file strings). total_lines is always included. In Strict Mode the user is asked first; if they decline, the result is an error with code USER_DENIED.',
       parameters: {

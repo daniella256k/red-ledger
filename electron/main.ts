@@ -7,6 +7,7 @@ import {
   IMAGE_MIME_BY_EXTENSION,
   parseAttachmentPaths
 } from './services/AttachmentService'
+import { EXTRACTED_DOCUMENT_EXTENSIONS } from './services/DocumentTextService'
 import { APP_NAME } from '../src/lib/appInfo'
 import { resolveSettingsPath, resolveDbPath } from './services/SettingsService'
 import { registerDbHandlers, getConversationService } from './ipc/db'
@@ -414,10 +415,10 @@ function registerIpcHandlers(): void {
       title: 'Attach Files',
       filters: [
         {
-          name: 'Text, Code, PDF, Images',
+          name: 'Text, Code, Documents, Spreadsheets, Images',
           extensions: [
             ...COMMON_TEXT_EXTENSIONS,
-            'pdf',
+            ...EXTRACTED_DOCUMENT_EXTENSIONS,
             ...Object.keys(IMAGE_MIME_BY_EXTENSION).map((extension) => extension.slice(1))
           ]
         },

@@ -1,13 +1,14 @@
 import { readFileSync, statSync } from 'fs'
 import { basename, extname } from 'path'
-import { extractPdfTextWithFallback } from './PdfAttachmentService'
+import { DocumentExtractionError, extractDocumentText } from './DocumentTextService'
 import type { Attachment, AttachmentParseResult, ImageAttachmentMimeType } from '../../src/types'
 
 /**
  * Attachment parsing for files picked in the dialog or dropped on the chat.
  *
- * Images and PDFs are recognized by extension. Everything else is accepted
- * as long as the content is text, so scripts, configs and markup files
+ * Images, PDFs, Word files and spreadsheets are recognized by extension;
+ * documents are reduced to their extracted text (spreadsheets as CSV per
+ * sheet). Everything else is accepted as long as the content is text, so scripts, configs and markup files
  * (.py, .yaml, .json, .xml, .css, Dockerfile, .env, ...) attach without
  * renaming them to .txt.
  */
@@ -108,12 +109,9 @@ export async function parseAttachmentFile(filePath: string): Promise<Attachment>
     }
   }
 
-  if (extension === '.pdf') {
-    return {
-      kind: 'text',
-      name: fileName,
-      content: await extractPdfTextWithFallback(filePath)
-    }
+  const documentText = await extractDocumentText(filePath)
+  if (documentText !== null) {
+    return { kind: 'text', name: fileName, content: documentText }
   }
 
   if (statSync(filePath).size > MAX_TEXT_ATTACHMENT_BYTES) {
@@ -143,7 +141,9 @@ export async function parseAttachmentPaths(filePaths: string[]): Promise<Attachm
       const attachment = await parseAttachmentFile(filePath)
       return { ok: true as const, attachment }
     } catch (err) {
-      const reason = err instanceof AttachmentError ? err.message : 'could not be read'
+      const reason = err instanceof AttachmentError || err instanceof DocumentExtractionError
+        ? err.message
+        : 'could not be read'
       return { ok: false as const, name: `${basename(filePath)} (${reason})` }
     }
   }))

@@ -85,8 +85,8 @@ export function ChatPanel() {
     const droppedFiles = Array.from(event.dataTransfer.files)
     if (droppedFiles.length === 0) return
 
-    // The main process decides what is supported: images, PDFs, and any
-    // file whose content is text (code, config, markup, ...).
+    // The main process decides what is supported: images, PDFs, Word files,
+    // spreadsheets, and any file whose content is text (code, config, markup, ...).
     setIsParsingDrop(true)
     try {
       const result = await window.redLedger.parseAttachmentFiles(droppedFiles)
@@ -127,7 +127,7 @@ export function ChatPanel() {
               {isParsingDrop ? 'Attaching files...' : 'Drop files to attach to your next message'}
             </p>
             <p className="mt-1 text-xs text-soft-charcoal/55">
-              Text and code files (.py, .yaml, .json, .xml, ...), PDFs, and images
+              Text and code files, PDFs, Word documents, spreadsheets, and images
             </p>
           </div>
         </div>

@@ -275,7 +275,7 @@ export function ChatInput({
               onClick={handleAttach}
               disabled={isDisabled}
               className="btn btn-ghost btn-sm h-10 w-10 min-w-[40px] p-0 shrink-0 text-soft-charcoal/50 hover:text-soft-charcoal"
-              title="Attach files: text and code (.py, .yaml, .json, .xml, ...), PDFs, or images. You can also paste an image into the message box."
+              title="Attach files: text and code (.py, .yaml, .json, .xml, ...), PDFs, Word documents, spreadsheets (.xlsx, .xls, .ods, .csv, ...), or images. You can also paste an image into the message box."
             >
               <Paperclip size={16} />
             </button>
