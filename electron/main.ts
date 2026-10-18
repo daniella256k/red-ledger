@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu } from 'electron'
+import { app, BrowserWindow, dialog, Menu, shell } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
 import { join } from 'path'
 import { readFileSync } from 'fs'
@@ -125,6 +125,28 @@ function setApplicationMenu(): void {
   Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate))
 }
 
+const EXTERNAL_URL_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
+
+function openExternalUrl(url: string): void {
+  try {
+    if (!EXTERNAL_URL_PROTOCOLS.has(new URL(url).protocol)) return
+  } catch {
+    return
+  }
+  void shell.openExternal(url)
+}
+
+function isSameAppUrl(currentUrl: string, targetUrl: string): boolean {
+  try {
+    const current = new URL(currentUrl)
+    const target = new URL(targetUrl)
+    if (current.protocol === 'file:') return target.protocol === 'file:' && current.pathname === target.pathname
+    return current.origin === target.origin
+  } catch {
+    return false
+  }
+}
+
 // ─── Single Instance Lock ────────────────────────────────────────────────────
 
 const gotLock = app.requestSingleInstanceLock()
@@ -178,6 +200,19 @@ function createWindow(): void {
 
   mainWindow.webContents.on('did-finish-load', () => {
     mainWindow?.setTitle(APP_WINDOW_TITLE)
+  })
+
+  // ─── External links open in the default browser, never in-app ────────────
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalUrl(url)
+    return { action: 'deny' }
+  })
+
+  mainWindow.webContents.on('will-navigate', (event, url) => {
+    const currentUrl = mainWindow?.webContents.getURL() ?? ''
+    if (isSameAppUrl(currentUrl, url)) return
+    event.preventDefault()
+    openExternalUrl(url)
   })
 
   // Load the app

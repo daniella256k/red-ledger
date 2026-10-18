@@ -3,10 +3,13 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
 import type { Tool } from '@modelcontextprotocol/sdk/types.js'
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import { StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import {
   McpService,
   flattenMcpToolResult,
   resolveStdioLaunch,
+  shouldFallBackToSse,
   MAX_MCP_RESULT_CHARS
 } from '../McpService'
 import type { ToolEntry } from '../../lib/tools/registry'
@@ -394,6 +397,137 @@ describe('McpService tool calls', () => {
       await registry.get('everything__echo')!.execute({ message: 'a' }, null)
       expect(dialog.showMessageBox).not.toHaveBeenCalled()
     })
+  })
+})
+
+// ─── Legacy SSE fallback ────────────────────────────────────────────────────
+
+/** Stands in for a Streamable HTTP transport whose initialize POST gets an HTTP error. */
+class RejectingHttpTransport implements Transport {
+  onclose?: () => void
+  onerror?: (error: Error) => void
+  onmessage?: Transport['onmessage']
+  closed = false
+
+  constructor(private status: number) {}
+
+  async start(): Promise<void> {}
+
+  async send(): Promise<void> {
+    throw new StreamableHTTPError(this.status, `Error POSTing to endpoint: HTTP ${this.status}`)
+  }
+
+  async close(): Promise<void> {
+    this.closed = true
+    this.onclose?.()
+  }
+}
+
+function remoteServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig {
+  return {
+    id: 'remote-1',
+    name: 'Remote',
+    transport: 'http',
+    url: 'https://example.com/mcp',
+    headers: { Authorization: 'Bearer t' },
+    enabled: true,
+    ...overrides
+  }
+}
+
+/**
+ * Remote server fake: Streamable HTTP attempts fail with `streamableStatus`,
+ * legacy SSE attempts fail with `sseStatus` or reach a real in-memory server.
+ */
+function setupRemote(options: { streamableStatus?: number; sseStatus?: number } = {}) {
+  const base = setup()
+  const realCreate = base.factory.createTransport
+  const rejected: RejectingHttpTransport[] = []
+  const createTransport = vi.fn((config: McpServerConfig, _onStderr: unknown, { legacySse }: { legacySse: boolean }) => {
+    const status = legacySse ? options.sseStatus : options.streamableStatus
+    if (status !== undefined) {
+      const transport = new RejectingHttpTransport(status)
+      rejected.push(transport)
+      return transport
+    }
+    return realCreate(config)
+  })
+
+  const service = new McpService({
+    getSettings: () => base.settings,
+    getDialog: () => null,
+    registerTool: (entry) => base.registry.set(entry.definition.function.name, entry),
+    unregisterTool: (name) => base.registry.delete(name),
+    createTransport
+  })
+  return { service, registry: base.registry, createTransport, rejected }
+}
+
+describe('McpService legacy SSE fallback', () => {
+  it('retries a remote server over legacy SSE when Streamable HTTP is rejected', async () => {
+    const { service, registry, createTransport, rejected } = setupRemote({ streamableStatus: 405 })
+    activeService = service
+    service.applyServers([remoteServer()])
+
+    await waitForState(service, 'remote-1', 'connected')
+    expect(createTransport.mock.calls.map((call) => call[2])).toEqual([{ legacySse: false }, { legacySse: true }])
+    expect(rejected[0].closed).toBe(true)
+    expect([...registry.keys()].sort()).toEqual(['remote__echo', 'remote__fail'])
+
+    const result = await registry.get('remote__echo')!.execute({ message: 'over sse' }, null)
+    expect(result).toEqual({ content: 'echo: over sse' })
+  })
+
+  it('stays connected after the rejected first attempt closes', async () => {
+    const { service } = setupRemote({ streamableStatus: 404 })
+    activeService = service
+    service.applyServers([remoteServer()])
+    await waitForState(service, 'remote-1', 'connected')
+
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(service.getStatuses()[0]).toEqual({ id: 'remote-1', state: 'connected', toolCount: 2 })
+  })
+
+  it('does not fall back on auth errors', async () => {
+    const { service, createTransport } = setupRemote({ streamableStatus: 401 })
+    activeService = service
+    service.applyServers([remoteServer()])
+
+    await waitForState(service, 'remote-1', 'error')
+    expect(createTransport).toHaveBeenCalledTimes(1)
+    expect(service.getStatuses()[0].error).toMatch(/HTTP 401/)
+  })
+
+  it('reports both errors when legacy SSE fails too', async () => {
+    const { service, createTransport } = setupRemote({ streamableStatus: 404, sseStatus: 404 })
+    activeService = service
+    service.applyServers([remoteServer()])
+
+    await waitForState(service, 'remote-1', 'error')
+    expect(createTransport).toHaveBeenCalledTimes(2)
+    expect(service.getStatuses()[0].error).toMatch(/HTTP 404\nLegacy SSE also failed: .*HTTP 404$/)
+  })
+
+  it('never tries SSE for local commands', async () => {
+    const { service, createTransport } = setupRemote()
+    activeService = service
+    service.applyServers([stdioServer()])
+
+    await waitForState(service, 'srv-1', 'connected')
+    expect(createTransport).toHaveBeenCalledTimes(1)
+    expect(createTransport.mock.calls[0][2]).toEqual({ legacySse: false })
+  })
+})
+
+describe('shouldFallBackToSse', () => {
+  it('falls back on 4xx responses other than auth failures', () => {
+    for (const code of [400, 404, 405]) expect(shouldFallBackToSse(new StreamableHTTPError(code, 'x'))).toBe(true)
+    for (const code of [401, 403, 500, -1]) expect(shouldFallBackToSse(new StreamableHTTPError(code, 'x'))).toBe(false)
+  })
+
+  it('ignores errors that are not HTTP responses', () => {
+    expect(shouldFallBackToSse(new Error('fetch failed'))).toBe(false)
+    expect(shouldFallBackToSse(new StreamableHTTPError(undefined, 'x'))).toBe(false)
   })
 })
 

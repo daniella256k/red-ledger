@@ -3,7 +3,8 @@ import { homedir } from 'os'
 import { extname } from 'path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
+import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
+import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
 import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import type { ToolDefinition, ToolParametersSchema } from '../lib/providers/base'
@@ -169,6 +170,17 @@ export function toToolDefinition(qualifiedName: string, tool: Tool, serverName: 
   }
 }
 
+/**
+ * Whether a failed Streamable HTTP connect looks like a server that only
+ * speaks the older HTTP+SSE transport. Those reject the initialize POST with
+ * a 4xx (usually 404 or 405). Auth failures are real errors, not a hint to
+ * switch transports.
+ */
+export function shouldFallBackToSse(err: unknown): boolean {
+  if (!(err instanceof StreamableHTTPError) || typeof err.code !== 'number') return false
+  return err.code >= 400 && err.code < 500 && err.code !== 401 && err.code !== 403
+}
+
 function describeConnectError(err: unknown, config: McpServerConfig, stderrTail: string[]): string {
   const error = err as NodeJS.ErrnoException | undefined
   let message = error instanceof Error ? error.message : String(err)
@@ -209,8 +221,15 @@ export interface McpServiceDeps {
   registerTool: (entry: ToolEntry) => void
   unregisterTool: (name: string) => void
   onStatusChange?: (statuses: McpServerStatus[]) => void
-  /** Override for tests; defaults to the real stdio / Streamable HTTP transports. */
-  createTransport?: (config: McpServerConfig, onStderr: (chunk: string) => void) => Transport
+  /**
+   * Override for tests; defaults to the real stdio / Streamable HTTP transports.
+   * `legacySse` is set on the retry for remote servers that only speak HTTP+SSE.
+   */
+  createTransport?: (
+    config: McpServerConfig,
+    onStderr: (chunk: string) => void,
+    options: { legacySse: boolean }
+  ) => Transport
 }
 
 /**
@@ -322,14 +341,20 @@ export class McpService {
     return out
   }
 
-  private createTransport(config: McpServerConfig, onStderr: (chunk: string) => void): Transport {
-    if (this.deps.createTransport) return this.deps.createTransport(config, onStderr)
+  private createTransport(
+    config: McpServerConfig,
+    onStderr: (chunk: string) => void,
+    legacySse: boolean
+  ): Transport {
+    if (this.deps.createTransport) return this.deps.createTransport(config, onStderr, { legacySse })
 
     if (config.transport === 'http') {
       if (!config.url) throw new Error('No URL set for this connection.')
-      return new StreamableHTTPClientTransport(new URL(config.url), {
-        requestInit: config.headers ? { headers: config.headers } : undefined
-      })
+      // The SSE transport sends requestInit headers on both the event stream and its POSTs.
+      const options = { requestInit: config.headers ? { headers: config.headers } : undefined }
+      return legacySse
+        ? new SSEClientTransport(new URL(config.url), options)
+        : new StreamableHTTPClientTransport(new URL(config.url), options)
     }
 
     if (!config.command) throw new Error('No command set for this connection.')
@@ -363,23 +388,22 @@ export class McpService {
     }
 
     try {
-      const transport = this.createTransport(config, onStderr)
-      connection.transport = transport
-      const client = new Client(CLIENT_INFO, {
-        capabilities: {},
-        listChanged: {
-          tools: {
-            autoRefresh: false,
-            onChanged: () => {
-              void this.refreshTools(connection)
-            }
-          }
+      let client: Client
+      try {
+        client = await this.openClient(connection, onStderr, false)
+      } catch (err) {
+        if (connection.retired || config.transport !== 'http' || !shouldFallBackToSse(err)) throw err
+        // Older remote servers only speak HTTP+SSE; try that before giving up.
+        await this.closeTransport(connection)
+        if (connection.retired) return
+        try {
+          client = await this.openClient(connection, onStderr, true)
+        } catch (sseErr) {
+          const first = err instanceof Error ? err.message : String(err)
+          const second = sseErr instanceof Error ? sseErr.message : String(sseErr)
+          throw new Error(`${first}\nLegacy SSE also failed: ${second}`)
         }
-      })
-      connection.client = client
-      client.onclose = () => this.handleUnexpectedClose(connection)
-
-      await client.connect(transport)
+      }
       if (connection.retired) return
 
       connection.tools = await this.listAllTools(client)
@@ -396,6 +420,35 @@ export class McpService {
       void this.closeTransport(connection)
     }
     this.emitStatus()
+  }
+
+  /** Create a transport + client for one connection attempt and run the initialize handshake. */
+  private async openClient(
+    connection: Connection,
+    onStderr: (chunk: string) => void,
+    legacySse: boolean
+  ): Promise<Client> {
+    const transport = this.createTransport(connection.config, onStderr, legacySse)
+    connection.transport = transport
+    const client = new Client(CLIENT_INFO, {
+      capabilities: {},
+      listChanged: {
+        tools: {
+          autoRefresh: false,
+          onChanged: () => {
+            void this.refreshTools(connection)
+          }
+        }
+      }
+    })
+    connection.client = client
+    // A failed first attempt closes later; only the current client's close counts.
+    client.onclose = () => {
+      if (connection.client === client) this.handleUnexpectedClose(connection)
+    }
+
+    await client.connect(transport)
+    return client
   }
 
   private async listAllTools(client: Client): Promise<Tool[]> {
