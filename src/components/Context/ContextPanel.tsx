@@ -20,8 +20,12 @@ export function ContextPanel() {
   const applyProfileState = useContextProfileStore((s) => s.applyProfileState)
   const profileState = { profiles, activeProfileId }
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
+  // The profile the chat on screen uses; for the unsaved New Chat draft, the
+  // one it was left set to.
   const conversationProfileId = useConversationStore((s) =>
-    s.conversations.find((c) => c.id === s.activeConversationId)?.profileId ?? null
+    s.activeConversationId === null
+      ? s.draft?.profileId ?? null
+      : s.conversations.find((c) => c.id === s.activeConversationId)?.profileId ?? null
   )
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(true)
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false)
@@ -65,6 +69,7 @@ export function ContextPanel() {
 
   // Switching chats restores the profile that chat was started with, so the
   // selector and editors show the context its system prompt is built from.
+  // Returning to the New Chat draft restores the profile it was set to.
   // Chats from before per-chat profiles (null), or whose profile was deleted,
   // keep whatever is selected; the main process falls back the same way.
   useEffect(() => {
@@ -100,10 +105,12 @@ export function ContextPanel() {
       setIsUpdatingProfile(true)
       const next = await window.redLedger.setActiveContextProfile(profileId)
       applyProfileState(next)
-      // Picking a profile while in a chat moves that chat to it; with no chat
-      // open it only sets the profile new chats start with.
+      // Picking a profile while in a chat moves that chat to it; in the New
+      // Chat view it sets the draft's profile, which new chats start with.
       if (activeConversationId) {
         await useConversationStore.getState().setConversationProfile(activeConversationId, profileId)
+      } else {
+        useConversationStore.getState().setDraftProfile(profileId)
       }
     } catch (err) {
       useUIStore.getState().addToast({

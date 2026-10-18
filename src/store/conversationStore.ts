@@ -1,7 +1,8 @@
 import { create } from 'zustand'
-import type { Conversation, Message } from '@/types'
+import type { Attachment, Conversation, Message } from '@/types'
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
+import { useContextProfileStore } from './contextProfileStore'
 
 function sortConversationsByPriority(conversations: Conversation[]): Conversation[] {
   return [...conversations].sort((a, b) => {
@@ -11,11 +12,32 @@ function sortConversationsByPriority(conversations: Conversation[]): Conversatio
   })
 }
 
+/** What is typed into the message box but not sent yet. */
+export interface ComposerContent {
+  input: string
+  attachments: Attachment[]
+}
+
+/**
+ * The one unsaved New Chat. It is not in the database: it becomes a real chat
+ * on its first send, and closing the app discards it. While you look at other
+ * chats it keeps what was typed for it and the profile it was set to.
+ */
+export interface ChatDraft extends ComposerContent {
+  profileId: string | null
+}
+
+const EMPTY_COMPOSER: ComposerContent = { input: '', attachments: [] }
+
 interface ConversationState {
   conversations: Conversation[]
+  // null means the New Chat view (the draft, or the empty start screen) is on screen.
   activeConversationId: string | null
   messages: Message[]
   isLoadingMessages: boolean
+  draft: ChatDraft | null
+  // The message box for a saved chat. It starts empty each time you open a chat.
+  chatComposer: ComposerContent
 
   loadConversations: () => Promise<void>
   searchConversations: (query: string) => Promise<void>
@@ -32,6 +54,51 @@ interface ConversationState {
   touchConversation: (id: string, updatedAt?: number) => void
   updateMessage: (id: string, data: Partial<Message>) => void
   deleteMessagesFrom: (messageId: string) => Promise<void>
+
+  openDraft: () => Promise<void>
+  discardDraft: () => void
+  setDraftProfile: (profileId: string) => void
+  setComposerInput: (input: string) => void
+  addComposerAttachments: (attachments: Attachment[]) => void
+  removeComposerAttachment: (index: number) => void
+  clearComposer: () => void
+}
+
+/** The message box contents for whatever is on screen. */
+export function selectComposer(state: Pick<ConversationState, 'activeConversationId' | 'draft' | 'chatComposer'>): ComposerContent {
+  if (state.activeConversationId !== null) return state.chatComposer
+  return state.draft ?? EMPTY_COMPOSER
+}
+
+function currentProfileId(): string | null {
+  return useContextProfileStore.getState().activeProfileId ?? null
+}
+
+/**
+ * State changes for putting a different chat (or the New Chat view, for null)
+ * on screen. Leaving the New Chat view remembers the draft's profile, so it
+ * can be put back on return; a saved chat always opens with an empty box.
+ */
+function switchTo(state: ConversationState, nextId: string | null): Partial<ConversationState> {
+  if (nextId === state.activeConversationId) return { activeConversationId: nextId }
+  const leavingDraft = state.activeConversationId === null && state.draft !== null
+  return {
+    activeConversationId: nextId,
+    chatComposer: EMPTY_COMPOSER,
+    ...(leavingDraft ? { draft: { ...state.draft!, profileId: currentProfileId() } } : {})
+  }
+}
+
+/** Applies a change to the message box on screen, creating the draft if it is the New Chat view's. */
+function updateComposer(
+  state: ConversationState,
+  change: (content: ComposerContent) => ComposerContent
+): Partial<ConversationState> {
+  if (state.activeConversationId !== null) {
+    return { chatComposer: change(state.chatComposer) }
+  }
+  const draft = state.draft ?? { ...EMPTY_COMPOSER, profileId: currentProfileId() }
+  return { draft: { ...draft, ...change(draft) } }
 }
 
 export const useConversationStore = create<ConversationState>((set, get) => ({
@@ -39,6 +106,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   activeConversationId: null,
   messages: [],
   isLoadingMessages: false,
+  draft: null,
+  chatComposer: EMPTY_COMPOSER,
 
   loadConversations: async () => {
     if (!window.redLedger) return
@@ -68,10 +137,13 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     if (!window.redLedger) throw new Error('API not available')
     try {
       const conversation = await window.redLedger.createConversation(partial ?? {})
+      // This is the draft's first send, so the draft becomes this chat.
       set((state) => ({
         conversations: sortConversationsByPriority([conversation, ...state.conversations]),
         activeConversationId: conversation.id,
-        messages: []
+        messages: [],
+        draft: null,
+        chatComposer: EMPTY_COMPOSER
       }))
       return conversation
     } catch (err) {
@@ -93,12 +165,12 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         window.redLedger.listMessages(forkedConversation.id)
       ])
 
-      set({
+      set((state) => ({
+        ...switchTo(state, forkedConversation.id),
         conversations: sortConversationsByPriority(conversations),
-        activeConversationId: forkedConversation.id,
         messages,
         isLoadingMessages: false
-      })
+      }))
     } catch (err) {
       notify({ type: 'error', message: formatError(err) })
       throw err
@@ -111,8 +183,8 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       await window.redLedger.deleteConversation(id)
       const { activeConversationId } = get()
       set((state) => ({
+        ...(activeConversationId === id ? switchTo(state, null) : {}),
         conversations: state.conversations.filter((c) => c.id !== id),
-        activeConversationId: activeConversationId === id ? null : activeConversationId,
         messages: activeConversationId === id ? [] : state.messages
       }))
     } catch (err) {
@@ -182,7 +254,7 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
   },
 
   setActiveConversation: async (id) => {
-    set({ activeConversationId: id, messages: [], isLoadingMessages: !!id })
+    set((state) => ({ ...switchTo(state, id), messages: [], isLoadingMessages: !!id }))
 
     if (id) {
       await get().loadMessages(id)
@@ -262,5 +334,48 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     } catch (err) {
       notify({ type: 'error', message: formatError(err) })
     }
+  },
+
+  // New Chat: go to the one draft, making it if there is none yet.
+  openDraft: async () => {
+    if (get().activeConversationId === null && get().draft !== null) return
+    set((state) => ({
+      draft: state.draft ?? { ...EMPTY_COMPOSER, profileId: currentProfileId() }
+    }))
+    await get().setActiveConversation(null)
+  },
+
+  discardDraft: () => {
+    set({ draft: null })
+  },
+
+  setDraftProfile: (profileId) => {
+    set((state) => (state.draft ? { draft: { ...state.draft, profileId } } : {}))
+  },
+
+  setComposerInput: (input) => {
+    set((state) => updateComposer(state, (content) => ({ ...content, input })))
+  },
+
+  addComposerAttachments: (attachments) => {
+    if (attachments.length === 0) return
+    set((state) => updateComposer(state, (content) => ({
+      ...content,
+      attachments: [...content.attachments, ...attachments]
+    })))
+  },
+
+  removeComposerAttachment: (index) => {
+    set((state) => updateComposer(state, (content) => ({
+      ...content,
+      attachments: content.attachments.filter((_, i) => i !== index)
+    })))
+  },
+
+  clearComposer: () => {
+    set((state) => {
+      if (state.activeConversationId !== null) return { chatComposer: EMPTY_COMPOSER }
+      return state.draft ? { draft: { ...state.draft, ...EMPTY_COMPOSER } } : {}
+    })
   }
 }))

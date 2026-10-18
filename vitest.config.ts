@@ -5,7 +5,7 @@ export default defineConfig({
   test: {
     globals: true,
     environment: 'node',
-    include: ['electron/**/__tests__/**/*.test.ts']
+    include: ['electron/**/__tests__/**/*.test.ts', 'src/**/__tests__/**/*.test.ts']
   },
   resolve: {
     alias: {

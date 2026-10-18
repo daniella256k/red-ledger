@@ -4,7 +4,6 @@ import { DEFAULT_CHAT_TITLE } from '@/lib/chatTitle'
 import { APP_NAME } from '@/lib/appInfo'
 import { useConversationStore, useUIStore } from '@/store'
 import { useStreaming } from '@/hooks/useStreaming'
-import type { Attachment } from '@/types'
 import { MessageList } from './MessageList'
 import { ChatInput } from './ChatInput'
 import { ChatInfoPopover } from './ChatInfoPopover'
@@ -23,34 +22,23 @@ function hasFileDragPayload(event: React.DragEvent): boolean {
 
 export function ChatPanel() {
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
-  const isEmptyChatState = !activeConversationId
+  const hasDraft = useConversationStore((s) => s.draft !== null)
+  // The start screen: no chat open and no New Chat draft either.
+  const isEmptyChatState = !activeConversationId && !hasDraft
   const activeConversation = useConversationStore((s) =>
     s.conversations.find((item) => item.id === s.activeConversationId) ?? null
   )
   const activeConversationTitle = useConversationStore((s) => {
-    if (!s.activeConversationId) return null
+    if (!s.activeConversationId) return DEFAULT_CHAT_TITLE
     const conversation = s.conversations.find((item) => item.id === s.activeConversationId)
     const title = conversation?.title.trim()
     return title && title.length > 0 ? title : DEFAULT_CHAT_TITLE
   })
   const streaming = useStreaming()
-  const [attachments, setAttachments] = useState<Attachment[]>([])
+  const addAttachments = useConversationStore((s) => s.addComposerAttachments)
   const [isDropTargetActive, setIsDropTargetActive] = useState(false)
   const [isParsingDrop, setIsParsingDrop] = useState(false)
   const dropDepthRef = useRef(0)
-
-  const addAttachments = useCallback((nextAttachments: Attachment[]) => {
-    if (nextAttachments.length === 0) return
-    setAttachments((prev) => [...prev, ...nextAttachments])
-  }, [])
-
-  const removeAttachment = useCallback((index: number) => {
-    setAttachments((prev) => prev.filter((_, i) => i !== index))
-  }, [])
-
-  const clearAttachments = useCallback(() => {
-    setAttachments([])
-  }, [])
 
   const onDragEnter = useCallback((event: React.DragEvent<HTMLDivElement>) => {
     if (!hasFileDragPayload(event)) return
@@ -161,13 +149,7 @@ export function ChatPanel() {
           </div>
 
           {/* Input */}
-          <ChatInput
-            streaming={streaming}
-            attachments={attachments}
-            onAddAttachments={addAttachments}
-            onRemoveAttachment={removeAttachment}
-            onClearAttachments={clearAttachments}
-          />
+          <ChatInput streaming={streaming} />
         </>
       ) : (
         <>
@@ -180,18 +162,14 @@ export function ChatPanel() {
                   {APP_NAME}
                 </h3>
                 <p className="text-xs text-soft-charcoal/40 max-w-[240px] mt-1.5 leading-relaxed">
-                  Create a new conversation or select one from the sidebar to get started.
+                  {hasDraft
+                    ? 'This chat is saved when you send your first message.'
+                    : 'Create a new conversation or select one from the sidebar to get started.'}
                 </p>
               </div>
             </div>
           </div>
-          <ChatInput
-            streaming={streaming}
-            attachments={attachments}
-            onAddAttachments={addAttachments}
-            onRemoveAttachment={removeAttachment}
-            onClearAttachments={clearAttachments}
-          />
+          <ChatInput streaming={streaming} />
         </>
       )}
     </div>

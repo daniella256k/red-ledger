@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import { Plus, Trash2, Pencil, Check, X, Star, Search } from 'lucide-react'
-import { useConversationStore, useUIStore } from '@/store'
+import { useConversationStore } from '@/store'
 import { cn, formatTimestamp } from '@/lib/utils'
+import { DEFAULT_CHAT_TITLE } from '@/lib/chatTitle'
 
 interface ConversationListProps {
   compactNewChatButton?: boolean
@@ -12,12 +13,13 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
   const loadConversations = useConversationStore((s) => s.loadConversations)
   const searchConversations = useConversationStore((s) => s.searchConversations)
-  const createConversation = useConversationStore((s) => s.createConversation)
+  const hasDraft = useConversationStore((s) => s.draft !== null)
+  const openDraft = useConversationStore((s) => s.openDraft)
+  const discardDraft = useConversationStore((s) => s.discardDraft)
   const deleteConversation = useConversationStore((s) => s.deleteConversation)
   const renameConversation = useConversationStore((s) => s.renameConversation)
   const setConversationPinned = useConversationStore((s) => s.setConversationPinned)
   const setActiveConversation = useConversationStore((s) => s.setActiveConversation)
-  const workspacePath = useUIStore((s) => s.workspacePath)
 
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -45,9 +47,18 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
     return () => window.clearTimeout(handle)
   }, [searchQuery, loadConversations, searchConversations])
 
-  const handleCreate = async () => {
-    await createConversation({ workspacePath })
+  // New Chat opens the one unsaved draft rather than saving a blank chat.
+  const handleCreate = () => {
+    void openDraft()
   }
+
+  const handleDiscardDraft = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    discardDraft()
+  }
+
+  // The draft is listed while not searching, since it has nothing to match yet.
+  const showDraft = hasDraft && searchQuery.trim().length === 0
 
   const handleDelete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation()
@@ -132,10 +143,36 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
 
       {/* Conversation List */}
       <div className="flex-1 overflow-y-auto py-1">
-        {conversations.length === 0 ? (
-          <div className="px-4 py-8 text-center text-xs text-soft-charcoal/40">
-            {searchQuery.trim().length > 0 ? 'No matching chats' : 'No conversations yet'}
+        {showDraft && (
+          <div
+            onClick={() => setActiveConversation(null)}
+            className={cn('conversation-item group', activeConversationId === null && 'active')}
+          >
+            <div className="flex-1 min-w-0">
+              <div className="text-sm font-medium truncate leading-snug">
+                {DEFAULT_CHAT_TITLE}
+              </div>
+              <div className="text-[11px] text-soft-charcoal/40 mt-0.5 leading-tight">
+                Draft, not saved yet
+              </div>
+            </div>
+            <div className="hidden group-hover:flex items-center gap-0.5 shrink-0 ml-1">
+              <button
+                onClick={handleDiscardDraft}
+                className="p-1 rounded hover:bg-error/10 text-soft-charcoal/40 hover:text-error transition-colors"
+                title="Discard draft"
+              >
+                <X size={12} />
+              </button>
+            </div>
           </div>
+        )}
+        {conversations.length === 0 ? (
+          !showDraft && (
+            <div className="px-4 py-8 text-center text-xs text-soft-charcoal/40">
+              {searchQuery.trim().length > 0 ? 'No matching chats' : 'No conversations yet'}
+            </div>
+          )
         ) : (
           conversations.map((conv) => (
             <div

@@ -1,8 +1,9 @@
-import { useState, useRef, useCallback } from 'react'
+import { useRef, useCallback, useLayoutEffect } from 'react'
 import { Send, Square, Paperclip, X } from 'lucide-react'
 import { useConversationStore, useSettingsStore, useUIStore } from '@/store'
+import { selectComposer } from '@/store/conversationStore'
 import type { useStreaming } from '@/hooks/useStreaming'
-import type { Attachment, ImageAttachment, ImageAttachmentMimeType } from '@/types'
+import type { ImageAttachment, ImageAttachmentMimeType } from '@/types'
 
 const SUPPORTED_PASTED_IMAGE_MIME_TYPES = new Set<ImageAttachmentMimeType>([
   'image/png',
@@ -113,25 +114,22 @@ async function toClipboardImageAttachment(
 
 interface ChatInputProps {
   streaming: ReturnType<typeof useStreaming>
-  attachments: Attachment[]
-  onAddAttachments: (attachments: Attachment[]) => void
-  onRemoveAttachment: (index: number) => void
-  onClearAttachments: () => void
 }
 
-export function ChatInput({
-  streaming,
-  attachments,
-  onAddAttachments,
-  onRemoveAttachment,
-  onClearAttachments
-}: ChatInputProps) {
+export function ChatInput({ streaming }: ChatInputProps) {
   const MAX_TEXTAREA_HEIGHT = 200
-  const [input, setInput] = useState('')
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // The box shows the draft's text in the New Chat view, and a fresh box in a saved chat.
+  const input = useConversationStore((s) => selectComposer(s).input)
+  const attachments = useConversationStore((s) => selectComposer(s).attachments)
+  const setInput = useConversationStore((s) => s.setComposerInput)
+  const onAddAttachments = useConversationStore((s) => s.addComposerAttachments)
+  const onRemoveAttachment = useConversationStore((s) => s.removeComposerAttachment)
+  const onClearAttachments = useConversationStore((s) => s.clearComposer)
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
   const createConversation = useConversationStore((s) => s.createConversation)
+  const isCreatingConversationRef = useRef(false)
   const settings = useSettingsStore((s) => s.settings)
   const workspacePath = useUIStore((s) => s.workspacePath)
   const addToast = useUIStore((s) => s.addToast)
@@ -172,26 +170,23 @@ export function ChatInput({
   const handleSend = useCallback(async () => {
     const content = input.trim()
     if ((!content && attachments.length === 0) || !settings || isStreaming) return
+    // A quick second Enter while the draft is still being saved would save it twice.
+    if (isCreatingConversationRef.current) return
 
-    let conversationId = activeConversationId
-    if (!conversationId) {
+    // The draft is saved as a chat here, on its first send.
+    if (!activeConversationId) {
+      isCreatingConversationRef.current = true
       try {
-        const createdConversation = await createConversation({ workspacePath })
-        conversationId = createdConversation.id
+        await createConversation({ workspacePath })
       } catch {
         return
+      } finally {
+        isCreatingConversationRef.current = false
       }
     }
-    if (!conversationId) return
 
     const pending = attachments.length > 0 ? [...attachments] : undefined
-    setInput('')
     onClearAttachments()
-    // Reset textarea height
-    if (textareaRef.current) {
-      textareaRef.current.style.height = 'auto'
-      textareaRef.current.style.overflowY = 'hidden'
-    }
 
     await sendMessage(content, pending)
   }, [input, attachments, activeConversationId, createConversation, workspacePath, settings, isStreaming, onClearAttachments, sendMessage])
@@ -203,16 +198,18 @@ export function ChatInput({
     }
   }
 
-  // Auto-grow textarea
   const handleInput = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     setInput(e.target.value)
-    const textarea = textareaRef.current
-    if (textarea) {
-      textarea.style.height = 'auto'
-      textarea.style.height = Math.min(textarea.scrollHeight, MAX_TEXTAREA_HEIGHT) + 'px'
-      textarea.style.overflowY = textarea.scrollHeight > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden'
-    }
   }
+
+  // Auto-grow textarea, also when switching chats swaps the text in or out
+  useLayoutEffect(() => {
+    const textarea = textareaRef.current
+    if (!textarea) return
+    textarea.style.height = 'auto'
+    textarea.style.height = Math.min(textarea.scrollHeight, MAX_TEXTAREA_HEIGHT) + 'px'
+    textarea.style.overflowY = textarea.scrollHeight > MAX_TEXTAREA_HEIGHT ? 'auto' : 'hidden'
+  }, [input])
 
   const isDisabled = !settings
 
