@@ -43,6 +43,23 @@ export default function App() {
     }
   }, [activeTheme])
 
+  // Switching chats restores the workspace that chat was working in.
+  // Saving lastWorkspacePath points the main process at it; the effect below validates it.
+  const activeWorkspacePath = activeConversation?.workspacePath ?? null
+  useEffect(() => {
+    if (!activeWorkspacePath) return
+    if (activeWorkspacePath === useUIStore.getState().workspacePath) return
+    const latestSettings = useSettingsStore.getState().settings
+    if (!latestSettings) return
+    const nextSettings = { ...latestSettings, lastWorkspacePath: activeWorkspacePath }
+    useUIStore.getState().setSelectedFilePath(null)
+    // Persist immediately (not debounced) so the main process has switched
+    // before the validation effect and file tree list the new folder.
+    window.redLedger.saveSettings(nextSettings)
+      .then(() => useSettingsStore.getState().saveSettings(nextSettings))
+      .catch((err) => notify({ type: 'error', message: formatError(err) }))
+  }, [activeConversationId, activeWorkspacePath])
+
   // After settings load, validate and restore the last workspace path
   useEffect(() => {
     if (!settings?.lastWorkspacePath) return

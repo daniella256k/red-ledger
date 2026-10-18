@@ -4,7 +4,10 @@ import { ConversationService } from '../ConversationService'
 type MigrationHarness = {
   db: {
     exec: (sql: string) => void
-    prepare: (sql: string) => { get: () => { sql: string } | undefined }
+    prepare: (sql: string) => {
+      get: () => { sql: string } | undefined
+      all: () => Array<{ name: string }>
+    }
     transaction: (fn: () => void) => () => void
   }
   migrateConversationProviderConstraintIfNeeded: () => void
@@ -42,55 +45,77 @@ const deleteMessagesFrom = ConversationService.prototype.deleteMessagesFrom as (
 ) => void
 
 describe('ConversationService schema migrations', () => {
-  it('migrates legacy provider constraints when lmstudio is missing', () => {
+  function migrationHarness(tableSql: string, columns: string[]) {
     const exec = vi.fn()
     const transaction = vi.fn((fn: () => void) => fn)
-    const prepare = vi.fn((sql: string) => {
-      if (sql.includes('sqlite_master')) {
-        return {
-          get: () => ({
-            sql: `CREATE TABLE conversations (
-              id TEXT PRIMARY KEY,
-              provider TEXT NOT NULL DEFAULT 'openai'
-                CHECK(provider IN ('openai', 'openrouter', 'ollama'))
-            )`
-          })
-        }
-      }
-
-      return {
-        get: () => undefined
-      }
-    })
-
+    const prepare = vi.fn((sql: string) => ({
+      get: () => (sql.includes('sqlite_master') ? { sql: tableSql } : undefined),
+      all: () => (sql.includes('table_info') ? columns.map((name) => ({ name })) : [])
+    }))
     const service = Object.create(ConversationService.prototype) as unknown as MigrationHarness
     service.db = { exec, prepare, transaction }
+    return { service, exec, transaction }
+  }
+
+  const BASE_COLUMNS = ['id', 'title', 'model', 'provider', 'is_pinned', 'created_at', 'updated_at', 'workspace_path']
+
+  it('drops a legacy provider CHECK constraint', () => {
+    const { service, exec, transaction } = migrationHarness(
+      `CREATE TABLE conversations (
+        id TEXT PRIMARY KEY,
+        provider TEXT NOT NULL DEFAULT 'openai'
+          CHECK(provider IN ('openai', 'openrouter', 'ollama'))
+      )`,
+      BASE_COLUMNS
+    )
+
     service.migrateConversationProviderConstraintIfNeeded()
 
     expect(exec).toHaveBeenCalledWith('PRAGMA foreign_keys = OFF')
     expect(transaction).toHaveBeenCalledTimes(1)
-    expect(exec).toHaveBeenCalledWith(expect.stringContaining('CREATE TABLE conversations_new'))
+    const rebuild = exec.mock.calls.map(([sql]) => sql as string).find((sql) => sql.includes('CREATE TABLE conversations_new'))
+    expect(rebuild).toBeDefined()
+    expect(rebuild).not.toMatch(/CHECK/i)
+    expect(rebuild).not.toContain('last_request')
     expect(exec).toHaveBeenCalledWith('PRAGMA foreign_keys = ON')
   })
 
-  it('skips migration when lmstudio is already present', () => {
-    const exec = vi.fn()
-    const transaction = vi.fn((fn: () => void) => fn)
-    const prepare = vi.fn(() => ({
-      get: () => ({
-        sql: `CREATE TABLE conversations (
-          provider TEXT NOT NULL DEFAULT 'openai'
-            CHECK(provider IN ('openai', 'openrouter', 'ollama', 'lmstudio'))
-        )`
-      })
-    }))
+  it('keeps last_request when rebuilding a 1.5.x table', () => {
+    const { service, exec } = migrationHarness(
+      `CREATE TABLE conversations (
+        provider TEXT NOT NULL DEFAULT 'openai'
+          CHECK(provider IN ('openai', 'openrouter', 'ollama', 'lmstudio')),
+        last_request TEXT
+      )`,
+      [...BASE_COLUMNS, 'last_request']
+    )
 
-    const service = Object.create(ConversationService.prototype) as unknown as MigrationHarness
-    service.db = { exec, prepare, transaction }
+    service.migrateConversationProviderConstraintIfNeeded()
+
+    const rebuild = exec.mock.calls.map(([sql]) => sql as string).find((sql) => sql.includes('CREATE TABLE conversations_new'))
+    expect(rebuild).toContain('last_request TEXT')
+    expect(rebuild).toContain('workspace_path, last_request')
+  })
+
+  it('skips migration when there is no provider CHECK constraint', () => {
+    const { service, exec, transaction } = migrationHarness(
+      `CREATE TABLE conversations (
+        provider TEXT NOT NULL DEFAULT 'openai',
+        workspace_path TEXT
+      )`,
+      BASE_COLUMNS
+    )
+
     service.migrateConversationProviderConstraintIfNeeded()
 
     expect(exec).not.toHaveBeenCalled()
     expect(transaction).not.toHaveBeenCalled()
+  })
+
+  it('rejects unknown providers in app code', () => {
+    const service = Object.create(ConversationService.prototype) as ConversationService
+    expect(() => service.createConversation({ provider: 'bogus' as never })).toThrow(/Unknown provider/)
+    expect(() => service.updateConversation('id', { provider: 'bogus' as never })).toThrow(/Unknown provider/)
   })
 })
 

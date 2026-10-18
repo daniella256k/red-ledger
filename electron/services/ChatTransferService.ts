@@ -6,15 +6,10 @@ import type {
   ProviderName
 } from '../../src/types'
 import type { ConversationService } from './ConversationService'
+import { isProviderName } from '../../src/lib/providers'
 
 export type ChatExportFormat = 'markdown' | 'xml'
 
-const SUPPORTED_PROVIDERS: ReadonlySet<ProviderName> = new Set([
-  'openai',
-  'openrouter',
-  'ollama',
-  'lmstudio'
-])
 
 const SUPPORTED_IMAGE_MIME_TYPES: ReadonlySet<ImageAttachmentMimeType> = new Set([
   'image/png',
@@ -303,8 +298,8 @@ function parseChatXml(source: string): ParsedChat {
   const title = textOf(findChild(conversationNode, 'title'))?.trim() || 'Imported Chat'
   const model = textOf(findChild(conversationNode, 'model'))?.trim() || 'gpt-4'
   const providerRaw = textOf(findChild(conversationNode, 'provider'))?.trim() || 'openai'
-  const provider: ProviderName = SUPPORTED_PROVIDERS.has(providerRaw as ProviderName)
-    ? (providerRaw as ProviderName)
+  const provider: ProviderName = isProviderName(providerRaw)
+    ? providerRaw
     : 'openai'
   const workspacePathRaw = textOf(findChild(conversationNode, 'workspacePath'))
   const workspacePath = workspacePathRaw && workspacePathRaw.trim().length > 0

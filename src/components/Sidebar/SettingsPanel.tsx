@@ -8,14 +8,16 @@ const PROVIDERS: { id: ProviderName; label: string }[] = [
   { id: 'openai', label: 'OpenAI' },
   { id: 'openrouter', label: 'OpenRouter' },
   { id: 'ollama', label: 'Ollama' },
-  { id: 'lmstudio', label: 'LM Studio' }
+  { id: 'lmstudio', label: 'LM Studio' },
+  { id: 'custom', label: 'Custom (OpenAI-compatible)' }
 ]
 
 const PROVIDERS_ALLOW_BLANK_MODEL = new Set<ProviderName>([
   'openai',
   'openrouter',
   'ollama',
-  'lmstudio'
+  'lmstudio',
+  'custom'
 ])
 
 const PROVIDER_PREFERRED_MODELS: Partial<Record<ProviderName, string>> = {
@@ -27,7 +29,8 @@ const PROVIDER_DEFAULT_BASE_URLS: Record<ProviderName, string> = {
   openai: 'https://api.openai.com/v1',
   openrouter: 'https://openrouter.ai/api/v1',
   ollama: 'http://localhost:11434',
-  lmstudio: 'http://localhost:1234'
+  lmstudio: 'http://localhost:1234',
+  custom: 'http://localhost:8080/v1'
 }
 
 function resolveProviderModel(
@@ -294,7 +297,7 @@ export function SettingsPanel() {
                       }
                     })
                   }
-                  placeholder="sk-..."
+                  placeholder={settings.activeProvider === 'custom' ? 'Optional' : 'sk-...'}
                   className="input input-sm input-bordered w-full bg-base-100"
                 />
               </div>
@@ -371,6 +374,11 @@ export function SettingsPanel() {
                 }
                 className="input input-sm input-bordered w-full bg-base-100 text-xs"
               />
+              {settings.activeProvider === 'custom' && (
+                <p className="mt-1 text-[10px] text-soft-charcoal/45">
+                  Any server with an OpenAI-style API (llama.cpp, vLLM, Jan...). Include the path up to /v1.
+                </p>
+              )}
             </div>
 
             {/* Default Model */}
@@ -467,6 +475,27 @@ export function SettingsPanel() {
 
         {settings.searchSectionExpanded && (
           <>
+            <div className="flex items-center justify-between py-0.5">
+              <label className="text-[11px] font-medium text-soft-charcoal/60 uppercase tracking-wide">
+                Offline Mode
+              </label>
+              <div className="flex items-center gap-2">
+                <span
+                  className="text-soft-charcoal/40 hover:text-soft-charcoal/60 cursor-help"
+                  title="Hide every tool that reaches the network: web, org and wiki search, fetch URL, and HTTP MCP connections. Local (stdio) MCP servers stay available. Chats with a cloud provider still go over the network."
+                  aria-label="Offline mode help"
+                >
+                  <CircleHelp size={12} />
+                </span>
+                <input
+                  type="checkbox"
+                  checked={settings.offlineMode}
+                  onChange={(e) => saveSettings({ ...settings, offlineMode: e.target.checked })}
+                  className="toggle toggle-sm toggle-primary"
+                />
+              </div>
+            </div>
+
             <div className="flex items-center justify-between py-0.5">
               <label className="text-[11px] font-medium text-soft-charcoal/60 uppercase tracking-wide">
                 Search

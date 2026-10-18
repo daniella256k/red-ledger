@@ -15,6 +15,8 @@ import type {
 } from '@/types'
 
 const STREAM_THROTTLE_MS = 50
+/** Tools that change workspace files; their results trigger a file tree reload. */
+const WORKSPACE_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'append_file', 'write_pdf', 'move_file'])
 const THINKING_ACTIVE_WINDOW_MS = 1500
 const THINKING_BLOCK_SEPARATOR = '\n\n---\n\n'
 const AUTO_TITLE_PLACEHOLDER = DEFAULT_CHAT_TITLE
@@ -442,6 +444,9 @@ export function useStreaming() {
                   : tc
               )
               flushToStore()
+              if (WORKSPACE_WRITE_TOOLS.has(chunk.toolCall.name)) {
+                useUIStore.getState().bumpFileTree()
+              }
             }
             lastStreamChunkTypeRef.current = 'tool_result'
             break

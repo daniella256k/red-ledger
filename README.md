@@ -6,9 +6,10 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 
 ## What It Does
 
-- Multi-provider chat with streaming: OpenAI, OpenRouter, Ollama, and LM Studio.
+- Multi-provider chat with streaming: OpenAI, OpenRouter, Ollama, LM Studio, and any custom OpenAI-compatible server (llama.cpp, vLLM, Jan, a self-hosted gateway).
 - Tool calling for local file ops + web/wiki/url tools (up to 75 tool calls per turn, with check-in nudges to the model at 25, 40, and 50).
 - Workspace jail for file safety, with optional strict confirmation mode.
+- Each chat remembers its workspace folder and switches back to it when reopened.
 - 3 persistent context files (`system`, `user`, `org`) injected into every run.
 - Text file attachments of any kind: plain text, code, config, and markup (`.py`, `.yaml`, `.json`, `.xml`, `.css`, `Dockerfile`, ...) are detected by content, no renaming needed. PDF and Word (`.doc`, `.docx`) text extraction included.
 - Spreadsheet attachments: Excel (`.xlsx`, `.xlsm`, `.xlsb`, `.xls`), OpenDocument (`.ods`), Apple Numbers and older formats are converted to CSV per sheet, with cell ranges, hyperlinks (as Markdown links), formulas and named ranges. `.csv` and `.tsv` attach as-is.
@@ -70,6 +71,7 @@ npm run rebuild
   - Native LM Studio endpoints
 
 LM Studio compatibility mode is set in the app Settings panel.
+- Custom (OpenAI-compatible) takes any base URL up to the `/v1` path (default `http://localhost:8080/v1`, llama.cpp's server). The API key is optional and only sent when set.
 
 ## Data + Storage
 
@@ -88,11 +90,18 @@ The LLM can invoke these tools during a conversation:
 | `write_file` | Write or overwrite a workspace file |
 | `write_pdf` | Render markdown content and write a PDF file |
 | `append_file` | Append content to a workspace file |
+| `edit_file` | Exact-match find-and-replace inside a workspace file |
+| `move_file` | Move or rename a file within the workspace (never overwrites) |
+| `grep_files` | Search workspace file contents (literal or regex, respects `.gitignore`) |
 | `list_files` | List the workspace directory tree |
 | `web_search` | Search the web (Tavily or SerpAPI) |
 | `org_search` | Search the web (Tavily or SerpAPI) using optional site specification (Org Site in settings) |
 | `wiki_search` | Search Wikipedia for article summaries |
 | `fetch_url` | Fetch and parse a full webpage by URL (includes extracted `links` for navigation) |
+
+MCP servers configured under Settings → Connections add their tools as `<server>__<tool>`.
+
+Overwrites and edits keep the previous version next to the file as `<name>.bak`. Offline Mode (Settings) hides every tool that reaches the network: web/org/wiki search, `fetch_url`, and HTTP MCP connections.
 
 Tools self-register via the tool registry. Strict mode shows a native confirmation dialog before each operation. Tool errors are caught and returned in the result so the LLM can self-correct without crashing the stream.
 

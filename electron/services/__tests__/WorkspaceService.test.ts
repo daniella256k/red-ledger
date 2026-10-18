@@ -11,7 +11,8 @@ const BASE_SETTINGS: Settings = {
     openai: { apiKey: '', baseUrl: 'https://api.openai.com/v1', models: [] },
     openrouter: { apiKey: '', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
     ollama: { apiKey: '', baseUrl: 'http://localhost:11434', models: [] },
-    lmstudio: { apiKey: '', baseUrl: 'http://localhost:1234', models: [], compatibility: 'openai' }
+    lmstudio: { apiKey: '', baseUrl: 'http://localhost:1234', models: [], compatibility: 'openai' },
+    custom: { apiKey: '', baseUrl: 'http://localhost:8080/v1', models: [] }
   },
   defaultModel: 'gpt-4',
   reasoningEnabled: true,
@@ -25,6 +26,7 @@ const BASE_SETTINGS: Settings = {
   serpApiKey: '',
   orgSite: '',
   searchToolsEnabled: true,
+  offlineMode: false,
   lastWorkspacePath: null,
   providerSectionExpanded: true,
   searchSectionExpanded: true,
@@ -122,5 +124,66 @@ describe('WorkspaceService.listFiles', () => {
     const nodes = service.listFiles(undefined, { includeHidden: true })
     expect(nodes.map((node) => node.name)).toEqual(['.github', '.env.example', 'README.md'])
     expect(nodes[0].children?.[0].children?.[0].path).toBe('.github/workflows/ci.yml')
+  })
+})
+
+describe('WorkspaceService backups and moves', () => {
+  let workspaceRoot: string
+  let service: WorkspaceService
+
+  beforeEach(() => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), 'red-ledger-workspace-'))
+    service = new WorkspaceService(() => BASE_SETTINGS)
+    service.setWorkspacePath(workspaceRoot)
+  })
+
+  afterEach(() => {
+    rmSync(workspaceRoot, { recursive: true, force: true })
+  })
+
+  it('keeps the previous version as .bak when overwriting or editing', async () => {
+    writeFileSync(join(workspaceRoot, 'notes.md'), 'v1')
+
+    await service.writeFile(null, 'notes.md', 'v2', false)
+    expect(readFileSync(join(workspaceRoot, 'notes.md.bak'), 'utf-8')).toBe('v1')
+
+    await service.editFile(null, 'notes.md', 'v3')
+    expect(readFileSync(join(workspaceRoot, 'notes.md.bak'), 'utf-8')).toBe('v2')
+    expect(readFileSync(join(workspaceRoot, 'notes.md'), 'utf-8')).toBe('v3')
+  })
+
+  it('does not create a .bak for new files or appends', async () => {
+    await service.writeFile(null, 'log.md', 'a', false)
+    await service.writeFile(null, 'log.md', 'b', true)
+    expect(existsSync(join(workspaceRoot, 'log.md.bak'))).toBe(false)
+  })
+
+  it('renames a file and creates missing parent directories', async () => {
+    writeFileSync(join(workspaceRoot, 'draft.md'), 'x')
+
+    const moved = await service.moveFile(null, 'draft.md', 'archive/2026/final.md')
+
+    expect(moved.to).toBe('archive/2026/final.md')
+    expect(existsSync(join(workspaceRoot, 'draft.md'))).toBe(false)
+    expect(readFileSync(join(workspaceRoot, 'archive', '2026', 'final.md'), 'utf-8')).toBe('x')
+  })
+
+  it('moves a file into an existing directory keeping its name', async () => {
+    writeFileSync(join(workspaceRoot, 'minutes.md'), 'x')
+    mkdirSync(join(workspaceRoot, 'meetings'))
+
+    const moved = await service.moveFile(null, 'minutes.md', 'meetings/')
+
+    expect(moved.to).toBe('meetings/minutes.md')
+    expect(existsSync(join(workspaceRoot, 'meetings', 'minutes.md'))).toBe(true)
+  })
+
+  it('refuses to overwrite an existing destination or escape the workspace', async () => {
+    writeFileSync(join(workspaceRoot, 'a.md'), 'a')
+    writeFileSync(join(workspaceRoot, 'b.md'), 'b')
+
+    await expect(service.moveFile(null, 'a.md', 'b.md')).rejects.toThrow(/already exists/)
+    await expect(service.moveFile(null, 'a.md', '../outside.md')).rejects.toThrow()
+    expect(readFileSync(join(workspaceRoot, 'b.md'), 'utf-8')).toBe('b')
   })
 })

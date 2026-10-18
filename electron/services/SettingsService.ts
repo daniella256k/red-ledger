@@ -11,6 +11,7 @@ import {
   sanitizeStringArray,
   sanitizeStringRecord
 } from '../../src/lib/mcpConfig'
+import { PROVIDER_NAMES, isProviderName } from '../../src/lib/providers'
 
 const DEFAULT_FALLBACK_MODEL = 'moonshotai/kimi-k2.5'
 
@@ -38,6 +39,11 @@ const DEFAULT_SETTINGS: Settings = {
       baseUrl: 'http://localhost:1234',
       models: [],
       compatibility: 'openai'
+    },
+    custom: {
+      apiKey: '',
+      baseUrl: 'http://localhost:8080/v1',
+      models: []
     }
   },
   defaultModel: DEFAULT_FALLBACK_MODEL,
@@ -52,6 +58,7 @@ const DEFAULT_SETTINGS: Settings = {
   serpApiKey: '',
   orgSite: '',
   searchToolsEnabled: true,
+  offlineMode: false,
   lastWorkspacePath: null,
   providerSectionExpanded: true,
   searchSectionExpanded: true,
@@ -63,8 +70,6 @@ const DEFAULT_SETTINGS: Settings = {
 const MAX_MCP_SERVERS = 50
 const MAX_MCP_NAME_LENGTH = 64
 
-const PROVIDER_NAMES: ProviderName[] = ['openai', 'openrouter', 'ollama', 'lmstudio']
-const VALID_PROVIDERS = new Set<ProviderName>(PROVIDER_NAMES)
 
 const LMSTUDIO_COMPATIBILITY = new Set<LMStudioCompatibility>(['openai', 'lmstudio'])
 
@@ -223,8 +228,8 @@ export function sanitizeSettings(settings: Partial<Settings> | undefined): Setti
     return acc
   }, {} as Record<ProviderName, ProviderSettings>)
 
-  const activeProvider = VALID_PROVIDERS.has(s.activeProvider as ProviderName)
-    ? (s.activeProvider as ProviderName)
+  const activeProvider = isProviderName(s.activeProvider)
+    ? s.activeProvider
     : DEFAULT_SETTINGS.activeProvider
 
   const defaultModel = typeof s.defaultModel === 'string' && s.defaultModel.trim().length > 0
@@ -281,6 +286,7 @@ export function sanitizeSettings(settings: Partial<Settings> | undefined): Setti
     searchToolsEnabled: typeof s.searchToolsEnabled === 'boolean'
       ? s.searchToolsEnabled
       : DEFAULT_SETTINGS.searchToolsEnabled,
+    offlineMode: typeof s.offlineMode === 'boolean' ? s.offlineMode : DEFAULT_SETTINGS.offlineMode,
     lastWorkspacePath: typeof s.lastWorkspacePath === 'string'
       ? s.lastWorkspacePath
       : null,

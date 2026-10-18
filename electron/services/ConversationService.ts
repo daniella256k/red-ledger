@@ -1,5 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
 import type Database from 'better-sqlite3'
+import { isProviderName } from '../../src/lib/providers'
 import type {
   Attachment,
   Conversation,
@@ -85,8 +86,7 @@ export class ConversationService {
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT 'New Chat',
         model TEXT NOT NULL DEFAULT 'gpt-4',
-        provider TEXT NOT NULL DEFAULT 'openai'
-          CHECK(provider IN ('openai', 'openrouter', 'ollama', 'lmstudio')),
+        provider TEXT NOT NULL DEFAULT 'openai',
         is_pinned INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -128,13 +128,23 @@ export class ConversationService {
     )
   }
 
+  /**
+   * Databases from before 1.6.0 restrict `provider` with a CHECK constraint,
+   * so every new provider needed a table rebuild. Rebuild once without it;
+   * providers are validated in app code (src/lib/providers.ts) instead.
+   */
   private migrateConversationProviderConstraintIfNeeded(): void {
     const schema = this.db
       .prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'conversations'")
       .get() as { sql?: string } | undefined
 
     if (!schema || typeof schema.sql !== 'string') return
-    if (schema.sql.toLowerCase().includes("'lmstudio'")) return
+    if (!/check\s*\(\s*provider\s+in\b/i.test(schema.sql)) return
+
+    const columns = this.db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>
+    // last_request is added after this migration on very old databases, but
+    // 1.5.x databases already have it alongside the CHECK constraint.
+    const lastRequest = columns.some((column) => column.name === 'last_request') ? ', last_request' : ''
 
     this.db.exec('PRAGMA foreign_keys = OFF')
     try {
@@ -146,27 +156,23 @@ export class ConversationService {
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL DEFAULT 'New Chat',
             model TEXT NOT NULL DEFAULT 'gpt-4',
-            provider TEXT NOT NULL DEFAULT 'openai'
-              CHECK(provider IN ('openai', 'openrouter', 'ollama', 'lmstudio')),
+            provider TEXT NOT NULL DEFAULT 'openai',
             is_pinned INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
-            workspace_path TEXT
+            workspace_path TEXT${lastRequest ? ', last_request TEXT' : ''}
           );
 
-          INSERT INTO conversations_new (id, title, model, provider, is_pinned, created_at, updated_at, workspace_path)
+          INSERT INTO conversations_new (id, title, model, provider, is_pinned, created_at, updated_at, workspace_path${lastRequest})
           SELECT
             id,
             title,
             model,
-            CASE
-              WHEN provider IN ('openai', 'openrouter', 'ollama', 'lmstudio') THEN provider
-              ELSE 'openai'
-            END,
+            provider,
             COALESCE(is_pinned, 0),
             created_at,
             updated_at,
-            workspace_path
+            workspace_path${lastRequest}
           FROM conversations;
 
           DROP TABLE conversations;
@@ -305,6 +311,7 @@ export class ConversationService {
   }
 
   createConversation(data: Partial<Conversation>): Conversation {
+    assertValidProvider(data.provider)
     const id = uuidv4()
     const now = Date.now()
 
@@ -330,6 +337,7 @@ export class ConversationService {
   }
 
   updateConversation(id: string, data: Partial<Conversation>): void {
+    assertValidProvider(data.provider)
     const now = Date.now()
     const shouldUpdateWorkspacePath = data.workspacePath !== undefined
     const shouldUpdatePinned = data.isPinned !== undefined
@@ -587,5 +595,12 @@ export class ConversationService {
   close(): void {
     this.statements.clear()
     this.db.close()
+  }
+}
+
+/** Providers are checked here rather than by a DB CHECK constraint, so adding one needs no migration. */
+function assertValidProvider(provider: unknown): void {
+  if (provider !== undefined && !isProviderName(provider)) {
+    throw new Error(`Unknown provider: ${String(provider)}`)
   }
 }

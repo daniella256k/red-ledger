@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react'
 import { FolderOpen } from 'lucide-react'
-import { useUIStore, useSettingsStore } from '@/store'
+import { useUIStore, useSettingsStore, useConversationStore } from '@/store'
 import { FileTree } from '../FileTree/FileTree'
 import { FileViewer } from './FileViewer'
 import type { FileNode } from '@/types'
@@ -14,6 +14,9 @@ export function WorkspaceTree({ compactOpenFolderButton = false }: WorkspaceTree
   const setWorkspacePath = useUIStore((s) => s.setWorkspacePath)
   const setSelectedFilePath = useUIStore((s) => s.setSelectedFilePath)
   const selectedFilePath = useUIStore((s) => s.selectedFilePath)
+  const fileTreeVersion = useUIStore((s) => s.fileTreeVersion)
+  const activeConversationId = useConversationStore((s) => s.activeConversationId)
+  const setConversationWorkspace = useConversationStore((s) => s.setConversationWorkspace)
   const settings = useSettingsStore((s) => s.settings)
   const saveSettings = useSettingsStore((s) => s.saveSettings)
   const [files, setFiles] = useState<FileNode[]>([])
@@ -30,8 +33,12 @@ export function WorkspaceTree({ compactOpenFolderButton = false }: WorkspaceTree
       if (settings && settings.lastWorkspacePath !== path) {
         saveSettings({ ...settings, lastWorkspacePath: path })
       }
+      // The open chat follows the folder the user just picked.
+      if (activeConversationId) {
+        void setConversationWorkspace(activeConversationId, path)
+      }
     }
-  }, [workspacePath, setSelectedFilePath, setWorkspacePath, settings, saveSettings])
+  }, [workspacePath, setSelectedFilePath, setWorkspacePath, settings, saveSettings, activeConversationId, setConversationWorkspace])
 
   useEffect(() => {
     if (!workspacePath) {
@@ -46,7 +53,7 @@ export function WorkspaceTree({ compactOpenFolderButton = false }: WorkspaceTree
       .then(setFiles)
       .catch(() => setFiles([]))
       .finally(() => setIsLoading(false))
-  }, [workspacePath])
+  }, [workspacePath, fileTreeVersion])
 
   return (
     <div className="h-full flex flex-col">

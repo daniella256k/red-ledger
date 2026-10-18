@@ -8,11 +8,14 @@ interface UIState {
   sidebarTab: SidebarTab
   workspacePath: string | null
   selectedFilePath: string | null
+  /** Bumped when workspace files change on disk (e.g. after a write tool) so the tree reloads. */
+  fileTreeVersion: number
   toasts: Toast[]
 
   setSidebarTab: (tab: SidebarTab) => void
   setWorkspacePath: (path: string | null) => void
   setSelectedFilePath: (path: string | null) => void
+  bumpFileTree: () => void
   addToast: (toast: Omit<Toast, 'id'>) => void
   removeToast: (id: string) => void
 }
@@ -24,6 +27,7 @@ export const useUIStore = create<UIState>((set, get) => ({
   sidebarTab: 'conversations',
   workspacePath: null,
   selectedFilePath: null,
+  fileTreeVersion: 0,
   toasts: [],
 
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
@@ -31,6 +35,8 @@ export const useUIStore = create<UIState>((set, get) => ({
   setWorkspacePath: (path) => set({ workspacePath: path }),
 
   setSelectedFilePath: (path) => set({ selectedFilePath: path }),
+
+  bumpFileTree: () => set((state) => ({ fileTreeVersion: state.fileTreeVersion + 1 })),
 
   addToast: (toast) => {
     const id = `toast-${++toastCounter}`

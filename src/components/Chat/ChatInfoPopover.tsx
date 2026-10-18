@@ -7,7 +7,8 @@ const PROVIDER_LABELS: Record<ProviderName, string> = {
   openai: 'OpenAI',
   openrouter: 'OpenRouter',
   ollama: 'Ollama',
-  lmstudio: 'LM Studio'
+  lmstudio: 'LM Studio',
+  custom: 'Custom'
 }
 
 function formatDateTime(value: number | string): string {

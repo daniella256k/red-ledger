@@ -1,5 +1,5 @@
-import { dirname, resolve } from 'path'
-import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync } from 'fs'
+import { basename, dirname, resolve } from 'path'
+import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync, copyFileSync, renameSync } from 'fs'
 import { resolveWorkspacePath, PathJailError } from './pathJail'
 import { loadGitignoreRules, isIgnoredByGitignore, type GitignoreRule } from './gitignore'
 import { DocumentExtractionError, extractDocumentText } from './DocumentTextService'
@@ -183,7 +183,7 @@ export class WorkspaceService {
         buttons: ['Cancel', 'Overwrite'],
         defaultId: 0,
         title: 'Overwrite File',
-        message: 'Overwrite existing file? This cannot be undone.',
+        message: 'Overwrite existing file? The previous version will be kept as a .bak file.',
         detail: fullPath
       })
       if (confirmed.response === 0) {
@@ -282,6 +282,7 @@ export class WorkspaceService {
     if (append) {
       appendFileSync(fullPath, content, 'utf-8')
     } else {
+      if (fileExists) backupFile(fullPath)
       writeFileSync(fullPath, content, 'utf-8')
     }
   }
@@ -310,6 +311,7 @@ export class WorkspaceService {
       }
     }
 
+    backupFile(fullPath)
     writeFileSync(fullPath, content, 'utf-8')
   }
 
@@ -322,7 +324,55 @@ export class WorkspaceService {
     await this.confirmWriteAllowed(dialog, relativePath, fullPath, fileExists, false)
 
     mkdirSync(dirname(fullPath), { recursive: true })
+    if (fileExists) backupFile(fullPath)
     writeFileSync(fullPath, content)
+  }
+
+  /**
+   * Move or rename a file within the workspace. If `toRelative` is an existing
+   * directory the file keeps its name inside it. Never overwrites: an existing
+   * destination file is an error.
+   */
+  async moveFile(
+    dialog: DialogAdapter | null,
+    fromRelative: string,
+    toRelative: string
+  ): Promise<{ from: string; to: string }> {
+    const { fullPath: fromPath, fileExists } = this.resolveWriteTarget(fromRelative)
+    if (!fileExists) {
+      throw new PathJailError('FILE_NOT_FOUND', `File not found: ${fromRelative}`)
+    }
+    if (statSync(fromPath).isDirectory()) {
+      throw new Error(`move_file only moves files, and "${fromRelative}" is a directory`)
+    }
+
+    let { fullPath: toPath } = this.resolveWriteTarget(toRelative)
+    let toDisplay = toRelative
+    if (existsSync(toPath) && statSync(toPath).isDirectory()) {
+      toDisplay = `${toRelative.replace(/[\\/]+$/, '')}/${basename(fromPath)}`
+      toPath = this.resolveWriteTarget(toDisplay).fullPath
+    }
+    if (existsSync(toPath)) {
+      throw new Error(`Destination already exists: ${toDisplay}. Choose a different name.`)
+    }
+
+    if (dialog && this.getSettings().strictMode) {
+      const confirmed = await dialog.showMessageBox({
+        type: 'question',
+        buttons: ['Deny', 'Allow'],
+        defaultId: 0,
+        title: 'File Move Request',
+        message: `The assistant wants to move: ${fromRelative}`,
+        detail: `New location: ${toDisplay}`
+      })
+      if (confirmed.response === 0) {
+        throw new PathJailError('USER_DENIED', 'User denied file move')
+      }
+    }
+
+    mkdirSync(dirname(toPath), { recursive: true })
+    renameSync(fromPath, toPath)
+    return { from: fromRelative, to: toDisplay }
   }
 
   grepFiles(options: {
@@ -552,4 +602,9 @@ export class WorkspaceService {
       return a.name.localeCompare(b.name)
     })
   }
+}
+
+/** Keep the previous version of a file as `<name>.bak` (replacing any older backup) before it is overwritten. */
+function backupFile(fullPath: string): void {
+  copyFileSync(fullPath, `${fullPath}.bak`)
 }

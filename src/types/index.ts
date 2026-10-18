@@ -1,6 +1,6 @@
 // ─── Provider Types ──────────────────────────────────────────────────────────
 
-export type ProviderName = 'openai' | 'openrouter' | 'ollama' | 'lmstudio'
+export type ProviderName = 'openai' | 'openrouter' | 'ollama' | 'lmstudio' | 'custom'
 export type LMStudioCompatibility = 'openai' | 'lmstudio'
 
 export interface ProviderSettings {
@@ -29,6 +29,8 @@ export interface Settings {
   serpApiKey: string
   orgSite: string
   searchToolsEnabled: boolean
+  /** Hides every tool that reaches the network (web/wiki/url tools, HTTP MCP servers). */
+  offlineMode: boolean
   lastWorkspacePath: string | null
   providerSectionExpanded: boolean
   searchSectionExpanded: boolean

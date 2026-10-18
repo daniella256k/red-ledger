@@ -124,6 +124,13 @@ describe('sanitizeSettings', () => {
     expect(sanitizeSettings({ maxTokens: NaN } as any).maxTokens).toBe(8192)
   })
 
+  it('accepts the custom provider and fills its defaults', () => {
+    const result = sanitizeSettings({ activeProvider: 'custom' } as any)
+    expect(result.activeProvider).toBe('custom')
+    expect(result.providers.custom.baseUrl).toBe('http://localhost:8080/v1')
+    expect(result.providers.custom.apiKey).toBe('')
+  })
+
   it('rejects invalid activeProvider', () => {
     expect(sanitizeSettings({ activeProvider: 'invalid' } as any).activeProvider).toBe('openrouter')
   })

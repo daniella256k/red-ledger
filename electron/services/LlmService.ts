@@ -2,6 +2,7 @@ import type { LLMMessage, AbortHandle, LLMMessageContent, ToolDefinition } from 
 import { createProvider } from '../lib/providers/registry'
 import { getToolDefinitions } from '../lib/tools/registry'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
+import { mcpServerPrefix, parseMcpToolName } from '../../src/lib/mcpConfig'
 import { detectFileType } from '../lib/fileType'
 import type {
   LLMRequest,
@@ -20,9 +21,20 @@ import '../lib/providers/openai'
 import '../lib/providers/openrouter'
 import '../lib/providers/ollama'
 import '../lib/providers/lmstudio'
+import '../lib/providers/custom'
 
 /** Hard ceiling on tool calls the assistant may run in a single turn. */
 export const MAX_TOOL_CALLS = 75
+/** Whether a tool reaches the network: built-in web tools and tools from HTTP MCP servers. */
+function isNetworkTool(name: string, settings: Settings): boolean {
+  if (NETWORK_TOOLS.has(name)) return true
+  const parsed = parseMcpToolName(name)
+  if (!parsed) return false
+  return settings.mcpServers.some(
+    (server) => server.transport !== 'stdio' && mcpServerPrefix(server.name) === parsed.server
+  )
+}
+
 /** Running totals at which the assistant is nudged to check whether it still needs tools. */
 export const TOOL_CALL_WARNING_THRESHOLDS = [25, 40, 50]
 /** Rounds the assistant gets to answer after hitting the limit before the turn is stopped. */
@@ -31,6 +43,8 @@ const DEFAULT_TITLE_MAX_TOKENS = 24
 const TITLE_TEMPERATURE = 0.2
 const SEARCH_TOOLS_REQUIRING_API_KEYS = new Set(['web_search', 'org_search'])
 const ORG_SEARCH_TOOL_NAME = 'org_search'
+/** Built-in tools that reach the network; hidden in offline mode. */
+const NETWORK_TOOLS = new Set(['web_search', 'org_search', 'wiki_search', 'fetch_url'])
 const TITLE_GENERATION_SYSTEM_PROMPT =
   'Generate a concise chat title for the provided user prompt. Return only the title text in 2 to 6 words. No reasoning, no prefix, no quotes, no markdown, and no trailing punctuation.'
 
@@ -132,7 +146,7 @@ export class LlmService {
   }
 
   private supportsVisionParts(provider: ProviderName): boolean {
-    return provider === 'openai' || provider === 'openrouter'
+    return provider === 'openai' || provider === 'openrouter' || provider === 'custom'
   }
 
   private isImageAttachment(attachment: Attachment): attachment is ImageAttachment {
@@ -352,7 +366,8 @@ export class LlmService {
     }
 
     const tools = this.withDynamicToolDescriptions(getToolDefinitions(), settings).filter((tool) =>
-      settings.searchToolsEnabled || !SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name)
+      (settings.searchToolsEnabled || !SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name))
+      && !(settings.offlineMode && isNetworkTool(tool.function.name, settings))
     )
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
     let totalToolCalls = 0
@@ -466,7 +481,9 @@ export class LlmService {
             : {
               ...tc,
               result: {
-                error: !settings.searchToolsEnabled && SEARCH_TOOLS_REQUIRING_API_KEYS.has(tc.name)
+                error: settings.offlineMode && isNetworkTool(tc.name, settings)
+                  ? `Tool "${tc.name}" is unavailable: offline mode is on.`
+                  : !settings.searchToolsEnabled && SEARCH_TOOLS_REQUIRING_API_KEYS.has(tc.name)
                   ? `Tool "${tc.name}" is disabled in Settings.`
                   : `Tool "${tc.name}" is not available for this request.`,
                 code: 'PERMISSION_DENIED'
