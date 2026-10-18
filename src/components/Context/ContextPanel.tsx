@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { Check, Plus, Trash2, X } from 'lucide-react'
-import type { ContextProfile } from '@/types'
+import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { formatError } from '@/lib/errors'
-import { useUIStore } from '@/store'
+import { useContextProfileStore, useConversationStore, useUIStore } from '@/store'
 import { ContextEditor } from './ContextEditor'
 
 const CONTEXT_TYPES = [
@@ -11,35 +10,26 @@ const CONTEXT_TYPES = [
   { type: 'org' as const, title: 'Org Context', description: 'Organization mission, terms, style' }
 ]
 
-interface ContextProfileState {
-  profiles: ContextProfile[]
-  activeProfileId: string
-}
-
-const FALLBACK_PROFILE_STATE: ContextProfileState = {
-  profiles: [{ id: 'default', name: 'Default' }],
-  activeProfileId: 'default'
-}
-
-const HIDE_PROFILE_LABEL_BREAKPOINT = 310
-const COMPACT_PROFILE_SELECT_BREAKPOINT = 280
-const EXTRA_COMPACT_PROFILE_SELECT_BREAKPOINT = 245
+const HIDE_PROFILE_LABEL_BREAKPOINT = 340
+const COMPACT_PROFILE_SELECT_BREAKPOINT = 310
+const EXTRA_COMPACT_PROFILE_SELECT_BREAKPOINT = 275
 
 export function ContextPanel() {
-  const [profileState, setProfileState] = useState<ContextProfileState>(FALLBACK_PROFILE_STATE)
+  const profiles = useContextProfileStore((s) => s.profiles)
+  const activeProfileId = useContextProfileStore((s) => s.activeProfileId)
+  const applyProfileState = useContextProfileStore((s) => s.applyProfileState)
+  const profileState = { profiles, activeProfileId }
+  const activeConversationId = useConversationStore((s) => s.activeConversationId)
+  const conversationProfileId = useConversationStore((s) =>
+    s.conversations.find((c) => c.id === s.activeConversationId)?.profileId ?? null
+  )
   const [isLoadingProfiles, setIsLoadingProfiles] = useState(true)
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false)
-  const [isCreatingProfile, setIsCreatingProfile] = useState(false)
-  const [newProfileName, setNewProfileName] = useState('')
+  // The inline name form under the header, for a new profile or renaming the selected one.
+  const [profileFormMode, setProfileFormMode] = useState<'create' | 'rename' | null>(null)
+  const [profileNameDraft, setProfileNameDraft] = useState('')
   const headerRef = useRef<HTMLDivElement>(null)
   const [headerWidth, setHeaderWidth] = useState<number | null>(null)
-
-  const applyProfileState = useCallback((next: ContextProfileState) => {
-    setProfileState({
-      profiles: next.profiles,
-      activeProfileId: next.activeProfileId
-    })
-  }, [])
 
   useEffect(() => {
     if (!window.redLedger) {
@@ -73,6 +63,35 @@ export function ContextPanel() {
     }
   }, [applyProfileState])
 
+  // Switching chats restores the profile that chat was started with, so the
+  // selector and editors show the context its system prompt is built from.
+  // Chats from before per-chat profiles (null), or whose profile was deleted,
+  // keep whatever is selected; the main process falls back the same way.
+  useEffect(() => {
+    if (!window.redLedger || isLoadingProfiles || !conversationProfileId) return
+    const { profiles: knownProfiles, activeProfileId: currentProfileId } = useContextProfileStore.getState()
+    if (conversationProfileId === currentProfileId) return
+    if (!knownProfiles.some((profile) => profile.id === conversationProfileId)) return
+
+    let cancelled = false
+    setIsUpdatingProfile(true)
+    window.redLedger.setActiveContextProfile(conversationProfileId)
+      .then((next) => {
+        if (!cancelled) applyProfileState(next)
+      })
+      .catch((err) => {
+        useUIStore.getState().addToast({
+          type: 'error',
+          message: formatError(err)
+        })
+      })
+      .finally(() => setIsUpdatingProfile(false))
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeConversationId, conversationProfileId, isLoadingProfiles, applyProfileState])
+
   const handleProfileChange = useCallback(async (profileId: string) => {
     if (!window.redLedger) return
     if (profileId === profileState.activeProfileId) return
@@ -81,6 +100,11 @@ export function ContextPanel() {
       setIsUpdatingProfile(true)
       const next = await window.redLedger.setActiveContextProfile(profileId)
       applyProfileState(next)
+      // Picking a profile while in a chat moves that chat to it; with no chat
+      // open it only sets the profile new chats start with.
+      if (activeConversationId) {
+        await useConversationStore.getState().setConversationProfile(activeConversationId, profileId)
+      }
     } catch (err) {
       useUIStore.getState().addToast({
         type: 'error',
@@ -89,17 +113,22 @@ export function ContextPanel() {
     } finally {
       setIsUpdatingProfile(false)
     }
-  }, [applyProfileState, profileState.activeProfileId])
+  }, [activeConversationId, applyProfileState, profileState.activeProfileId])
 
-  const resetCreateProfileForm = useCallback(() => {
-    setIsCreatingProfile(false)
-    setNewProfileName('')
+  const resetProfileForm = useCallback(() => {
+    setProfileFormMode(null)
+    setProfileNameDraft('')
   }, [])
 
-  const handleCreateProfile = useCallback(async () => {
-    if (!window.redLedger) return
+  // A rename is for the profile that was selected when it started.
+  useEffect(() => {
+    setProfileFormMode((mode) => (mode === 'rename' ? null : mode))
+  }, [activeProfileId])
 
-    const trimmed = newProfileName.trim()
+  const handleSubmitProfileForm = useCallback(async () => {
+    if (!window.redLedger || !profileFormMode) return
+
+    const trimmed = profileNameDraft.trim()
     if (!trimmed) {
       useUIStore.getState().addToast({
         type: 'warning',
@@ -110,9 +139,11 @@ export function ContextPanel() {
 
     try {
       setIsUpdatingProfile(true)
-      const next = await window.redLedger.createContextProfile(trimmed)
+      const next = profileFormMode === 'rename'
+        ? await window.redLedger.renameContextProfile(activeProfileId, trimmed)
+        : await window.redLedger.createContextProfile(trimmed)
       applyProfileState(next)
-      resetCreateProfileForm()
+      resetProfileForm()
     } catch (err) {
       useUIStore.getState().addToast({
         type: 'error',
@@ -121,7 +152,7 @@ export function ContextPanel() {
     } finally {
       setIsUpdatingProfile(false)
     }
-  }, [applyProfileState, newProfileName, resetCreateProfileForm])
+  }, [activeProfileId, applyProfileState, profileFormMode, profileNameDraft, resetProfileForm])
 
   const profileControlsDisabled = isLoadingProfiles || isUpdatingProfile
   const activeProfile = profileState.profiles.find((profile) => profile.id === profileState.activeProfileId) || null
@@ -175,7 +206,7 @@ export function ContextPanel() {
       setIsUpdatingProfile(true)
       const next = await window.redLedger.deleteContextProfile(activeProfile.id)
       applyProfileState(next)
-      resetCreateProfileForm()
+      resetProfileForm()
     } catch (err) {
       useUIStore.getState().addToast({
         type: 'error',
@@ -184,7 +215,7 @@ export function ContextPanel() {
     } finally {
       setIsUpdatingProfile(false)
     }
-  }, [activeProfile, applyProfileState, resetCreateProfileForm])
+  }, [activeProfile, applyProfileState, resetProfileForm])
 
   return (
     <div className="h-full flex flex-col bg-paper">
@@ -209,12 +240,30 @@ export function ContextPanel() {
           </select>
           <button
             type="button"
+            disabled={profileControlsDisabled || !activeProfile}
+            onClick={() => {
+              if (profileFormMode === 'rename') {
+                resetProfileForm()
+              } else {
+                setProfileFormMode('rename')
+                setProfileNameDraft(activeProfile?.name ?? '')
+              }
+            }}
+            className="btn btn-ghost btn-xs text-soft-charcoal/55 hover:text-soft-charcoal"
+            title="Rename selected profile"
+            aria-label="Rename selected profile"
+          >
+            <Pencil size={12} />
+          </button>
+          <button
+            type="button"
             disabled={profileControlsDisabled}
             onClick={() => {
-              if (isCreatingProfile) {
-                resetCreateProfileForm()
+              if (profileFormMode === 'create') {
+                resetProfileForm()
               } else {
-                setIsCreatingProfile(true)
+                setProfileFormMode('create')
+                setProfileNameDraft('')
               }
             }}
             className="btn btn-ghost btn-xs text-soft-charcoal/55 hover:text-soft-charcoal"
@@ -236,43 +285,45 @@ export function ContextPanel() {
         </div>
       </div>
 
-      {isCreatingProfile && (
+      {profileFormMode && (
         <div className="px-4 py-2 border-b border-weathered/70 bg-paper-stack/30 flex items-center gap-1.5">
           <input
             type="text"
-            value={newProfileName}
-            onChange={(e) => setNewProfileName(e.target.value)}
+            value={profileNameDraft}
+            onChange={(e) => setProfileNameDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === 'Enter') {
                 e.preventDefault()
-                void handleCreateProfile()
+                void handleSubmitProfileForm()
               } else if (e.key === 'Escape') {
                 e.preventDefault()
-                resetCreateProfileForm()
+                resetProfileForm()
               }
             }}
             disabled={isUpdatingProfile}
-            placeholder="New profile name"
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            placeholder={profileFormMode === 'rename' ? 'Profile name' : 'New profile name'}
             maxLength={48}
             className="input input-xs input-bordered flex-1 min-w-0 bg-base-100 text-xs"
           />
           <button
             type="button"
-            onClick={() => void handleCreateProfile()}
+            onClick={() => void handleSubmitProfileForm()}
             disabled={isUpdatingProfile}
             className="btn btn-xs btn-primary px-2"
-            title="Create profile"
-            aria-label="Create profile"
+            title={profileFormMode === 'rename' ? 'Save name' : 'Create profile'}
+            aria-label={profileFormMode === 'rename' ? 'Save profile name' : 'Create profile'}
           >
             <Check size={12} />
           </button>
           <button
             type="button"
-            onClick={resetCreateProfileForm}
+            onClick={resetProfileForm}
             disabled={isUpdatingProfile}
             className="btn btn-xs btn-ghost px-2"
             title="Cancel"
-            aria-label="Cancel profile creation"
+            aria-label={profileFormMode === 'rename' ? 'Cancel rename' : 'Cancel profile creation'}
           >
             <X size={12} />
           </button>

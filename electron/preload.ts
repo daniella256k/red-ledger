@@ -71,6 +71,9 @@ const api: RedLedgerAPI = {
   setActiveContextProfile: (profileId: string) =>
     ipcRenderer.invoke('context:setActiveProfile', profileId),
 
+  renameContextProfile: (profileId: string, name: string) =>
+    ipcRenderer.invoke('context:renameProfile', profileId, name),
+
   deleteContextProfile: (profileId: string) =>
     ipcRenderer.invoke('context:deleteProfile', profileId),
 

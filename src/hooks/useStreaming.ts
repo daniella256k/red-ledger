@@ -1,5 +1,5 @@
 import { useState, useRef, useCallback, useEffect } from 'react'
-import { useConversationStore, useSettingsStore, useUIStore } from '@/store'
+import { resolveConversationProfile, useConversationStore, useSettingsStore, useUIStore } from '@/store'
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
 import { DEFAULT_CHAT_TITLE, sanitizeGeneratedChatTitle } from '@/lib/chatTitle'
@@ -55,8 +55,11 @@ function recordRequestInfo(
   void (async () => {
     let contextProfile: string | null = null
     try {
-      const { profiles, activeProfileId } = await window.redLedger.listContextProfiles()
-      contextProfile = profiles.find((profile) => profile.id === activeProfileId)?.name ?? null
+      // Name the profile the prompt was actually built from (the chat's own).
+      const profileState = await window.redLedger.listContextProfiles()
+      const profileId = useConversationStore.getState().conversations
+        .find((conversation) => conversation.id === conversationId)?.profileId
+      contextProfile = resolveConversationProfile(profileId, profileState).profile?.name ?? null
     } catch {
       // Profile name is optional.
     }

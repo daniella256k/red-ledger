@@ -25,6 +25,7 @@ interface ConversationState {
   renameConversation: (id: string, title: string) => Promise<void>
   setConversationPinned: (id: string, isPinned: boolean) => Promise<void>
   setConversationWorkspace: (id: string, workspacePath: string | null) => Promise<void>
+  setConversationProfile: (id: string, profileId: string) => Promise<void>
   setActiveConversation: (id: string | null) => Promise<void>
   loadMessages: (conversationId: string) => Promise<void>
   addMessage: (data: Omit<Message, 'id' | 'createdAt' | 'timestamp'>) => Promise<Message>
@@ -159,6 +160,20 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
       set((state) => ({
         conversations: state.conversations.map((c) =>
           c.id === id ? { ...c, workspacePath } : c
+        )
+      }))
+    } catch (err) {
+      notify({ type: 'error', message: formatError(err) })
+    }
+  },
+
+  setConversationProfile: async (id, profileId) => {
+    if (!window.redLedger) return
+    try {
+      await window.redLedger.updateConversation(id, { profileId })
+      set((state) => ({
+        conversations: state.conversations.map((c) =>
+          c.id === id ? { ...c, profileId } : c
         )
       }))
     } catch (err) {

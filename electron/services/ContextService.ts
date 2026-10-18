@@ -49,6 +49,21 @@ export class ContextService {
     this.ensureAllProfileContextFiles()
   }
 
+  getActiveProfileId(): string {
+    return this.profileState.activeProfileId
+  }
+
+  /**
+   * The profile a chat's prompt is built from: its own when it still exists,
+   * otherwise the active one (legacy chats, or a profile since deleted).
+   */
+  resolveProfileId(profileId?: string | null): string {
+    if (profileId && this.profileState.profiles.some((profile) => profile.id === profileId)) {
+      return profileId
+    }
+    return this.profileState.activeProfileId
+  }
+
   listProfiles(): ContextProfileState {
     return {
       activeProfileId: this.profileState.activeProfileId,
@@ -96,6 +111,37 @@ export class ContextService {
     this.profileState = {
       ...this.profileState,
       activeProfileId: profileId
+    }
+    this.persistProfileState()
+    return this.listProfiles()
+  }
+
+  /**
+   * Rename only; the id (and so its folder and every chat bound to it) stays.
+   */
+  renameProfile(profileId: string, name: string): ContextProfileState {
+    const target = this.profileState.profiles.find((profile) => profile.id === profileId)
+    if (!target) {
+      throw new Error(`Profile "${profileId}" was not found`)
+    }
+
+    const normalizedName = normalizeProfileName(name)
+    if (!normalizedName) {
+      throw new Error('Profile name cannot be empty')
+    }
+
+    const nameTaken = this.profileState.profiles.some(
+      (profile) => profile.id !== profileId && profile.name.toLowerCase() === normalizedName.toLowerCase()
+    )
+    if (nameTaken) {
+      throw new Error(`Profile "${normalizedName}" already exists`)
+    }
+
+    this.profileState = {
+      ...this.profileState,
+      profiles: this.profileState.profiles.map((profile) =>
+        profile.id === profileId ? { ...profile, name: normalizedName } : profile
+      )
     }
     this.persistProfileState()
     return this.listProfiles()
@@ -158,23 +204,25 @@ export class ContextService {
   }
 
   /**
-   * Assemble the full system prompt from all context files.
-   * Used by LlmService to build the conversation's system message.
+   * Assemble the full system prompt from a profile's context files.
+   * Used by LlmService to build the conversation's system message, from the
+   * conversation's own profile (see resolveProfileId for the fallback).
    */
-  assembleSystemPrompt(): string {
+  assembleSystemPrompt(profileId?: string | null): string {
+    const resolvedProfileId = this.resolveProfileId(profileId)
     const parts: string[] = []
 
-    const systemContent = this.readContextTrimmed('system')
+    const systemContent = this.readContextTrimmed(resolvedProfileId, 'system')
     if (systemContent) {
       parts.push(systemContent)
     }
 
-    const userContent = this.readContextTrimmed('user')
+    const userContent = this.readContextTrimmed(resolvedProfileId, 'user')
     if (userContent && !isPlaceholderComment(userContent)) {
       parts.push(`\n## User Context\n${userContent}`)
     }
 
-    const orgContent = this.readContextTrimmed('org')
+    const orgContent = this.readContextTrimmed(resolvedProfileId, 'org')
     if (orgContent && !isPlaceholderComment(orgContent)) {
       parts.push(`\n## Organization Context\n${orgContent}`)
     }
@@ -289,9 +337,9 @@ export class ContextService {
     }
   }
 
-  private readContextTrimmed(type: ContextType): string {
+  private readContextTrimmed(profileId: string, type: ContextType): string {
     try {
-      const filePath = this.getActiveProfileContextPath(type)
+      const filePath = this.getProfileContextPath(profileId, type)
       if (existsSync(filePath)) {
         return readFileSync(filePath, 'utf-8').trim()
       }

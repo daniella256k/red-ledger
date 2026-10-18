@@ -275,3 +275,56 @@ describe('detectFileType', () => {
     expect(detectFileType('report.pdf')).toBe('pdf')
   })
 })
+
+describe('LlmService system prompt', () => {
+  it('builds the system message from the conversation being answered', async () => {
+    const seen: LLMMessage[][] = []
+
+    class CapturingProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        seen.push([...options.messages])
+        queueMicrotask(() => {
+          options.onChunk({ type: 'text', content: 'ok' })
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+
+      async listModels() {
+        return []
+      }
+    }
+
+    registerProvider({
+      name: 'openai',
+      displayName: 'Capturing',
+      defaultBaseUrl: '',
+      factory: () => new CapturingProvider('', '')
+    })
+
+    const prompts: Record<string, string> = { 'chat-a': 'Campaign A prompt', 'chat-b': 'Committee B prompt' }
+    const service = new LlmService({
+      getSettings: () => sanitizeSettings(undefined),
+      getSystemPrompt: (conversationId) => prompts[conversationId]
+    })
+
+    for (const conversationId of ['chat-b', 'chat-a']) {
+      await service.orchestrateStream(
+        {
+          conversationId,
+          messages: [{ role: 'user', content: 'hi', timestamp: '2026-01-01T00:00:00.000Z' }],
+          model: 'test',
+          provider: 'openai'
+        },
+        `stream-${conversationId}`,
+        { send: () => {} },
+        async (tc) => tc
+      )
+    }
+
+    expect(seen.map((messages) => messages[0])).toEqual([
+      { role: 'system', content: 'Committee B prompt' },
+      { role: 'system', content: 'Campaign A prompt' }
+    ])
+  })
+})

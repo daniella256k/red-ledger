@@ -1,6 +1,6 @@
 import { handleIpc } from './typedIpc'
 import { assertString, assertObject } from './validate'
-import { ConversationService } from '../services/ConversationService'
+import { ConversationService, type ConversationServiceOptions } from '../services/ConversationService'
 
 /**
  * Thin IPC adapter for conversation and message operations.
@@ -16,8 +16,8 @@ export function getConversationService(): ConversationService {
   return service
 }
 
-export function registerDbHandlers(dbPath: string): void {
-  service = new ConversationService(dbPath)
+export function registerDbHandlers(dbPath: string, options: ConversationServiceOptions = {}): void {
+  service = new ConversationService(dbPath, options)
 
   // ─── Conversations ──────────────────────────────────────────────────────
 

@@ -49,6 +49,12 @@ export function registerContextHandlers(contextDir: string, bundledDir: string):
     return service.setActiveProfile(profileId)
   })
 
+  handleIpc('context:renameProfile', (_e, profileId, name) => {
+    assertString(profileId, 'profileId')
+    assertString(name, 'name')
+    return service.renameProfile(profileId, name)
+  })
+
   handleIpc('context:deleteProfile', (_e, profileId) => {
     assertString(profileId, 'profileId')
     return service.deleteProfile(profileId)

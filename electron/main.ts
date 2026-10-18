@@ -327,8 +327,11 @@ function registerIpcHandlers(): void {
   const settingsPath = resolveSettingsPath(process.resourcesPath, app.getPath('userData'))
   const dbPath = resolveDbPath(process.resourcesPath, app.getPath('userData'))
 
-  // 1. Database (no dependencies)
-  registerDbHandlers(dbPath)
+  // 1. Database. New chats take the active context profile (context is
+  // registered in step 4, before any chat can be created).
+  registerDbHandlers(dbPath, {
+    getDefaultProfileId: () => getContextService().getActiveProfileId()
+  })
 
   // 2. Settings (wires workspace path side effect)
   registerSettingsHandlers(settingsPath, (settings) => {
@@ -368,7 +371,9 @@ function registerIpcHandlers(): void {
   // 7. LLM streaming (needs settings + context for system prompt)
   registerLlmHandlers({
     getSettings: getCurrentSettings,
-    getSystemPrompt: () => getContextService().assembleSystemPrompt()
+    getSystemPrompt: (conversationId) => getContextService().assembleSystemPrompt(
+      getConversationService().getConversation(conversationId)?.profileId
+    )
   })
 
   // 8. Chat import/export

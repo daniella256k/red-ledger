@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Info } from 'lucide-react'
-import { useConversationStore } from '@/store'
+import { resolveConversationProfile, useContextProfileStore, useConversationStore } from '@/store'
 import type { Conversation, Message, ProviderName } from '@/types'
 
 const PROVIDER_LABELS: Record<ProviderName, string> = {
@@ -67,6 +67,12 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
   const [isOpen, setIsOpen] = useState(false)
   const containerRef = useRef<HTMLDivElement>(null)
   const messages = useConversationStore((s) => s.messages)
+  const profiles = useContextProfileStore((s) => s.profiles)
+  const activeProfileId = useContextProfileStore((s) => s.activeProfileId)
+  const { profile, isFallback } = resolveConversationProfile(conversation.profileId, { profiles, activeProfileId })
+  const profileLabel = profile
+    ? (isFallback ? `${profile.name} (active)` : profile.name)
+    : '—'
 
   useEffect(() => {
     if (!isOpen) return
@@ -161,6 +167,7 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
                 />
                 <InfoRow label="Tool calls" value={String(stats.toolCalls)} />
                 <InfoRow label="Attachments" value={String(stats.attachments)} />
+                <InfoRow label="Context profile" value={profileLabel} />
                 <InfoRow label="Workspace" value={conversation.workspacePath ?? 'None'} />
                 <InfoRow label="Created" value={formatDateTime(conversation.createdAt)} />
                 <InfoRow label="Last activity" value={formatDateTime(conversation.updatedAt)} />

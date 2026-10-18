@@ -17,7 +17,7 @@ let service: LlmService
 
 export function registerLlmHandlers(deps: {
   getSettings: () => Settings
-  getSystemPrompt: () => string
+  getSystemPrompt: (conversationId: string) => string
 }): void {
   service = new LlmService(deps)
 

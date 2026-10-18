@@ -64,11 +64,18 @@ function parseAttachment(value: unknown): Attachment | null {
  * Owns the SQLite database lifecycle, schema, and all CRUD operations.
  * No Electron imports — testable with plain Node.
  */
+export interface ConversationServiceOptions {
+  /** Context profile stamped on new chats that don't name one (the active profile). */
+  getDefaultProfileId?: () => string | null
+}
+
 export class ConversationService {
   private db: Database.Database
   private statements: Map<string, Database.Statement> = new Map()
+  private getDefaultProfileId: () => string | null
 
-  constructor(dbPath: string) {
+  constructor(dbPath: string, options: ConversationServiceOptions = {}) {
+    this.getDefaultProfileId = options.getDefaultProfileId ?? (() => null)
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const BetterSqlite3 = require('better-sqlite3')
     this.db = new BetterSqlite3(dbPath) as Database.Database
@@ -115,17 +122,28 @@ export class ConversationService {
 
     this.migrateConversationProviderConstraintIfNeeded()
 
-    // Added after the provider migration, which rebuilds the table without it.
-    const migratedColumns = this.db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>
-    if (!migratedColumns.some((column) => column.name === 'last_request')) {
-      this.db.exec('ALTER TABLE conversations ADD COLUMN last_request TEXT')
-    }
+    this.addColumnsMissingAfterProviderMigration()
 
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
        CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
        CREATE INDEX IF NOT EXISTS idx_conversations_pinned_updated ON conversations(is_pinned DESC, updated_at DESC);`
     )
+  }
+
+  /**
+   * Columns added after the provider migration, which rebuilds the table
+   * without them on very old databases. Both are nullable.
+   */
+  private addColumnsMissingAfterProviderMigration(): void {
+    const columns = this.db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>
+    if (!columns.some((column) => column.name === 'last_request')) {
+      this.db.exec('ALTER TABLE conversations ADD COLUMN last_request TEXT')
+    }
+    // Context profile the chat's system prompt is built from (null = active profile).
+    if (!columns.some((column) => column.name === 'profile_id')) {
+      this.db.exec('ALTER TABLE conversations ADD COLUMN profile_id TEXT')
+    }
   }
 
   /**
@@ -198,6 +216,7 @@ export class ConversationService {
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
       workspacePath: row.workspace_path as string | null,
+      profileId: typeof row.profile_id === 'string' && row.profile_id.length > 0 ? row.profile_id : null,
       lastRequest: parseRequestInfo(row.last_request)
     }
   }
@@ -312,13 +331,15 @@ export class ConversationService {
 
   createConversation(data: Partial<Conversation>): Conversation {
     assertValidProvider(data.provider)
+    assertValidProfileId(data.profileId)
     const id = uuidv4()
     const now = Date.now()
+    const profileId = data.profileId !== undefined ? data.profileId : this.getDefaultProfileId()
 
     this.stmt(
       'createConversation',
-      `INSERT INTO conversations (id, title, model, provider, is_pinned, created_at, updated_at, workspace_path)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO conversations (id, title, model, provider, is_pinned, created_at, updated_at, workspace_path, profile_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
     ).run(
       id,
       data.title || 'New Chat',
@@ -327,7 +348,8 @@ export class ConversationService {
       data.isPinned ? 1 : 0,
       now,
       now,
-      data.workspacePath || null
+      data.workspacePath || null,
+      profileId || null
     )
 
     return this.toConversation(
@@ -338,7 +360,9 @@ export class ConversationService {
 
   updateConversation(id: string, data: Partial<Conversation>): void {
     assertValidProvider(data.provider)
+    assertValidProfileId(data.profileId)
     const now = Date.now()
+    const shouldUpdateProfileId = data.profileId !== undefined
     const shouldUpdateWorkspacePath = data.workspacePath !== undefined
     const shouldUpdatePinned = data.isPinned !== undefined
     const shouldUpdateLastRequest = data.lastRequest !== undefined
@@ -369,6 +393,10 @@ export class ConversationService {
         last_request = CASE
           WHEN ? = 1 THEN ?
           ELSE last_request
+        END,
+        profile_id = CASE
+          WHEN ? = 1 THEN ?
+          ELSE profile_id
         END
        WHERE id = ?`
     ).run(
@@ -383,6 +411,8 @@ export class ConversationService {
       data.workspacePath ?? null,
       shouldUpdateLastRequest ? 1 : 0,
       data.lastRequest ? JSON.stringify(data.lastRequest) : null,
+      shouldUpdateProfileId ? 1 : 0,
+      data.profileId || null,
       id
     )
   }
@@ -445,8 +475,8 @@ export class ConversationService {
     const forkInTransaction = this.db.transaction(() => {
       this.stmt(
         'createForkConversation',
-        `INSERT INTO conversations (id, title, model, provider, is_pinned, created_at, updated_at, workspace_path, last_request)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO conversations (id, title, model, provider, is_pinned, created_at, updated_at, workspace_path, last_request, profile_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         forkConversationId,
         forkTitle,
@@ -456,7 +486,8 @@ export class ConversationService {
         now,
         now,
         sourceConversation.workspace_path as string | null,
-        (sourceConversation.last_request as string | null) ?? null
+        (sourceConversation.last_request as string | null) ?? null,
+        (sourceConversation.profile_id as string | null) ?? null
       )
 
       const insertForkMessage = this.stmt(
@@ -602,5 +633,11 @@ export class ConversationService {
 function assertValidProvider(provider: unknown): void {
   if (provider !== undefined && !isProviderName(provider)) {
     throw new Error(`Unknown provider: ${String(provider)}`)
+  }
+}
+
+function assertValidProfileId(profileId: unknown): void {
+  if (profileId !== undefined && profileId !== null && typeof profileId !== 'string') {
+    throw new Error('profileId must be a string or null')
   }
 }

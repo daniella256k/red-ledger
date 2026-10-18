@@ -76,6 +76,8 @@ export interface Conversation {
   createdAt: number
   updatedAt: number
   workspacePath: string | null
+  /** Context profile this chat's system prompt is built from (null = active profile). */
+  profileId: string | null
   /** Snapshot of the settings used for the most recent request in this chat. */
   lastRequest?: ConversationRequestInfo | null
 }
@@ -269,6 +271,7 @@ export interface RedLedgerAPI {
   listContextProfiles(): Promise<{ profiles: ContextProfile[]; activeProfileId: string }>
   createContextProfile(name: string): Promise<{ profiles: ContextProfile[]; activeProfileId: string }>
   setActiveContextProfile(profileId: string): Promise<{ profiles: ContextProfile[]; activeProfileId: string }>
+  renameContextProfile(profileId: string, name: string): Promise<{ profiles: ContextProfile[]; activeProfileId: string }>
   deleteContextProfile(profileId: string): Promise<{ profiles: ContextProfile[]; activeProfileId: string }>
 
   // Conversations

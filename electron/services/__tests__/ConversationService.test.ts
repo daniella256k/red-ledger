@@ -257,11 +257,12 @@ describe('ConversationService request metadata', () => {
     updateConversation.call(service, 'c1', { lastRequest: requestInfo })
 
     const args = run.mock.calls[0]
-    // [title, model, provider, pinFlag, pinned, bumpFlag, now, wsFlag, ws, lastFlag, last, id]
+    // [title, model, provider, pinFlag, pinned, bumpFlag, now, wsFlag, ws, lastFlag, last, profileFlag, profile, id]
     expect(args[5]).toBe(0)
     expect(args[9]).toBe(1)
     expect(JSON.parse(args[10] as string)).toEqual(requestInfo)
-    expect(args[11]).toBe('c1')
+    expect(args[11]).toBe(0)
+    expect(args[13]).toBe('c1')
   })
 
   it('parses lastRequest from rows and tolerates bad JSON', () => {
@@ -273,5 +274,133 @@ describe('ConversationService request metadata', () => {
     expect(toConversation({ ...base, last_request: JSON.stringify(requestInfo) }).lastRequest).toEqual(requestInfo)
     expect(toConversation({ ...base, last_request: '{not json' }).lastRequest).toBeNull()
     expect(toConversation({ ...base, last_request: null }).lastRequest).toBeNull()
+  })
+})
+
+describe('ConversationService context profile', () => {
+  type ProfileHarness = DatabaseHarness & {
+    db: MigrationHarness['db']
+    getDefaultProfileId: () => string | null
+    addColumnsMissingAfterProviderMigration: () => void
+  }
+
+  const BASE_ROW = {
+    id: 'c1', title: 't', model: 'm', provider: 'openai', is_pinned: 0,
+    created_at: 1, updated_at: 1, workspace_path: null, last_request: null
+  }
+
+  function createHarness(rowProfileId: string | null, defaultProfileId: string | null = rowProfileId) {
+    const runs: Array<{ key: string; args: unknown[] }> = []
+    const service = Object.create(ConversationService.prototype) as ProfileHarness
+    service.getDefaultProfileId = () => defaultProfileId
+    service.db = {
+      exec: vi.fn(),
+      prepare: vi.fn(),
+      transaction: (fn: () => void) => fn
+    } as unknown as ProfileHarness['db']
+    service.stmt = vi.fn((key: string) => ({
+      run: (...args: unknown[]) => { runs.push({ key, args }) },
+      get: () => (key === 'getForkCutoff' ? { rowid: 1 } : { ...BASE_ROW, profile_id: rowProfileId }),
+      all: () => []
+    }))
+    return { service, runs }
+  }
+
+  function columnHarness(columns: string[]) {
+    const exec = vi.fn()
+    const service = Object.create(ConversationService.prototype) as ProfileHarness
+    service.db = {
+      exec,
+      prepare: () => ({ get: () => undefined, all: () => columns.map((name) => ({ name })) }),
+      transaction: (fn: () => void) => fn
+    }
+    return { service, exec }
+  }
+
+  const createConversation = ConversationService.prototype.createConversation as (
+    this: ProfileHarness,
+    data: Parameters<ConversationService['createConversation']>[0]
+  ) => ReturnType<ConversationService['createConversation']>
+
+  const updateConversation = ConversationService.prototype.updateConversation as (
+    this: ProfileHarness,
+    id: string,
+    data: Parameters<ConversationService['updateConversation']>[1]
+  ) => void
+
+  const forkConversation = ConversationService.prototype.forkConversation as (
+    this: ProfileHarness,
+    conversationId: string,
+    messageId: string
+  ) => ReturnType<ConversationService['forkConversation']>
+
+  it('adds a nullable profile_id column to older databases', () => {
+    const { service, exec } = columnHarness(['id', 'workspace_path', 'last_request'])
+
+    service.addColumnsMissingAfterProviderMigration()
+
+    expect(exec).toHaveBeenCalledTimes(1)
+    expect(exec).toHaveBeenCalledWith('ALTER TABLE conversations ADD COLUMN profile_id TEXT')
+  })
+
+  it('leaves databases that already have profile_id alone', () => {
+    const { service, exec } = columnHarness(['id', 'workspace_path', 'last_request', 'profile_id'])
+
+    service.addColumnsMissingAfterProviderMigration()
+
+    expect(exec).not.toHaveBeenCalled()
+  })
+
+  it('stamps new chats with the active profile', () => {
+    const { service, runs } = createHarness('campaign-a')
+
+    const conversation = createConversation.call(service, { workspacePath: null })
+
+    const insert = runs.find((run) => run.key === 'createConversation')
+    expect(insert?.args[8]).toBe('campaign-a')
+    expect(conversation.profileId).toBe('campaign-a')
+  })
+
+  it('prefers an explicit profile over the active one', () => {
+    const { service, runs } = createHarness('committee-b', 'campaign-a')
+
+    createConversation.call(service, { profileId: 'committee-b' })
+
+    expect(runs.find((run) => run.key === 'createConversation')?.args[8]).toBe('committee-b')
+  })
+
+  it('updates profile_id only when it is given', () => {
+    const { service, runs } = createHarness(null)
+
+    updateConversation.call(service, 'c1', { title: 'Renamed' })
+    updateConversation.call(service, 'c1', { profileId: 'committee-b' })
+
+    expect(runs[0].args.slice(11, 14)).toEqual([0, null, 'c1'])
+    expect(runs[1].args.slice(11, 14)).toEqual([1, 'committee-b', 'c1'])
+  })
+
+  it('rejects a non-string profile id', () => {
+    const { service } = createHarness(null)
+    expect(() => updateConversation.call(service, 'c1', { profileId: 42 as never })).toThrow(/profileId/)
+  })
+
+  it('maps profile_id from rows, treating missing values as null', () => {
+    const toConversation = (ConversationService.prototype as unknown as {
+      toConversation: (row: Record<string, unknown>) => { profileId: string | null }
+    }).toConversation
+
+    expect(toConversation({ ...BASE_ROW, profile_id: 'campaign-a' }).profileId).toBe('campaign-a')
+    expect(toConversation({ ...BASE_ROW, profile_id: null }).profileId).toBeNull()
+    expect(toConversation({ ...BASE_ROW }).profileId).toBeNull()
+  })
+
+  it('carries the profile over when forking', () => {
+    const { service, runs } = createHarness('campaign-a')
+
+    const fork = forkConversation.call(service, 'c1', 'm1')
+
+    const insert = runs.find((run) => run.key === 'createForkConversation')
+    expect(insert?.args[9]).toBe('campaign-a')
+    expect(fork.profileId).toBe('campaign-a')
   })
 })

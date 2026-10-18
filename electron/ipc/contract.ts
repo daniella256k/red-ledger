@@ -70,6 +70,7 @@ export interface IpcContract {
   'context:listProfiles':       { params: [];                                           result: ContextProfileState }
   'context:createProfile':      { params: [name: string];                               result: ContextProfileState }
   'context:setActiveProfile':   { params: [profileId: string];                          result: ContextProfileState }
+  'context:renameProfile':      { params: [profileId: string, name: string];            result: ContextProfileState }
   'context:deleteProfile':      { params: [profileId: string];                          result: ContextProfileState }
 
   // Settings

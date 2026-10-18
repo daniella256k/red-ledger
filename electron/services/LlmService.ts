@@ -134,12 +134,13 @@ export interface StreamSink {
  */
 export class LlmService {
   private getSettings: () => Settings
-  private getSystemPrompt: () => string
+  private getSystemPrompt: (conversationId: string) => string
   private activeStreams = new Map<string, AbortHandle>()
 
   constructor(deps: {
     getSettings: () => Settings
-    getSystemPrompt: () => string
+    /** Builds the system prompt from the conversation's own context profile. */
+    getSystemPrompt: (conversationId: string) => string
   }) {
     this.getSettings = deps.getSettings
     this.getSystemPrompt = deps.getSystemPrompt
@@ -333,7 +334,7 @@ export class LlmService {
     toolExecutor: (tc: ToolCall) => Promise<ToolCall>
   ): Promise<void> {
     const provider = this.createProvider(request.provider)
-    const systemPrompt = this.getSystemPrompt()
+    const systemPrompt = this.getSystemPrompt(request.conversationId)
     const settings = this.getSettings()
 
     // Build the conversation history in LLMMessage format

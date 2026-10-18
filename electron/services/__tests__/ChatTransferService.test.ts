@@ -26,7 +26,8 @@ function createFakeConversationService(state: FakeServiceState): ConversationSer
         isPinned: data.isPinned ?? false,
         createdAt: now,
         updatedAt: now,
-        workspacePath: data.workspacePath ?? null
+        workspacePath: data.workspacePath ?? null,
+        profileId: data.profileId ?? null
       }
       state.conversations.set(id, conversation)
       state.messages.set(id, [])
@@ -57,7 +58,8 @@ const sampleConversation: Conversation = {
   isPinned: false,
   createdAt: 1700000000000,
   updatedAt: 1700000060000,
-  workspacePath: '/some/path'
+  workspacePath: '/some/path',
+  profileId: null
 }
 
 const sampleMessages: Message[] = [
