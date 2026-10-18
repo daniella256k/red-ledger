@@ -226,6 +226,19 @@ export class WorkspaceService {
 
   // ─── File Operations ──────────────────────────────────────────────────────
 
+  /** Absolute path of an existing workspace file, for handing to the OS shell. */
+  resolveExistingPath(relativePath: string): string {
+    if (!this.workspacePath) {
+      throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
+    }
+
+    const fullPath = resolveWorkspacePath(this.workspacePath, relativePath)
+    if (!existsSync(fullPath)) {
+      throw new PathJailError('FILE_NOT_FOUND', `File not found: ${relativePath}`)
+    }
+    return fullPath
+  }
+
   async readFile(dialog: DialogAdapter | null, relativePath: string): Promise<string> {
     if (!this.workspacePath) {
       throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')

@@ -263,6 +263,7 @@ export interface RedLedgerAPI {
   readFile(relativePath: string): Promise<string>
   writeFile(relativePath: string, content: string, append?: boolean): Promise<void>
   listFiles(relativePath?: string): Promise<FileNode[]>
+  showInFolder(relativePath: string): Promise<void>
 
   // Context Files
   loadContext(type: 'system' | 'user' | 'org'): Promise<string>

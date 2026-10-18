@@ -62,6 +62,7 @@ export interface IpcContract {
   'fs:readFile':                { params: [relativePath: string];                      result: string }
   'fs:writeFile':               { params: [relativePath: string, content: string, append?: boolean]; result: void }
   'fs:listFiles':               { params: [relativePath?: string];                     result: FileNode[] }
+  'fs:showInFolder':            { params: [relativePath: string];                      result: void }
 
   // Context
   'context:load':               { params: [type: ContextType];                         result: string }

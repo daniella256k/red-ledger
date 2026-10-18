@@ -1,4 +1,4 @@
-import { dialog, BrowserWindow } from 'electron'
+import { dialog, shell, BrowserWindow } from 'electron'
 import { handleIpc } from './typedIpc'
 import { assertString, assertOptionalString, assertOptionalBoolean } from './validate'
 import { WorkspaceService, type DialogAdapter } from '../services/WorkspaceService'
@@ -69,5 +69,10 @@ export function registerFsHandlers(getSettings: () => Settings): void {
   handleIpc('fs:listFiles', (_e, relativePath) => {
     assertOptionalString(relativePath, 'relativePath')
     return service.listFiles(relativePath)
+  })
+
+  handleIpc('fs:showInFolder', (_e, relativePath) => {
+    assertString(relativePath, 'relativePath')
+    shell.showItemInFolder(service.resolveExistingPath(relativePath))
   })
 }

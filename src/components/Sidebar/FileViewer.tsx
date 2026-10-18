@@ -1,6 +1,8 @@
 import { useState, useEffect } from 'react'
-import { X, FileText } from 'lucide-react'
+import { X, FileText, FolderOpen } from 'lucide-react'
 import { useUIStore } from '@/store'
+import { formatError } from '@/lib/errors'
+import { notify } from '@/lib/notify'
 import { Editor } from '../Editor/Editor'
 
 export function FileViewer() {
@@ -43,6 +45,17 @@ export function FileViewer() {
         <span className="text-xs font-medium text-soft-charcoal/70 truncate flex-1" title={selectedFilePath}>
           {selectedFilePath}
         </span>
+        <button
+          onClick={() => {
+            window.redLedger
+              .showInFolder(selectedFilePath)
+              .catch((err) => notify({ type: 'error', message: formatError(err) }))
+          }}
+          className="btn btn-ghost btn-xs p-0.5"
+          title="Show in file explorer"
+        >
+          <FolderOpen size={14} />
+        </button>
         <button
           onClick={() => setSelectedFilePath(null)}
           className="btn btn-ghost btn-xs p-0.5"

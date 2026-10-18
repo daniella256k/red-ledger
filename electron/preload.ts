@@ -51,6 +51,9 @@ const api: RedLedgerAPI = {
   listFiles: (relativePath?: string) =>
     ipcRenderer.invoke('fs:listFiles', relativePath),
 
+  showInFolder: (relativePath: string) =>
+    ipcRenderer.invoke('fs:showInFolder', relativePath),
+
   // ─── Context Files ───────────────────────────────────────────────────────
 
   loadContext: (type: 'system' | 'user' | 'org') =>
