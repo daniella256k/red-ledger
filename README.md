@@ -135,10 +135,12 @@ red-ledger/
 ## Packaging
 
 ```bash
-npx electron-builder --win
-npx electron-builder --mac
-npx electron-builder --linux
+npm run dist:win
+npm run dist:mac
+npm run dist:linux
 ```
+
+These run `electron-vite build` before `electron-builder`. Running `npx electron-builder` directly packages whatever is in `out/` as-is, which can produce an app with a blank window if `out/renderer` is stale or missing.
 
 ## Portable Mode
 

@@ -14,7 +14,9 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "rebuild": "electron-rebuild -f -w better-sqlite3",
-    "dist:linux": "electron-builder --linux AppImage deb --publish never",
+    "dist:win": "npm run build && electron-builder --win --publish never",
+    "dist:mac": "npm run build && electron-builder --mac --publish never",
+    "dist:linux": "npm run build && electron-builder --linux AppImage deb --publish never",
     "typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.node.json",
     "lint": "eslint src electron",
     "test": "vitest run",
@@ -71,6 +73,11 @@
     "directories": {
       "output": "dist"
     },
+    "files": [
+      "out/**/*",
+      "build/icon.png",
+      "package.json"
+    ],
     "extraResources": [
       {
         "from": "contexts",
