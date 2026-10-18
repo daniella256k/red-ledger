@@ -14,7 +14,9 @@ registerTool({
     type: 'function',
     function: {
       name: 'write_file',
-      description: 'Write content to a file in the user\'s workspace directory. Creates the file if it doesn\'t exist, or overwrites it if it does (with user confirmation).',
+      description: 'Write content to a file in the user\'s workspace. Creates the file and any missing parent folders, or replaces the file if it exists. '
+        + 'Replacing an existing file always asks the user first (in Strict Mode, creating a new file asks too). '
+        + 'If the user declines, the result is an error with code USER_DENIED: do not retry, tell the user instead.',
       parameters: {
         type: 'object',
         properties: {

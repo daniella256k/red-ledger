@@ -14,7 +14,8 @@ registerTool({
     type: 'function',
     function: {
       name: 'append_file',
-      description: 'Append content to the end of an existing file in the user\'s workspace directory.',
+      description: 'Append content to the end of a file in the user\'s workspace. Creates the file and any missing parent folders if needed. '
+        + 'In Strict Mode the user is asked first; if they decline, the result is an error with code USER_DENIED.',
       parameters: {
         type: 'object',
         properties: {

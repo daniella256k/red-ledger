@@ -26,19 +26,45 @@ function escapeRegex(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+export const DEFAULT_GREP_CONTEXT_CHARS = 200
+
+/**
+ * The part of a matched line shown in grep results: the whole line when it is
+ * short, otherwise a window centered on the match so long prose lines still
+ * show the sentence that matched.
+ */
+export function excerptAroundMatch(line: string, column: number, contextChars = DEFAULT_GREP_CONTEXT_CHARS): string {
+  if (line.length <= contextChars * 2) return line
+
+  const start = Math.max(0, column - contextChars)
+  const end = Math.min(line.length, column + contextChars)
+  return `${start > 0 ? '…' : ''}${line.slice(start, end)}${end < line.length ? '…' : ''}`
+}
+
 export function buildGrepMatcher(
   pattern: string,
   isRegex: boolean,
   caseSensitive: boolean
 ): (line: string) => number {
   if (isRegex) {
+    // JavaScript regexes have no inline flags; accept a leading (?i) anyway
+    // since models (and people) reach for it out of habit.
+    let source = pattern
+    let ignoreCase = !caseSensitive
+    if (source.startsWith('(?i)')) {
+      source = source.slice(4)
+      ignoreCase = true
+    }
+
     let re: RegExp
     try {
-      re = new RegExp(pattern, caseSensitive ? '' : 'i')
+      re = new RegExp(source, ignoreCase ? 'i' : '')
     } catch (err) {
       throw new PathJailError(
         'INVALID_INPUT',
-        `Invalid regex pattern: ${err instanceof Error ? err.message : String(err)}`
+        `Invalid regex pattern: ${err instanceof Error ? err.message : String(err)}. `
+          + 'Patterns use JavaScript regex syntax, which has no inline flags like (?i) or (?s) mid-pattern; '
+          + 'use case_sensitive: false for case-insensitive search.'
       )
     }
     return (line) => {
@@ -300,6 +326,7 @@ export class WorkspaceService {
     path?: string
     glob?: string
     maxResults?: number
+    contextChars?: number
   }): GrepMatch[] {
     if (!this.workspacePath) {
       throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
@@ -316,6 +343,7 @@ export class WorkspaceService {
     const matcher = buildGrepMatcher(options.pattern, options.isRegex === true, options.caseSensitive !== false)
     const globMatcher = options.glob ? buildGlobMatcher(options.glob) : null
     const maxResults = Math.max(1, Math.min(options.maxResults ?? 200, 1000))
+    const contextChars = Math.max(20, Math.min(options.contextChars ?? DEFAULT_GREP_CONTEXT_CHARS, 1000))
     const matches: GrepMatch[] = []
 
     this.walkForGrep(
@@ -324,7 +352,8 @@ export class WorkspaceService {
       matches,
       maxResults,
       matcher,
-      globMatcher
+      globMatcher,
+      contextChars
     )
 
     return matches
@@ -337,6 +366,7 @@ export class WorkspaceService {
     maxResults: number,
     matcher: (line: string) => number,
     globMatcher: ((relativePath: string) => boolean) | null,
+    contextChars: number,
     gitignoreRules?: GitignoreRule[]
   ): void {
     if (matches.length >= maxResults) return
@@ -374,13 +404,13 @@ export class WorkspaceService {
       if (isIgnoredByGitignore(relativePath, isDir, gitignoreRules)) continue
 
       if (isDir) {
-        this.walkForGrep(fullPath, rootPath, matches, maxResults, matcher, globMatcher, gitignoreRules)
+        this.walkForGrep(fullPath, rootPath, matches, maxResults, matcher, globMatcher, contextChars, gitignoreRules)
         continue
       }
 
       if (globMatcher && !globMatcher(relativePath)) continue
 
-      this.grepOneFile(fullPath, relativePath, matcher, matches, maxResults)
+      this.grepOneFile(fullPath, relativePath, matcher, matches, maxResults, contextChars)
     }
   }
 
@@ -389,7 +419,8 @@ export class WorkspaceService {
     relativePath: string,
     matcher: (line: string) => number,
     matches: GrepMatch[],
-    maxResults: number
+    maxResults: number,
+    contextChars: number
   ): void {
     let stat
     try {
@@ -424,18 +455,17 @@ export class WorkspaceService {
       const column = matcher(line)
       if (column === -1) continue
 
-      const display = line.length > 400 ? line.slice(0, 400) + '…' : line
       matches.push({
         path: relativePath,
         line: lineNum + 1,
         column: column + 1,
-        text: display
+        text: excerptAroundMatch(line, column, contextChars)
       })
       perFileCount++
     }
   }
 
-  listFiles(relativePath?: string): FileNode[] {
+  listFiles(relativePath?: string, options: { includeHidden?: boolean } = {}): FileNode[] {
     if (!this.workspacePath) {
       throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
     }
@@ -448,7 +478,7 @@ export class WorkspaceService {
       throw new PathJailError('FILE_NOT_FOUND', 'Directory not found')
     }
 
-    return this.listDirectory(targetDir, this.workspacePath)
+    return this.listDirectory(targetDir, this.workspacePath, undefined, options.includeHidden === true)
   }
 
   // ─── Directory Listing ────────────────────────────────────────────────────
@@ -456,7 +486,8 @@ export class WorkspaceService {
   private listDirectory(
     dirPath: string,
     rootPath: string,
-    gitignoreRules?: GitignoreRule[]
+    gitignoreRules?: GitignoreRule[],
+    includeHidden = false
   ): FileNode[] {
     const entries = readdirSync(dirPath, { withFileTypes: true })
     const nodes: FileNode[] = []
@@ -467,8 +498,8 @@ export class WorkspaceService {
     }
 
     for (const entry of entries) {
-      // Skip dotfiles and common ignore patterns
-      if (entry.name.startsWith('.') || SKIP_PATTERNS.has(entry.name)) {
+      // Skip common ignore patterns always, and dotfiles unless asked for
+      if (SKIP_PATTERNS.has(entry.name) || (!includeHidden && entry.name.startsWith('.'))) {
         continue
       }
 
@@ -498,7 +529,7 @@ export class WorkspaceService {
           name: entry.name,
           path: relativePath,
           type: 'directory',
-          children: this.listDirectory(fullPath, rootPath, gitignoreRules)
+          children: this.listDirectory(fullPath, rootPath, gitignoreRules, includeHidden)
         })
       } else {
         nodes.push({

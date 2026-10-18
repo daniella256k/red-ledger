@@ -12,7 +12,7 @@ registerTool({
     type: 'function',
     function: {
       name: 'grep_files',
-      description: 'Search file contents in the workspace for a literal substring or regex. Returns matching file paths with line numbers and the matching line text. Respects .gitignore, skips binary files and dotfiles, and is capped to a few hundred matches — narrow your pattern or path scope if you hit the cap.',
+      description: 'Search file contents in the workspace for a literal substring or regex. Returns matching file paths with line numbers and the matching line text. Respects .gitignore and skips binary files, dotfiles, and files over 2 MB. Returns at most max_results matches; if the result has truncated: true there were more, so narrow your pattern or path. Long lines are shown as a window around the match (see context_chars). Regex mode uses JavaScript syntax: use case_sensitive: false rather than inline flags like (?i).',
       parameters: {
         type: 'object',
         properties: {
@@ -39,6 +39,10 @@ registerTool({
           max_results: {
             type: 'number',
             description: 'Cap on total matches returned (1-1000, default 200).'
+          },
+          context_chars: {
+            type: 'number',
+            description: 'For long lines, how many characters to show on each side of the match (20-1000, default 200). Short lines are always shown whole.'
           }
         },
         required: ['pattern']
@@ -56,6 +60,9 @@ registerTool({
     const maxResults = input.max_results === undefined
       ? 200
       : numberArg(input, 'max_results', 'grep_files', { integer: true, min: 1, max: 1000 })
+    const contextChars = input.context_chars === undefined
+      ? undefined
+      : numberArg(input, 'context_chars', 'grep_files', { integer: true, min: 20, max: 1000 })
 
     const workspace = getWorkspaceService()
     const matches = workspace.grepFiles({
@@ -64,7 +71,8 @@ registerTool({
       caseSensitive,
       path,
       glob,
-      maxResults
+      maxResults,
+      contextChars
     })
 
     return {

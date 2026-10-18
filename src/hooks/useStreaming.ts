@@ -3,7 +3,16 @@ import { useConversationStore, useSettingsStore, useUIStore } from '@/store'
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
 import { DEFAULT_CHAT_TITLE, sanitizeGeneratedChatTitle } from '@/lib/chatTitle'
-import type { StreamChunk, ToolCall, LLMRequest, Message, Attachment, ProviderName } from '@/types'
+import { toToolCallRecords } from '@/lib/toolCallRecords'
+import type {
+  StreamChunk,
+  ToolCall,
+  LLMRequest,
+  Message,
+  Attachment,
+  ProviderName,
+  ConversationRequestInfo
+} from '@/types'
 
 const STREAM_THROTTLE_MS = 50
 const THINKING_ACTIVE_WINDOW_MS = 1500
@@ -30,6 +39,40 @@ function findLastUserMessage(messages: Message[]): Message | undefined {
     }
   }
   return undefined
+}
+
+/**
+ * Save a snapshot of the request settings on the conversation so the chat
+ * info popover can show what was actually sent. Best-effort: failures are
+ * ignored because this is display-only metadata.
+ */
+function recordRequestInfo(
+  conversationId: string,
+  info: Omit<ConversationRequestInfo, 'contextProfile'>
+): void {
+  void (async () => {
+    let contextProfile: string | null = null
+    try {
+      const { profiles, activeProfileId } = await window.redLedger.listContextProfiles()
+      contextProfile = profiles.find((profile) => profile.id === activeProfileId)?.name ?? null
+    } catch {
+      // Profile name is optional.
+    }
+
+    const lastRequest: ConversationRequestInfo = { ...info, contextProfile }
+    try {
+      await window.redLedger.updateConversation(conversationId, { lastRequest })
+      useConversationStore.setState((state) => ({
+        conversations: state.conversations.map((conversation) =>
+          conversation.id === conversationId
+            ? { ...conversation, lastRequest }
+            : conversation
+        )
+      }))
+    } catch {
+      // Display-only metadata; never interrupt the chat for it.
+    }
+  })()
 }
 
 /**
@@ -293,6 +336,9 @@ export function useStreaming() {
         timestamp: m.timestamp,
         ...(m.role === 'user' && m.attachments && m.attachments.length > 0
           ? { attachments: m.attachments }
+          : {}),
+        ...(m.role === 'assistant' && m.toolCalls
+          ? { toolCalls: toToolCallRecords(m.toolCalls) }
           : {})
       }))
 
@@ -304,6 +350,16 @@ export function useStreaming() {
         ...(currentSettings.temperatureEnabled ? { temperature: currentSettings.temperature } : {}),
         ...(currentSettings.maxTokensEnabled ? { maxTokens: currentSettings.maxTokens } : {})
       }
+
+      recordRequestInfo(conversationId, {
+        sentAt: new Date().toISOString(),
+        provider: lockedProvider,
+        model: lockedModel,
+        temperature: request.temperature ?? null,
+        maxTokens: request.maxTokens ?? null,
+        reasoningEnabled: currentSettings.reasoningEnabled,
+        searchToolsEnabled: currentSettings.searchToolsEnabled
+      })
 
       // 3. Create a persisted assistant placeholder so chat switches do not orphan the stream.
       const tempMessage = await store.addMessage({
@@ -388,6 +444,13 @@ export function useStreaming() {
               flushToStore()
             }
             lastStreamChunkTypeRef.current = 'tool_result'
+            break
+          }
+
+          case 'notice': {
+            if (chunk.content) {
+              notify({ type: 'warning', message: chunk.content })
+            }
             break
           }
 

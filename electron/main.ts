@@ -1,9 +1,12 @@
 import { app, BrowserWindow, dialog, Menu } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
-import { join, basename, extname } from 'path'
+import { join } from 'path'
 import { readFileSync } from 'fs'
-import { extractPdfTextWithFallback } from './services/PdfAttachmentService'
-import type { Attachment, AttachmentParseResult, ImageAttachmentMimeType } from '../src/types'
+import {
+  COMMON_TEXT_EXTENSIONS,
+  IMAGE_MIME_BY_EXTENSION,
+  parseAttachmentPaths
+} from './services/AttachmentService'
 import { APP_NAME } from '../src/lib/appInfo'
 import { resolveSettingsPath, resolveDbPath } from './services/SettingsService'
 import { registerDbHandlers, getConversationService } from './ipc/db'
@@ -119,92 +122,6 @@ function setApplicationMenu(): void {
   ]
 
   Menu.setApplicationMenu(Menu.buildFromTemplate(menuTemplate))
-}
-
-type ParsedAttachment = Attachment
-
-const IMAGE_MIME_BY_EXTENSION: Record<string, ImageAttachmentMimeType> = {
-  '.png': 'image/png',
-  '.jpg': 'image/jpeg',
-  '.jpeg': 'image/jpeg',
-  '.webp': 'image/webp',
-  '.gif': 'image/gif'
-}
-
-const SUPPORTED_TEXT_ATTACHMENT_EXTENSIONS = new Set([
-  '.txt',
-  '.md',
-  '.pdf'
-])
-
-const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
-  ...SUPPORTED_TEXT_ATTACHMENT_EXTENSIONS,
-  ...Object.keys(IMAGE_MIME_BY_EXTENSION)
-])
-
-async function parseAttachmentFile(filePath: string): Promise<ParsedAttachment> {
-  const fileName = basename(filePath)
-  const extension = extname(filePath).toLowerCase()
-  const imageMime = IMAGE_MIME_BY_EXTENSION[extension]
-
-  if (!SUPPORTED_ATTACHMENT_EXTENSIONS.has(extension)) {
-    throw new Error(`Unsupported attachment type: ${extension || '(none)'}`)
-  }
-
-  if (imageMime) {
-    const imageBuffer = readFileSync(filePath)
-    const base64Image = imageBuffer.toString('base64')
-
-    return {
-      kind: 'image',
-      name: fileName,
-      mimeType: imageMime,
-      dataUrl: `data:${imageMime};base64,${base64Image}`
-    }
-  }
-
-  if (extension === '.pdf') {
-    return {
-      kind: 'text',
-      name: fileName,
-      content: await extractPdfTextWithFallback(filePath)
-    }
-  }
-
-  if (extension === '.txt' || extension === '.md') {
-    return {
-      kind: 'text',
-      name: fileName,
-      content: readFileSync(filePath, 'utf-8')
-    }
-  }
-
-  throw new Error(`Unsupported attachment type: ${extension || '(none)'}`)
-}
-
-async function parseAttachmentPaths(filePaths: string[]): Promise<AttachmentParseResult> {
-  const uniqueFilePaths = Array.from(new Set(filePaths))
-  const parsed = await Promise.all(uniqueFilePaths.map(async (filePath) => {
-    try {
-      const attachment = await parseAttachmentFile(filePath)
-      return { ok: true as const, attachment }
-    } catch {
-      return { ok: false as const, name: basename(filePath) }
-    }
-  }))
-
-  const attachments = parsed
-    .filter((result): result is { ok: true; attachment: ParsedAttachment } => result.ok)
-    .map((result) => result.attachment)
-
-  const failed = parsed
-    .filter((result): result is { ok: false; name: string } => !result.ok)
-    .map((result) => result.name)
-
-  return {
-    attachments,
-    failed
-  }
 }
 
 // ─── Single Instance Lock ────────────────────────────────────────────────────
@@ -451,9 +368,14 @@ function registerIpcHandlers(): void {
       title: 'Attach Files',
       filters: [
         {
-          name: 'Text, Markdown, PDF, Images',
-          extensions: ['txt', 'md', 'pdf', 'png', 'jpg', 'jpeg', 'webp', 'gif']
-        }
+          name: 'Text, Code, PDF, Images',
+          extensions: [
+            ...COMMON_TEXT_EXTENSIONS,
+            'pdf',
+            ...Object.keys(IMAGE_MIME_BY_EXTENSION).map((extension) => extension.slice(1))
+          ]
+        },
+        { name: 'All Files', extensions: ['*'] }
       ],
       properties: ['openFile', 'multiSelections']
     })

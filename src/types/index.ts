@@ -9,6 +9,7 @@ export interface ProviderSettings {
   models: string[]
   compatibility?: LMStudioCompatibility
   selectedModel?: string
+  favoriteModels?: string[]
 }
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -22,7 +23,6 @@ export interface Settings {
   temperature: number     // 0.0–2.0
   maxTokensEnabled: boolean
   maxTokens: number       // 1–128000
-  maxToolCalls: number    // 1-25
   strictMode: boolean
   darkMode: boolean
   tavilyApiKey: string
@@ -46,6 +46,19 @@ export interface Conversation {
   createdAt: number
   updatedAt: number
   workspacePath: string | null
+  /** Snapshot of the settings used for the most recent request in this chat. */
+  lastRequest?: ConversationRequestInfo | null
+}
+
+export interface ConversationRequestInfo {
+  sentAt: string               // ISO 8601
+  provider: ProviderName
+  model: string
+  temperature: number | null   // null = provider default
+  maxTokens: number | null     // null = provider default
+  reasoningEnabled: boolean
+  searchToolsEnabled: boolean
+  contextProfile: string | null
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -96,12 +109,23 @@ export interface LLMRequestMessage {
   content: string
   timestamp: string
   attachments?: Attachment[]
+  /** Tool calls made while producing an earlier assistant reply (results left out). */
+  toolCalls?: ToolCallRecord[]
+}
+
+/** Slim record of a past tool call, sent back so the model knows what it already did. */
+export interface ToolCallRecord {
+  name: string
+  arguments: Record<string, unknown>
+  status: 'ok' | 'error' | 'incomplete'
+  error?: string
 }
 
 // ─── Stream Chunks ───────────────────────────────────────────────────────────
 
 export interface StreamChunk {
-  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'error' | 'done'
+  /** 'notice' is a non-fatal heads-up for the user (e.g. tool call limit reached). */
+  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'notice' | 'error' | 'done'
   content?: string
   toolCall?: ToolCall
   error?: string

@@ -14,7 +14,7 @@ registerTool({
     type: 'function',
     function: {
       name: 'edit_file',
-      description: 'Perform an exact-match string replacement in an existing file. Searches for old_string as a literal substring and replaces it with new_string. Fails if the string is not found or appears more than once — provide more surrounding context to disambiguate. Use this to iteratively refine a file without rewriting the whole thing.',
+      description: 'Perform an exact-match string replacement in an existing file. Searches for old_string as a literal substring and replaces it with new_string. Fails if the string is not found or appears more than once — provide more surrounding context to disambiguate. Use this to iteratively refine a file without rewriting the whole thing. In Strict Mode the user is asked first; if they decline, the result is an error with code USER_DENIED.',
       parameters: {
         type: 'object',
         properties: {

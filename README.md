@@ -7,12 +7,14 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 ## What It Does
 
 - Multi-provider chat with streaming: OpenAI, OpenRouter, Ollama, and LM Studio.
-- Tool calling for local file ops + web/wiki/url tools.
+- Tool calling for local file ops + web/wiki/url tools (up to 75 tool calls per turn, with check-in nudges to the model at 25, 40, and 50).
 - Workspace jail for file safety, with optional strict confirmation mode.
 - 3 persistent context files (`system`, `user`, `org`) injected into every run.
-- Text file attachments from `.txt`, `.md`, and `.pdf` (PDF text extraction included).
+- Text file attachments of any kind: plain text, code, config, and markup (`.py`, `.yaml`, `.json`, `.xml`, `.css`, `Dockerfile`, ...) are detected by content, no renaming needed. PDF text extraction included.
 - Image file attachments from `.png`, `.jpeg/.jpg`, `.webp`, and `.gif` for vision capable models.
 - Local SQLite conversation history with retry/copy message actions.
+- Favorite models: star models in Settings for one-click switching.
+- Per-chat info popover (model, request settings, counts) from the chat header.
 
 ## Quick Start
 
@@ -102,6 +104,7 @@ red-ledger/
 |   |-- preload.ts                   # Exposes window.redLedger
 |   |-- ipc/                         # Typed IPC contract + handlers
 |   |-- services/                    # Core domain services
+|   |   |-- AttachmentService.ts
 |   |   |-- ConversationService.ts
 |   |   |-- ContextService.ts
 |   |   |-- LlmService.ts

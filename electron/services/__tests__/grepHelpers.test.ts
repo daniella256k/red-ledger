@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildGrepMatcher, buildGlobMatcher } from '../WorkspaceService'
+import { buildGrepMatcher, buildGlobMatcher, excerptAroundMatch } from '../WorkspaceService'
 import { PathJailError } from '../pathJail'
 
 describe('buildGrepMatcher — literal mode', () => {
@@ -129,5 +129,37 @@ describe('buildGlobMatcher', () => {
     const m2 = buildGlobMatcher('   ')
     expect(m1('anything.ts')).toBe(true)
     expect(m2('anything.ts')).toBe(true)
+  })
+})
+
+describe('excerptAroundMatch', () => {
+  it('returns short lines whole', () => {
+    expect(excerptAroundMatch('privacy matters', 0)).toBe('privacy matters')
+  })
+
+  it('centers long lines on the match', () => {
+    const line = 'a'.repeat(633) + 'privacy and safety' + 'b'.repeat(600)
+    const excerpt = excerptAroundMatch(line, 633, 50)
+
+    expect(excerpt.startsWith('…')).toBe(true)
+    expect(excerpt.endsWith('…')).toBe(true)
+    expect(excerpt).toContain('privacy and safety')
+    expect(excerpt.length).toBe(102)
+  })
+
+  it('does not add an ellipsis at the line edges', () => {
+    const line = 'privacy ' + 'x'.repeat(1000)
+    expect(excerptAroundMatch(line, 0, 50).startsWith('privacy')).toBe(true)
+  })
+})
+
+describe('buildGrepMatcher — inline flags', () => {
+  it('accepts a leading (?i) as case-insensitive', () => {
+    const match = buildGrepMatcher('(?i)privacy|safety', true, true)
+    expect(match('Data PRIVACY policy')).toBe(5)
+  })
+
+  it('points to case_sensitive in regex errors', () => {
+    expect(() => buildGrepMatcher('a(?i)b', true, true)).toThrow(/case_sensitive: false/)
   })
 })

@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react'
-import { ChevronDown, ChevronRight, CircleHelp, Moon, Sun } from 'lucide-react'
+import { ChevronDown, ChevronRight, CircleHelp, Moon, Star, Sun } from 'lucide-react'
 import { useSettingsStore } from '@/store'
 import type { ProviderName } from '@/types'
 
@@ -10,7 +10,6 @@ const PROVIDERS: { id: ProviderName; label: string }[] = [
   { id: 'lmstudio', label: 'LM Studio' }
 ]
 
-const PROVIDERS_USING_FIRST_LIST_MODEL = new Set<ProviderName>(['ollama', 'lmstudio'])
 const PROVIDERS_ALLOW_BLANK_MODEL = new Set<ProviderName>([
   'openai',
   'openrouter',
@@ -36,10 +35,6 @@ function resolveProviderModel(
   availableModels: string[]
 ): string | undefined {
   if (availableModels.length === 0) return currentModel
-
-  if (PROVIDERS_USING_FIRST_LIST_MODEL.has(provider)) {
-    return availableModels[0]
-  }
 
   if (currentModel && availableModels.includes(currentModel)) {
     return currentModel
@@ -132,10 +127,15 @@ export function SettingsPanel() {
 
     if (!resolvedModel) return
 
+    // Favorites that the provider no longer offers are dropped silently.
+    const currentFavorites = activeProviderConfig.favoriteModels ?? []
+    const availableFavorites = currentFavorites.filter((m) => models.includes(m))
+
     const sameSelected = activeProviderConfig.selectedModel === resolvedModel
     const sameDefault = settings.defaultModel === resolvedModel
     const sameModels = JSON.stringify(activeProviderConfig.models) === JSON.stringify(models)
-    if (sameSelected && sameDefault && sameModels) {
+    const sameFavorites = availableFavorites.length === currentFavorites.length
+    if (sameSelected && sameDefault && sameModels && sameFavorites) {
       return
     }
 
@@ -147,7 +147,8 @@ export function SettingsPanel() {
         [settings.activeProvider]: {
           ...activeProviderConfig,
           models,
-          selectedModel: resolvedModel
+          selectedModel: resolvedModel,
+          favoriteModels: availableFavorites
         }
       }
     })
@@ -197,6 +198,29 @@ export function SettingsPanel() {
         [settings.activeProvider]: {
           ...activeProvider,
           selectedModel: nextModel
+        }
+      }
+    })
+  }
+
+  const favoriteModels = activeProvider.favoriteModels ?? []
+  const isActiveModelFavorite = favoriteModels.includes(activeProviderModel)
+  // Follow the (already sorted) model list order rather than starring order.
+  const listedFavoriteModels = models.filter((m) => favoriteModels.includes(m))
+  const otherModels = models.filter((m) => !favoriteModels.includes(m))
+  const toggleActiveModelFavorite = () => {
+    const model = activeProviderModel.trim()
+    if (!model) return
+
+    saveSettings({
+      ...settings,
+      providers: {
+        ...settings.providers,
+        [settings.activeProvider]: {
+          ...activeProvider,
+          favoriteModels: isActiveModelFavorite
+            ? favoriteModels.filter((m) => m !== model)
+            : [...favoriteModels, model]
         }
       }
     })
@@ -368,27 +392,56 @@ export function SettingsPanel() {
                   <span className="loading loading-spinner loading-xs text-rca-red" />
                   <span className="text-xs text-soft-charcoal/40">Loading models...</span>
                 </div>
-              ) : modelsFetchFailed || models.length === 0 ? (
-                <input
-                  type="text"
-                  value={activeProviderModel}
-                  onChange={(e) => saveActiveProviderModel(e.target.value)}
-                  placeholder="moonshotai/kimi-k2.5"
-                  className="input input-sm input-bordered w-full bg-base-100"
-                />
               ) : (
-                <select
-                  value={activeProviderModel}
-                  onChange={(e) => saveActiveProviderModel(e.target.value)}
-                  className="select select-sm select-bordered w-full bg-base-100"
-                >
-                  {!models.includes(activeProviderModel) && activeProviderModel && (
-                    <option value={activeProviderModel}>{activeProviderModel}</option>
+                <div className="flex items-center gap-1.5">
+                  {modelsFetchFailed || models.length === 0 ? (
+                    <input
+                      type="text"
+                      value={activeProviderModel}
+                      onChange={(e) => saveActiveProviderModel(e.target.value)}
+                      placeholder="moonshotai/kimi-k2.5"
+                      className="input input-sm input-bordered flex-1 min-w-0 bg-base-100"
+                    />
+                  ) : (
+                    <select
+                      value={activeProviderModel}
+                      onChange={(e) => saveActiveProviderModel(e.target.value)}
+                      className="select select-sm select-bordered flex-1 min-w-0 bg-base-100"
+                    >
+                      {!models.includes(activeProviderModel) && activeProviderModel && (
+                        <option value={activeProviderModel}>{activeProviderModel}</option>
+                      )}
+                      {listedFavoriteModels.length > 0 ? (
+                        <>
+                          <optgroup label="Favorites">
+                            {listedFavoriteModels.map((m) => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </optgroup>
+                          <optgroup label="All models">
+                            {otherModels.map((m) => (
+                              <option key={m} value={m}>{m}</option>
+                            ))}
+                          </optgroup>
+                        </>
+                      ) : (
+                        models.map((m) => (
+                          <option key={m} value={m}>{m}</option>
+                        ))
+                      )}
+                    </select>
                   )}
-                  {models.map((m) => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
+                  <button
+                    type="button"
+                    onClick={toggleActiveModelFavorite}
+                    disabled={!activeProviderModel.trim()}
+                    aria-pressed={isActiveModelFavorite}
+                    title={isActiveModelFavorite ? 'Remove from favorites' : 'Add to favorites'}
+                    className={`btn btn-ghost btn-sm h-8 min-h-0 w-8 p-0 shrink-0 ${isActiveModelFavorite ? 'text-rca-red' : 'text-soft-charcoal/40 hover:text-soft-charcoal/70'}`}
+                  >
+                    <Star size={14} fill={isActiveModelFavorite ? 'currentColor' : 'none'} />
+                  </button>
+                </div>
               )}
             </div>
           </>

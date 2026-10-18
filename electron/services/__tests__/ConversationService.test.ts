@@ -206,3 +206,47 @@ describe('ConversationService message ordering and recency', () => {
     nowSpy.mockRestore()
   })
 })
+
+describe('ConversationService request metadata', () => {
+  const requestInfo = {
+    sentAt: '2026-01-01T00:00:00.000Z',
+    provider: 'openrouter' as const,
+    model: 'moonshotai/kimi-k2.5',
+    temperature: null,
+    maxTokens: 4096,
+    reasoningEnabled: true,
+    searchToolsEnabled: false,
+    contextProfile: 'Default'
+  }
+
+  it('stores lastRequest as JSON without bumping updated_at', () => {
+    const run = vi.fn()
+    const service = Object.create(ConversationService.prototype) as DatabaseHarness
+    service.stmt = vi.fn(() => ({ run }))
+
+    const updateConversation = ConversationService.prototype.updateConversation as (
+      this: DatabaseHarness,
+      id: string,
+      data: Parameters<ConversationService['updateConversation']>[1]
+    ) => void
+    updateConversation.call(service, 'c1', { lastRequest: requestInfo })
+
+    const args = run.mock.calls[0]
+    // [title, model, provider, pinFlag, pinned, bumpFlag, now, wsFlag, ws, lastFlag, last, id]
+    expect(args[5]).toBe(0)
+    expect(args[9]).toBe(1)
+    expect(JSON.parse(args[10] as string)).toEqual(requestInfo)
+    expect(args[11]).toBe('c1')
+  })
+
+  it('parses lastRequest from rows and tolerates bad JSON', () => {
+    const toConversation = (ConversationService.prototype as unknown as {
+      toConversation: (row: Record<string, unknown>) => { lastRequest?: unknown }
+    }).toConversation
+
+    const base = { id: 'c1', title: 't', model: 'm', provider: 'openai', is_pinned: 0, created_at: 1, updated_at: 1, workspace_path: null }
+    expect(toConversation({ ...base, last_request: JSON.stringify(requestInfo) }).lastRequest).toEqual(requestInfo)
+    expect(toConversation({ ...base, last_request: '{not json' }).lastRequest).toBeNull()
+    expect(toConversation({ ...base, last_request: null }).lastRequest).toBeNull()
+  })
+})

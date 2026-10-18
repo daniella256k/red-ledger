@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, rmSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { WorkspaceService, type DialogAdapter } from '../WorkspaceService'
@@ -19,7 +19,6 @@ const BASE_SETTINGS: Settings = {
   temperature: 0.7,
   maxTokensEnabled: false,
   maxTokens: 4096,
-  maxToolCalls: 25,
   strictMode: false,
   darkMode: false,
   tavilyApiKey: '',
@@ -90,5 +89,36 @@ describe('WorkspaceService.writeFile', () => {
 
     expect(showMessageBox).toHaveBeenCalledTimes(1)
     expect(readFileSync(join(workspaceRoot, 'logs', 'app.log'), 'utf-8')).toBe('line1\nline2\n')
+  })
+})
+
+describe('WorkspaceService.listFiles', () => {
+  let workspaceRoot: string
+  let service: WorkspaceService
+
+  beforeEach(() => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), 'red-ledger-list-'))
+    mkdirSync(join(workspaceRoot, '.github', 'workflows'), { recursive: true })
+    mkdirSync(join(workspaceRoot, '.git'), { recursive: true })
+    mkdirSync(join(workspaceRoot, 'node_modules'), { recursive: true })
+    writeFileSync(join(workspaceRoot, '.github', 'workflows', 'ci.yml'), 'on: push\n')
+    writeFileSync(join(workspaceRoot, '.env.example'), 'KEY=\n')
+    writeFileSync(join(workspaceRoot, 'README.md'), '# Hi\n')
+    service = new WorkspaceService(() => BASE_SETTINGS)
+    service.setWorkspacePath(workspaceRoot)
+  })
+
+  afterEach(() => {
+    rmSync(workspaceRoot, { recursive: true, force: true })
+  })
+
+  it('hides dotfiles by default', () => {
+    expect(service.listFiles().map((node) => node.name)).toEqual(['README.md'])
+  })
+
+  it('includes dotfiles when asked, but never .git or node_modules', () => {
+    const nodes = service.listFiles(undefined, { includeHidden: true })
+    expect(nodes.map((node) => node.name)).toEqual(['.github', '.env.example', 'README.md'])
+    expect(nodes[0].children?.[0].children?.[0].path).toBe('.github/workflows/ci.yml')
   })
 })

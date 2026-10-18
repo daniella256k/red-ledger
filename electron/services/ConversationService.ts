@@ -1,6 +1,12 @@
 import { v4 as uuidv4 } from 'uuid'
 import type Database from 'better-sqlite3'
-import type { Attachment, Conversation, Message, ImageAttachmentMimeType } from '../../src/types'
+import type {
+  Attachment,
+  Conversation,
+  ConversationRequestInfo,
+  Message,
+  ImageAttachmentMimeType
+} from '../../src/types'
 
 const SUPPORTED_IMAGE_MIME_TYPES = new Set<ImageAttachmentMimeType>([
   'image/png',
@@ -8,6 +14,18 @@ const SUPPORTED_IMAGE_MIME_TYPES = new Set<ImageAttachmentMimeType>([
   'image/webp',
   'image/gif'
 ])
+
+function parseRequestInfo(value: unknown): ConversationRequestInfo | null {
+  if (typeof value !== 'string' || value.length === 0) return null
+  try {
+    const parsed = JSON.parse(value) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as ConversationRequestInfo
+      : null
+  } catch {
+    return null
+  }
+}
 
 function parseAttachment(value: unknown): Attachment | null {
   if (!value || typeof value !== 'object') return null
@@ -97,6 +115,12 @@ export class ConversationService {
 
     this.migrateConversationProviderConstraintIfNeeded()
 
+    // Added after the provider migration, which rebuilds the table without it.
+    const migratedColumns = this.db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>
+    if (!migratedColumns.some((column) => column.name === 'last_request')) {
+      this.db.exec('ALTER TABLE conversations ADD COLUMN last_request TEXT')
+    }
+
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
        CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
@@ -167,7 +191,8 @@ export class ConversationService {
       isPinned: Boolean(row.is_pinned),
       createdAt: row.created_at as number,
       updatedAt: row.updated_at as number,
-      workspacePath: row.workspace_path as string | null
+      workspacePath: row.workspace_path as string | null,
+      lastRequest: parseRequestInfo(row.last_request)
     }
   }
 
@@ -308,6 +333,7 @@ export class ConversationService {
     const now = Date.now()
     const shouldUpdateWorkspacePath = data.workspacePath !== undefined
     const shouldUpdatePinned = data.isPinned !== undefined
+    const shouldUpdateLastRequest = data.lastRequest !== undefined
     const shouldBumpUpdatedAt =
       data.title !== undefined ||
       data.model !== undefined ||
@@ -331,6 +357,10 @@ export class ConversationService {
         workspace_path = CASE
           WHEN ? = 1 THEN ?
           ELSE workspace_path
+        END,
+        last_request = CASE
+          WHEN ? = 1 THEN ?
+          ELSE last_request
         END
        WHERE id = ?`
     ).run(
@@ -343,6 +373,8 @@ export class ConversationService {
       now,
       shouldUpdateWorkspacePath ? 1 : 0,
       data.workspacePath ?? null,
+      shouldUpdateLastRequest ? 1 : 0,
+      data.lastRequest ? JSON.stringify(data.lastRequest) : null,
       id
     )
   }
@@ -405,8 +437,8 @@ export class ConversationService {
     const forkInTransaction = this.db.transaction(() => {
       this.stmt(
         'createForkConversation',
-        `INSERT INTO conversations (id, title, model, provider, is_pinned, created_at, updated_at, workspace_path)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO conversations (id, title, model, provider, is_pinned, created_at, updated_at, workspace_path, last_request)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         forkConversationId,
         forkTitle,
@@ -415,7 +447,8 @@ export class ConversationService {
         0,
         now,
         now,
-        sourceConversation.workspace_path as string | null
+        sourceConversation.workspace_path as string | null,
+        (sourceConversation.last_request as string | null) ?? null
       )
 
       const insertForkMessage = this.stmt(

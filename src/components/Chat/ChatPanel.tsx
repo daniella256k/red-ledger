@@ -7,22 +7,14 @@ import { useStreaming } from '@/hooks/useStreaming'
 import type { Attachment } from '@/types'
 import { MessageList } from './MessageList'
 import { ChatInput } from './ChatInput'
+import { ChatInfoPopover } from './ChatInfoPopover'
 
-const SUPPORTED_ATTACHMENT_EXTENSIONS = new Set([
-  '.txt',
-  '.md',
-  '.pdf',
-  '.png',
-  '.jpg',
-  '.jpeg',
-  '.webp',
-  '.gif'
-])
+const MAX_FAILED_NAMES_IN_TOAST = 3
 
-function getFileExtension(fileName: string): string {
-  const dotIndex = fileName.lastIndexOf('.')
-  if (dotIndex === -1) return ''
-  return fileName.slice(dotIndex).toLowerCase()
+function describeFailedAttachments(failed: string[]): string {
+  const shown = failed.slice(0, MAX_FAILED_NAMES_IN_TOAST).join(', ')
+  const extra = failed.length - MAX_FAILED_NAMES_IN_TOAST
+  return `Could not attach ${shown}${extra > 0 ? ` and ${extra} more` : ''}.`
 }
 
 function hasFileDragPayload(event: React.DragEvent): boolean {
@@ -32,6 +24,9 @@ function hasFileDragPayload(event: React.DragEvent): boolean {
 export function ChatPanel() {
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
   const isEmptyChatState = !activeConversationId
+  const activeConversation = useConversationStore((s) =>
+    s.conversations.find((item) => item.id === s.activeConversationId) ?? null
+  )
   const activeConversationTitle = useConversationStore((s) => {
     if (!s.activeConversationId) return null
     const conversation = s.conversations.find((item) => item.id === s.activeConversationId)
@@ -90,38 +85,19 @@ export function ChatPanel() {
     const droppedFiles = Array.from(event.dataTransfer.files)
     if (droppedFiles.length === 0) return
 
-    const supportedFiles: File[] = []
-    const unsupportedNames: string[] = []
-
-    for (const file of droppedFiles) {
-      const extension = getFileExtension(file.name)
-      if (!SUPPORTED_ATTACHMENT_EXTENSIONS.has(extension)) {
-        unsupportedNames.push(file.name)
-        continue
-      }
-      supportedFiles.push(file)
-    }
-
-    if (supportedFiles.length === 0) {
-      useUIStore.getState().addToast({
-        type: 'warning',
-        message: 'No supported files found. Use .txt, .md, .pdf, .png, .jpg/.jpeg, .webp, or .gif.'
-      })
-      return
-    }
-
+    // The main process decides what is supported: images, PDFs, and any
+    // file whose content is text (code, config, markup, ...).
     setIsParsingDrop(true)
     try {
-      const result = await window.redLedger.parseAttachmentFiles(supportedFiles)
+      const result = await window.redLedger.parseAttachmentFiles(droppedFiles)
       if (result.attachments.length > 0) {
         addAttachments(result.attachments)
       }
 
-      const failedCount = unsupportedNames.length + result.failed.length
-      if (failedCount > 0) {
+      if (result.failed.length > 0) {
         useUIStore.getState().addToast({
           type: 'warning',
-          message: `${failedCount} file${failedCount === 1 ? '' : 's'} could not be attached.`
+          message: describeFailedAttachments(result.failed)
         })
       }
     } catch (err) {
@@ -151,23 +127,24 @@ export function ChatPanel() {
               {isParsingDrop ? 'Attaching files...' : 'Drop files to attach to your next message'}
             </p>
             <p className="mt-1 text-xs text-soft-charcoal/55">
-              Supports .txt, .md, .pdf, .png, .jpg/.jpeg, .webp, and .gif
+              Text and code files (.py, .yaml, .json, .xml, ...), PDFs, and images
             </p>
           </div>
         </div>
       )}
 
       {/* Header */}
-      <div className="px-4 py-2.5 border-b border-weathered bg-paper-stack/50 flex items-center min-h-[42px]">
+      <div className="relative px-4 py-2.5 border-b border-weathered bg-paper-stack/50 flex items-center gap-1.5 min-h-[42px]">
         <h2
           className={isEmptyChatState
             ? 'text-xs font-semibold text-soft-charcoal/70 uppercase tracking-wider'
-            : 'text-sm font-semibold text-soft-charcoal/75 truncate'
+            : 'text-sm font-semibold text-soft-charcoal/75 truncate min-w-0'
           }
           title={isEmptyChatState ? APP_NAME : (activeConversationTitle ?? DEFAULT_CHAT_TITLE)}
         >
           {isEmptyChatState ? APP_NAME.toUpperCase() : activeConversationTitle}
         </h2>
+        {activeConversation && <ChatInfoPopover conversation={activeConversation} />}
       </div>
 
       {activeConversationId ? (

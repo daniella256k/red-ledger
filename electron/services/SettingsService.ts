@@ -7,9 +7,6 @@ import type {
 } from '../../src/types'
 
 const DEFAULT_FALLBACK_MODEL = 'moonshotai/kimi-k2.5'
-const DEFAULT_MAX_TOOL_CALLS = 25
-const MIN_MAX_TOOL_CALLS = 1
-const MAX_MAX_TOOL_CALLS = 25
 
 const DEFAULT_SETTINGS: Settings = {
   activeProvider: 'openrouter',
@@ -43,7 +40,6 @@ const DEFAULT_SETTINGS: Settings = {
   temperature: 1.0,
   maxTokensEnabled: false,
   maxTokens: 8192,
-  maxToolCalls: DEFAULT_MAX_TOOL_CALLS,
   strictMode: false,
   darkMode: false,
   tavilyApiKey: '',
@@ -128,6 +124,15 @@ function sanitizeProviderSettings(value: unknown, defaults: ProviderSettings): P
     ? raw.models.filter((m): m is string => typeof m === 'string')
     : defaults.models
 
+  const favoriteModels = Array.isArray(raw.favoriteModels)
+    ? Array.from(new Set(
+      raw.favoriteModels
+        .filter((m): m is string => typeof m === 'string')
+        .map((m) => m.trim())
+        .filter((m) => m.length > 0)
+    ))
+    : []
+
   return {
     apiKey: typeof raw.apiKey === 'string' ? raw.apiKey : defaults.apiKey,
     baseUrl: typeof raw.baseUrl === 'string' && raw.baseUrl.trim().length > 0
@@ -137,7 +142,8 @@ function sanitizeProviderSettings(value: unknown, defaults: ProviderSettings): P
     compatibility: sanitizeCompatibility(raw.compatibility, defaults.compatibility),
     selectedModel: typeof raw.selectedModel === 'string'
       ? raw.selectedModel
-      : defaults.selectedModel
+      : defaults.selectedModel,
+    favoriteModels
   }
 }
 
@@ -189,10 +195,6 @@ export function sanitizeSettings(settings: Partial<Settings> | undefined): Setti
     ? Math.max(1, Math.min(128000, Math.floor(s.maxTokens)))
     : DEFAULT_SETTINGS.maxTokens
 
-  const maxToolCalls = typeof s.maxToolCalls === 'number' && !isNaN(s.maxToolCalls)
-    ? Math.max(MIN_MAX_TOOL_CALLS, Math.min(MAX_MAX_TOOL_CALLS, Math.floor(s.maxToolCalls)))
-    : DEFAULT_SETTINGS.maxToolCalls
-
   const maxTokensEnabled = typeof s.maxTokensEnabled === 'boolean'
     ? s.maxTokensEnabled
     : DEFAULT_SETTINGS.maxTokensEnabled
@@ -206,7 +208,6 @@ export function sanitizeSettings(settings: Partial<Settings> | undefined): Setti
     temperature,
     maxTokensEnabled,
     maxTokens,
-    maxToolCalls,
     strictMode: typeof s.strictMode === 'boolean' ? s.strictMode : DEFAULT_SETTINGS.strictMode,
     darkMode: typeof s.darkMode === 'boolean' ? s.darkMode : DEFAULT_SETTINGS.darkMode,
     tavilyApiKey: typeof s.tavilyApiKey === 'string' ? s.tavilyApiKey : DEFAULT_SETTINGS.tavilyApiKey,
