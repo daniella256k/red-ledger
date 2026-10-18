@@ -1,6 +1,18 @@
 import type { StreamChunk } from '../../../src/types'
 
 /**
+ * JSON Schema for a tool's arguments. Built-in tools use the simple
+ * properties/required shape; MCP tools pass the server's schema through
+ * unchanged, so any other JSON Schema keywords are allowed too.
+ */
+export interface ToolParametersSchema {
+  type: 'object'
+  properties?: Record<string, unknown>
+  required?: string[]
+  [keyword: string]: unknown
+}
+
+/**
  * Tool definition in OpenAI function-calling format.
  * All providers receive tools in this shape; non-supporting providers
  * (e.g. Ollama without tool support) simply ignore them.
@@ -10,11 +22,7 @@ export interface ToolDefinition {
   function: {
     name: string
     description: string
-    parameters: {
-      type: 'object'
-      properties: Record<string, { type: string; description: string }>
-      required: string[]
-    }
+    parameters: ToolParametersSchema
   }
 }
 

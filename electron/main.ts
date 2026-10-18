@@ -15,6 +15,7 @@ import { registerSettingsHandlers, getCurrentSettings } from './ipc/settings'
 import { registerFsHandlers, getWorkspaceService } from './ipc/fs'
 import { registerLlmHandlers } from './ipc/llm'
 import { registerSearchHandlers } from './ipc/search'
+import { registerMcpHandlers, getMcpService } from './ipc/mcp'
 import { registerTransferHandlers } from './ipc/transfer'
 import { handleIpc } from './ipc/typedIpc'
 import { assertObject } from './ipc/validate'
@@ -305,6 +306,12 @@ function registerIpcHandlers(): void {
     } catch {
       // WorkspaceService not initialized yet — initial sync handled below
     }
+    // Same for MCP connections: unchanged servers are left alone.
+    try {
+      getMcpService().applyServers(settings.mcpServers)
+    } catch {
+      // McpService not initialized yet — initial connect handled below
+    }
   })
 
   // 3. File system (needs settings for strict mode checks)
@@ -318,16 +325,20 @@ function registerIpcHandlers(): void {
   // 5. Search (needs settings for API keys)
   registerSearchHandlers(getCurrentSettings)
 
-  // 6. LLM streaming (needs settings + context for system prompt)
+  // 6. MCP connections (registers each server's tools in the tool registry)
+  registerMcpHandlers(getCurrentSettings)
+  getMcpService().applyServers(getCurrentSettings().mcpServers)
+
+  // 7. LLM streaming (needs settings + context for system prompt)
   registerLlmHandlers({
     getSettings: getCurrentSettings,
     getSystemPrompt: () => getContextService().assembleSystemPrompt()
   })
 
-  // 7. Chat import/export
+  // 8. Chat import/export
   registerTransferHandlers(getConversationService())
 
-  // 8. Dialog handlers (remain inline — they're simple and window-dependent)
+  // 9. Dialog handlers (remain inline — they're simple and window-dependent)
   handleIpc('dialog:confirm', async (_event, options) => {
     assertObject(options, 'options')
     if (!mainWindow) return false
@@ -431,7 +442,25 @@ app.on('window-all-closed', () => {
   }
 })
 
-app.on('before-quit', () => {
+let mcpShutdownStarted = false
+
+app.on('before-quit', (event) => {
+  // Close MCP connections (and their child processes) first, then quit for real.
+  if (!mcpShutdownStarted) {
+    mcpShutdownStarted = true
+    let mcpService: ReturnType<typeof getMcpService> | null = null
+    try {
+      mcpService = getMcpService()
+    } catch {
+      // Never initialized
+    }
+    if (mcpService) {
+      event.preventDefault()
+      void mcpService.closeAll().finally(() => app.quit())
+      return
+    }
+  }
+
   try {
     getConversationService()?.close()
   } catch {

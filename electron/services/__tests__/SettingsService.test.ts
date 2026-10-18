@@ -254,3 +254,132 @@ describe('sanitizeSettings', () => {
     expect(result.advancedSectionExpanded).toBe(false)
   })
 })
+
+describe('sanitizeSettings mcpServers', () => {
+  it('defaults to no servers and a collapsed Connections section', () => {
+    const result = sanitizeSettings(undefined)
+    expect(result.mcpServers).toEqual([])
+    expect(result.connectionsSectionExpanded).toBe(false)
+  })
+
+  it('preserves connectionsSectionExpanded when boolean', () => {
+    expect(sanitizeSettings({ connectionsSectionExpanded: true } as any).connectionsSectionExpanded).toBe(true)
+    expect(sanitizeSettings({ connectionsSectionExpanded: 'yes' } as any).connectionsSectionExpanded).toBe(false)
+  })
+
+  it('keeps valid stdio and http servers', () => {
+    const result = sanitizeSettings({
+      mcpServers: [
+        {
+          id: 'a',
+          name: '  Everything  ',
+          transport: 'stdio',
+          command: ' npx ',
+          args: ['-y', '@modelcontextprotocol/server-everything'],
+          env: { DEBUG: '1' },
+          enabled: true
+        },
+        {
+          id: 'b',
+          name: 'Remote',
+          transport: 'http',
+          url: 'https://example.com/mcp',
+          headers: { Authorization: 'Bearer x' },
+          enabled: false
+        }
+      ]
+    } as any)
+
+    expect(result.mcpServers).toEqual([
+      {
+        id: 'a',
+        name: 'Everything',
+        transport: 'stdio',
+        command: 'npx',
+        args: ['-y', '@modelcontextprotocol/server-everything'],
+        env: { DEBUG: '1' },
+        enabled: true
+      },
+      {
+        id: 'b',
+        name: 'Remote',
+        transport: 'http',
+        url: 'https://example.com/mcp',
+        headers: { Authorization: 'Bearer x' },
+        enabled: false
+      }
+    ])
+  })
+
+  it('drops non-array values and malformed entries', () => {
+    expect(sanitizeSettings({ mcpServers: 'nope' } as any).mcpServers).toEqual([])
+    const result = sanitizeSettings({
+      mcpServers: [
+        null,
+        'string',
+        [],
+        { id: 'no-command', name: 'x', transport: 'stdio' },
+        { id: 'no-url', name: 'y', transport: 'http' },
+        { id: 'ok', name: 'ok', command: 'node' }
+      ]
+    } as any)
+    expect(result.mcpServers.map((s) => s.id)).toEqual(['ok'])
+  })
+
+  it('infers transport from url and defaults enabled to true', () => {
+    const [server] = sanitizeSettings({
+      mcpServers: [{ id: 'r', name: 'r', url: 'http://localhost:3000/mcp' }]
+    } as any).mcpServers
+    expect(server.transport).toBe('http')
+    expect(server.enabled).toBe(true)
+  })
+
+  it('drops fields that belong to the other transport', () => {
+    const [server] = sanitizeSettings({
+      mcpServers: [{
+        id: 's',
+        name: 's',
+        transport: 'stdio',
+        command: 'node',
+        url: 'https://example.com',
+        headers: { a: 'b' }
+      }]
+    } as any).mcpServers
+    expect(server.url).toBeUndefined()
+    expect(server.headers).toBeUndefined()
+  })
+
+  it('filters bad args/env/header values and stringifies numbers', () => {
+    const [stdio, http] = sanitizeSettings({
+      mcpServers: [
+        { id: 's', name: 's', command: 'node', args: ['a', 2, null, {}], env: { A: 'x', B: 5, C: {}, ' ': 'y' } },
+        { id: 'h', name: 'h', transport: 'http', url: 'https://x', headers: 'nope' }
+      ]
+    } as any).mcpServers
+    expect(stdio.args).toEqual(['a', '2'])
+    expect(stdio.env).toEqual({ A: 'x', B: '5' })
+    expect(http.headers).toBeUndefined()
+  })
+
+  it('fills in missing names and ids and makes ids unique', () => {
+    const result = sanitizeSettings({
+      mcpServers: [
+        { command: 'node' },
+        { id: 'dup', name: 'One', command: 'node' },
+        { id: 'dup', name: 'Two', command: 'node' }
+      ]
+    } as any)
+    expect(result.mcpServers.map((s) => s.id)).toEqual(['mcp-1', 'dup', 'dup-2'])
+    expect(result.mcpServers[0].name).toBe('Server 1')
+  })
+
+  it('accepts common transport spellings', () => {
+    const result = sanitizeSettings({
+      mcpServers: [
+        { id: 'a', name: 'a', transport: 'streamable-http', url: 'https://x' },
+        { id: 'b', name: 'b', transport: 'garbage', command: 'node' }
+      ]
+    } as any)
+    expect(result.mcpServers.map((s) => s.transport)).toEqual(['http', 'stdio'])
+  })
+})

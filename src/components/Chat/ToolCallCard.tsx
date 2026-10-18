@@ -1,14 +1,26 @@
 import { useState } from 'react'
-import { ChevronDown, ChevronRight, Wrench } from 'lucide-react'
+import { ChevronDown, ChevronRight, Plug, Wrench } from 'lucide-react'
 import type { ToolCall } from '@/types'
 import { cn } from '@/lib/utils'
+import { mcpServerPrefix, parseMcpToolName } from '@/lib/mcpConfig'
+import { useSettingsStore } from '@/store'
 
 interface ToolCallCardProps {
   toolCall: ToolCall
 }
 
+/** Display name of the connection an MCP tool came from, falling back to its name prefix. */
+function useMcpServerLabel(toolName: string): { server: string; tool: string } | null {
+  const servers = useSettingsStore((s) => s.settings?.mcpServers)
+  const parsed = parseMcpToolName(toolName)
+  if (!parsed) return null
+  const match = servers?.find((server) => mcpServerPrefix(server.name) === parsed.server)
+  return { server: match?.name ?? parsed.server, tool: parsed.tool }
+}
+
 export function ToolCallCard({ toolCall }: ToolCallCardProps) {
   const [isExpanded, setIsExpanded] = useState(false)
+  const mcp = useMcpServerLabel(toolCall.name)
 
   const hasError = toolCall.result &&
     typeof toolCall.result === 'object' &&
@@ -24,11 +36,23 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
         )}
         onClick={() => setIsExpanded(!isExpanded)}
       >
-        <div className="flex items-center gap-2">
-          <Wrench size={14} />
-          <span className="font-mono text-xs">{toolCall.name}</span>
+        <div className="flex items-center gap-2 min-w-0">
+          {mcp ? <Plug size={14} className="shrink-0" /> : <Wrench size={14} className="shrink-0" />}
+          {mcp ? (
+            <>
+              <span
+                className="shrink-0 max-w-[40%] truncate rounded bg-base-100/70 px-1.5 py-px text-[10px] font-medium uppercase tracking-wide opacity-80"
+                title={`From the "${mcp.server}" connection`}
+              >
+                {mcp.server}
+              </span>
+              <span className="font-mono text-xs truncate" title={toolCall.name}>{mcp.tool}</span>
+            </>
+          ) : (
+            <span className="font-mono text-xs">{toolCall.name}</span>
+          )}
         </div>
-        {isExpanded ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
+        {isExpanded ? <ChevronDown size={14} className="shrink-0" /> : <ChevronRight size={14} className="shrink-0" />}
       </div>
 
       {isExpanded && (

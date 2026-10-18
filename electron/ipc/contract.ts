@@ -7,7 +7,8 @@
  */
 import type {
   Conversation, Message, Settings, FileNode, SearchResult,
-  Attachment, AttachmentParseResult, LLMRequest, StreamChunk, ContextProfile, TitleGenerationRequest
+  Attachment, AttachmentParseResult, LLMRequest, StreamChunk, ContextProfile, TitleGenerationRequest,
+  McpServerStatus
 } from '../../src/types'
 
 export type ChatExportFormat = 'markdown' | 'xml'
@@ -77,6 +78,10 @@ export interface IpcContract {
 
   // Search
   'search:web':                 { params: [query: string, numResults?: number];        result: SearchResult[] }
+
+  // MCP connections
+  'mcp:getStatus':              { params: [];                                          result: McpServerStatus[] }
+  'mcp:reconnect':              { params: [serverId: string];                          result: void }
 
   // LLM (non-streaming)
   'llm:listModels':             { params: [provider: string];                          result: string[] }

@@ -3,8 +3,14 @@ import type {
   Settings,
   ProviderName,
   ProviderSettings,
-  LMStudioCompatibility
+  LMStudioCompatibility,
+  McpServerConfig
 } from '../../src/types'
+import {
+  normalizeMcpTransport,
+  sanitizeStringArray,
+  sanitizeStringRecord
+} from '../../src/lib/mcpConfig'
 
 const DEFAULT_FALLBACK_MODEL = 'moonshotai/kimi-k2.5'
 
@@ -49,8 +55,13 @@ const DEFAULT_SETTINGS: Settings = {
   lastWorkspacePath: null,
   providerSectionExpanded: true,
   searchSectionExpanded: true,
-  advancedSectionExpanded: false
+  advancedSectionExpanded: false,
+  connectionsSectionExpanded: false,
+  mcpServers: []
 }
+
+const MAX_MCP_SERVERS = 50
+const MAX_MCP_NAME_LENGTH = 64
 
 const PROVIDER_NAMES: ProviderName[] = ['openai', 'openrouter', 'ollama', 'lmstudio']
 const VALID_PROVIDERS = new Set<ProviderName>(PROVIDER_NAMES)
@@ -147,6 +158,60 @@ function sanitizeProviderSettings(value: unknown, defaults: ProviderSettings): P
   }
 }
 
+function sanitizeMcpServer(value: unknown, index: number): McpServerConfig | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+
+  const command = typeof raw.command === 'string' ? raw.command.trim() : ''
+  const url = typeof raw.url === 'string' ? raw.url.trim() : ''
+  const transport = normalizeMcpTransport(raw.transport, url.length > 0)
+  if (transport === 'stdio' ? !command : !url) return null
+
+  const rawName = typeof raw.name === 'string' ? raw.name.trim().slice(0, MAX_MCP_NAME_LENGTH) : ''
+  const id = typeof raw.id === 'string' && raw.id.trim().length > 0 ? raw.id.trim() : `mcp-${index + 1}`
+
+  const server: McpServerConfig = {
+    id,
+    name: rawName || `Server ${index + 1}`,
+    transport,
+    enabled: typeof raw.enabled === 'boolean' ? raw.enabled : true
+  }
+
+  if (transport === 'stdio') {
+    server.command = command
+    const args = sanitizeStringArray(raw.args)
+    const env = sanitizeStringRecord(raw.env)
+    if (args) server.args = args
+    if (env) server.env = env
+  } else {
+    server.url = url
+    const headers = sanitizeStringRecord(raw.headers)
+    if (headers) server.headers = headers
+  }
+
+  return server
+}
+
+/**
+ * Keep well-formed MCP servers only: each needs a command (stdio) or a URL
+ * (http). Fields for the other transport are dropped, and ids are made unique.
+ */
+export function sanitizeMcpServers(value: unknown): McpServerConfig[] {
+  if (!Array.isArray(value)) return []
+
+  const seenIds = new Set<string>()
+  const servers: McpServerConfig[] = []
+  for (const [index, entry] of value.slice(0, MAX_MCP_SERVERS).entries()) {
+    const server = sanitizeMcpServer(entry, index)
+    if (!server) continue
+    let id = server.id
+    for (let n = 2; seenIds.has(id); n++) id = `${server.id}-${n}`
+    seenIds.add(id)
+    servers.push({ ...server, id })
+  }
+  return servers
+}
+
 export function sanitizeSettings(settings: Partial<Settings> | undefined): Settings {
   const s = settings ?? {}
 
@@ -227,7 +292,11 @@ export function sanitizeSettings(settings: Partial<Settings> | undefined): Setti
       : DEFAULT_SETTINGS.searchSectionExpanded,
     advancedSectionExpanded: typeof s.advancedSectionExpanded === 'boolean'
       ? s.advancedSectionExpanded
-      : DEFAULT_SETTINGS.advancedSectionExpanded
+      : DEFAULT_SETTINGS.advancedSectionExpanded,
+    connectionsSectionExpanded: typeof s.connectionsSectionExpanded === 'boolean'
+      ? s.connectionsSectionExpanded
+      : DEFAULT_SETTINGS.connectionsSectionExpanded,
+    mcpServers: sanitizeMcpServers(s.mcpServers)
   }
 }
 

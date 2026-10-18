@@ -33,6 +33,34 @@ export interface Settings {
   providerSectionExpanded: boolean
   searchSectionExpanded: boolean
   advancedSectionExpanded: boolean
+  connectionsSectionExpanded: boolean
+  mcpServers: McpServerConfig[]
+}
+
+// ─── MCP Connections ─────────────────────────────────────────────────────────
+
+/** 'stdio' launches a local command; 'http' talks to a Streamable HTTP endpoint. */
+export type McpTransport = 'stdio' | 'http'
+
+export interface McpServerConfig {
+  id: string
+  name: string
+  transport: McpTransport
+  command?: string
+  args?: string[]
+  env?: Record<string, string>
+  url?: string
+  headers?: Record<string, string>
+  enabled: boolean
+}
+
+export type McpConnectionState = 'disabled' | 'connecting' | 'connected' | 'error'
+
+export interface McpServerStatus {
+  id: string
+  state: McpConnectionState
+  toolCount: number
+  error?: string
 }
 
 // ─── Conversations ───────────────────────────────────────────────────────────
@@ -195,6 +223,7 @@ export type ErrorCode =
   | 'INVALID_INPUT'
   | 'DATABASE_ERROR'
   | 'USER_DENIED'
+  | 'MCP_ERROR'
   | 'UNKNOWN'
 
 // ─── Chat Import/Export ─────────────────────────────────────────────────────
@@ -266,6 +295,11 @@ export interface RedLedgerAPI {
 
   // Search
   webSearch(query: string, numResults?: number): Promise<SearchResult[]>
+
+  // MCP Connections
+  getMcpStatus(): Promise<McpServerStatus[]>
+  reconnectMcpServer(serverId: string): Promise<void>
+  onMcpStatus(handler: (statuses: McpServerStatus[]) => void): () => void
 
   // Dialogs
   showConfirmDialog(options: { title: string; message: string; detail?: string }): Promise<boolean>

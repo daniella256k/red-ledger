@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { ChevronDown, ChevronRight, CircleHelp, Moon, Star, Sun } from 'lucide-react'
 import { useSettingsStore } from '@/store'
 import type { ProviderName } from '@/types'
+import { McpConnectionsSection } from './McpConnectionsSection'
 
 const PROVIDERS: { id: ProviderName; label: string }[] = [
   { id: 'openai', label: 'OpenAI' },
@@ -543,6 +544,27 @@ export function SettingsPanel() {
 
         <button
           type="button"
+          aria-expanded={settings.connectionsSectionExpanded}
+          onClick={() =>
+            saveSettings({
+              ...settings,
+              connectionsSectionExpanded: !settings.connectionsSectionExpanded
+            })
+          }
+          className="divider text-[10px] text-soft-charcoal/30 uppercase tracking-widest my-1 w-full cursor-pointer bg-transparent border-0 p-0 hover:text-soft-charcoal/50 transition-colors"
+        >
+          <span className="inline-flex items-center gap-1">
+            {settings.connectionsSectionExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+            Connections
+          </span>
+        </button>
+
+        {settings.connectionsSectionExpanded && (
+          <McpConnectionsSection settings={settings} saveSettings={saveSettings} />
+        )}
+
+        <button
+          type="button"
           aria-expanded={settings.advancedSectionExpanded}
           onClick={() =>
             saveSettings({
@@ -667,7 +689,7 @@ export function SettingsPanel() {
               <div className="flex items-center gap-2">
                 <span
                   className="text-soft-charcoal/40 hover:text-soft-charcoal/60 cursor-help"
-                  title="Asks for permission on file operations."
+                  title="Asks for permission on file operations and before every connection tool call."
                   aria-label="Strict Mode help"
                 >
                   <CircleHelp size={12} />

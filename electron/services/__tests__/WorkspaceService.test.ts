@@ -28,7 +28,9 @@ const BASE_SETTINGS: Settings = {
   lastWorkspacePath: null,
   providerSectionExpanded: true,
   searchSectionExpanded: true,
-  advancedSectionExpanded: false
+  advancedSectionExpanded: false,
+  connectionsSectionExpanded: false,
+  mcpServers: []
 }
 
 describe('WorkspaceService.writeFile', () => {

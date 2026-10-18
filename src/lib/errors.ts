@@ -10,6 +10,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
   INVALID_INPUT: 'Invalid input',
   DATABASE_ERROR: 'Database error',
   USER_DENIED: 'Operation cancelled by user',
+  MCP_ERROR: 'A connected tool server returned an error',
   UNKNOWN: 'An unexpected error occurred'
 }
 

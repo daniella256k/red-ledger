@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AttachmentParseResult, MenuAction, RedLedgerAPI, StreamChunk } from '../src/types'
+import type { AttachmentParseResult, McpServerStatus, MenuAction, RedLedgerAPI, StreamChunk } from '../src/types'
 
 function getFileName(value: unknown): string {
   if (!value || typeof value !== 'object') return 'Unknown file'
@@ -156,6 +156,24 @@ const api: RedLedgerAPI = {
 
   webSearch: (query: string, numResults?: number) =>
     ipcRenderer.invoke('search:web', query, numResults),
+
+  // ─── MCP Connections ─────────────────────────────────────────────────────
+
+  getMcpStatus: () =>
+    ipcRenderer.invoke('mcp:getStatus'),
+
+  reconnectMcpServer: (serverId: string) =>
+    ipcRenderer.invoke('mcp:reconnect', serverId),
+
+  onMcpStatus: (handler) => {
+    const listener = (_event: Electron.IpcRendererEvent, statuses: unknown) => {
+      if (Array.isArray(statuses)) handler(statuses as McpServerStatus[])
+    }
+    ipcRenderer.on('mcp:status', listener)
+    return () => {
+      ipcRenderer.removeListener('mcp:status', listener)
+    }
+  },
 
   // ─── Dialogs ─────────────────────────────────────────────────────────────
 

@@ -22,7 +22,7 @@ export function getWorkspaceService(): WorkspaceService {
  * Create a DialogAdapter backed by a BrowserWindow.
  * Returns null if no window is available.
  */
-function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
+export function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
   if (!win) return null
   return {
     showMessageBox: (options) => dialog.showMessageBox(win, options)

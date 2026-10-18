@@ -6,9 +6,10 @@ import type { ToolCall } from '../../../src/types'
  * Tool registry — maps tool names to definitions + executors.
  * Each tool file self-registers at import time.
  * Adding a new tool = one file + one registerTool() call.
+ * MCP tools are registered and unregistered at runtime by McpService.
  */
 
-interface ToolEntry {
+export interface ToolEntry {
   definition: ToolDefinition
   execute: (args: Record<string, unknown>, win: BrowserWindow | null) => Promise<unknown>
 }
@@ -17,6 +18,10 @@ const tools = new Map<string, ToolEntry>()
 
 export function registerTool(entry: ToolEntry): void {
   tools.set(entry.definition.function.name, entry)
+}
+
+export function unregisterTool(name: string): void {
+  tools.delete(name)
 }
 
 export function getToolDefinitions(): ToolDefinition[] {
