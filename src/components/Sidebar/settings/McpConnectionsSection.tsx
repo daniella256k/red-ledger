@@ -1,6 +1,6 @@
-import { useEffect, useState } from 'react'
-import { Copy, LogIn, RotateCw, X } from 'lucide-react'
-import type { McpOAuthConfig, McpServerConfig, McpServerStatus, McpTransport } from '@/types'
+import { Fragment, useEffect, useState } from 'react'
+import { ChevronDown, ChevronRight, Copy, LogIn, RotateCw, X } from 'lucide-react'
+import type { McpOAuthConfig, McpServerConfig, McpServerStatus, McpToolInfo, McpTransport } from '@/types'
 import {
   formatKeyValueLines,
   joinCommandLine,
@@ -548,6 +548,84 @@ function JsonView({ servers, onApply, onClose }: JsonViewProps) {
   )
 }
 
+// ─── Tool list ──────────────────────────────────────────────────────────────
+
+const LINK_BUTTON_CLASS = 'bg-transparent border-0 p-0 text-[10px] uppercase tracking-wide text-soft-charcoal/50 hover:text-rca-red disabled:opacity-40 disabled:hover:text-soft-charcoal/50'
+
+interface ToolListProps {
+  tools: McpToolInfo[]
+  disabledTools: string[] | undefined
+  onChange: (disabledTools: string[]) => void
+}
+
+/** Checkboxes for a connected server's tools. Hover a name for its description. */
+function ToolList({ tools, disabledTools, onChange }: ToolListProps) {
+  const disabled = new Set(disabledTools ?? [])
+  const names = tools.map((tool) => tool.name)
+  const onCount = names.filter((name) => !disabled.has(name)).length
+
+  const setTool = (name: string, on: boolean) => {
+    const next = new Set(disabled)
+    if (on) next.delete(name)
+    else next.add(name)
+    onChange([...next])
+  }
+
+  return (
+    <div className="ml-4 mb-1 rounded-card border border-weathered bg-base-200/35 px-2 py-1.5">
+      {tools.length === 0 ? (
+        <p className="text-[11px] text-soft-charcoal/50">This server offers no tools.</p>
+      ) : (
+        <>
+          <div className="mb-1 flex items-center justify-between gap-2">
+            <span className="text-[10px] uppercase tracking-wide text-soft-charcoal/50 tabular-nums">
+              {onCount} of {tools.length} on
+            </span>
+            <span className="flex items-center gap-2">
+              <button
+                type="button"
+                disabled={onCount === tools.length}
+                onClick={() => onChange([...disabled].filter((name) => !names.includes(name)))}
+                className={LINK_BUTTON_CLASS}
+              >
+                All
+              </button>
+              <button
+                type="button"
+                disabled={onCount === 0}
+                onClick={() => onChange([...new Set([...disabled, ...names])])}
+                className={LINK_BUTTON_CLASS}
+              >
+                None
+              </button>
+            </span>
+          </div>
+          <ul className="max-h-48 overflow-y-auto">
+            {tools.map((tool) => (
+              <li key={tool.name}>
+                <label
+                  className="flex items-center gap-2 py-0.5 cursor-pointer min-w-0"
+                  title={tool.description ? `${tool.name}\n\n${tool.description}` : tool.name}
+                >
+                  <input
+                    type="checkbox"
+                    checked={!disabled.has(tool.name)}
+                    onChange={(e) => setTool(tool.name, e.target.checked)}
+                    className="checkbox checkbox-xs shrink-0"
+                  />
+                  <span className={`truncate font-mono text-[11px] ${disabled.has(tool.name) ? 'text-soft-charcoal/40' : 'text-soft-charcoal'}`}>
+                    {tool.name}
+                  </span>
+                </label>
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  )
+}
+
 // ─── Server row ─────────────────────────────────────────────────────────────
 
 const DOT_CLASS: Record<McpServerStatus['state'], string> = {
@@ -573,9 +651,11 @@ interface ServerRowProps {
   onEdit: () => void
   onRemove: () => void
   onSignIn: () => void
+  toolsOpen: boolean
+  onToggleTools: () => void
 }
 
-function ServerRow({ server, status, onToggle, onEdit, onRemove, onSignIn }: ServerRowProps) {
+function ServerRow({ server, status, onToggle, onEdit, onRemove, onSignIn, toolsOpen, onToggleTools }: ServerRowProps) {
   // Status lags a moment behind settings saves, so trust the toggle for on/off.
   const state: McpServerStatus['state'] = !server.enabled
     ? 'disabled'
@@ -604,11 +684,22 @@ function ServerRow({ server, status, onToggle, onEdit, onRemove, onSignIn }: Ser
         {server.name}
       </button>
 
-      {state === 'connected' && (
-        <span className="shrink-0 text-[10px] text-soft-charcoal/40 tabular-nums">
-          {status?.toolCount ?? 0} {status?.toolCount === 1 ? 'tool' : 'tools'}
-        </span>
-      )}
+      {state === 'connected' && (() => {
+        const on = status?.toolCount ?? 0
+        const total = status?.tools?.length ?? on
+        return (
+          <button
+            type="button"
+            onClick={onToggleTools}
+            aria-expanded={toolsOpen}
+            title={toolsOpen ? 'Hide tools' : 'Choose which tools the assistant can use'}
+            className="shrink-0 inline-flex items-center gap-0.5 text-[10px] text-soft-charcoal/40 hover:text-soft-charcoal/70 tabular-nums bg-transparent border-0 p-0"
+          >
+            {on === total ? on : `${on}/${total}`} {total === 1 ? 'tool' : 'tools'}
+            {toolsOpen ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+          </button>
+        )
+      })()}
       {state === 'needs_auth' && !status?.signingIn && (
         <button
           type="button"
@@ -678,6 +769,17 @@ type Mode = { kind: 'idle' } | { kind: 'add' } | { kind: 'paste' } | { kind: 'js
 export function McpConnectionsSection({ settings, saveSettings }: SettingsSectionProps) {
   const statuses = useMcpStatuses()
   const [mode, setMode] = useState<Mode>({ kind: 'idle' })
+  /** Server whose tool list is open. */
+  const [toolsOpenId, setToolsOpenId] = useState<string | null>(null)
+  /** A just-added server, whose tools open once it connects. */
+  const [revealToolsId, setRevealToolsId] = useState<string | null>(null)
+
+  useEffect(() => {
+    if (revealToolsId && statuses[revealToolsId]?.state === 'connected') {
+      setToolsOpenId(revealToolsId)
+      setRevealToolsId(null)
+    }
+  }, [revealToolsId, statuses])
   const servers = settings.mcpServers
 
   const saveServers = (next: McpServerConfig[]) => saveSettings({ ...settings, mcpServers: next })
@@ -794,7 +896,9 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
         <ServerForm
           onCancel={() => setMode({ kind: 'idle' })}
           onSave={(server) => {
-            saveServers([...servers, { ...server, id: newServerId(), enabled: true }])
+            const id = newServerId()
+            saveServers([...servers, { ...server, id, enabled: true }])
+            setRevealToolsId(id)
             setMode({ kind: 'idle' })
           }}
         />
@@ -820,21 +924,33 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
                 onCancel={() => setMode({ kind: 'idle' })}
                 onSave={(updated) => {
                   saveServers(servers.map((s) => (s.id === server.id
-                    ? { ...updated, id: s.id, enabled: s.enabled }
+                    ? { ...updated, id: s.id, enabled: s.enabled, disabledTools: s.disabledTools }
                     : s)))
                   setMode({ kind: 'idle' })
                 }}
               />
             ) : (
-              <ServerRow
-                key={server.id}
-                server={server}
-                status={statuses[server.id]}
-                onToggle={(enabled) => saveServers(servers.map((s) => (s.id === server.id ? { ...s, enabled } : s)))}
-                onEdit={() => setMode({ kind: 'edit', id: server.id })}
-                onRemove={() => void removeServer(server)}
-                onSignIn={() => void signIn(server)}
-              />
+              <Fragment key={server.id}>
+                <ServerRow
+                  server={server}
+                  status={statuses[server.id]}
+                  onToggle={(enabled) => saveServers(servers.map((s) => (s.id === server.id ? { ...s, enabled } : s)))}
+                  onEdit={() => setMode({ kind: 'edit', id: server.id })}
+                  onRemove={() => void removeServer(server)}
+                  onSignIn={() => void signIn(server)}
+                  toolsOpen={toolsOpenId === server.id}
+                  onToggleTools={() => setToolsOpenId(toolsOpenId === server.id ? null : server.id)}
+                />
+                {toolsOpenId === server.id && server.enabled && statuses[server.id]?.state === 'connected' && (
+                  <ToolList
+                    tools={statuses[server.id]?.tools ?? []}
+                    disabledTools={server.disabledTools}
+                    onChange={(disabledTools) => saveServers(servers.map((s) => (s.id === server.id
+                      ? { ...s, disabledTools: disabledTools.length > 0 ? disabledTools : undefined }
+                      : s)))}
+                  />
+                )}
+              </Fragment>
             )
           ))}
         </div>

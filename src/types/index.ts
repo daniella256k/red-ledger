@@ -70,7 +70,14 @@ export interface McpServerConfig {
   url?: string
   headers?: Record<string, string>
   oauth?: McpOAuthConfig
+  /** Tools (by the server's own names) the user switched off; new tools start on. */
+  disabledTools?: string[]
   enabled: boolean
+}
+
+export interface McpToolInfo {
+  name: string
+  description?: string
 }
 
 /** 'needs_auth': a remote server that wants the user to sign in first. */
@@ -85,6 +92,8 @@ export interface McpServerStatus {
   signedIn?: boolean
   /** A browser sign-in is in progress. */
   signingIn?: boolean
+  /** Every tool the server offers, switched off or not; only while connected. */
+  tools?: McpToolInfo[]
 }
 
 export type McpSignInResult = { ok: true } | { ok: false; error: string; cancelled?: boolean }

@@ -164,6 +164,14 @@ describe('JSON view', () => {
     expect(unresolved).toEqual(['"renamed": API_KEY'])
   })
 
+  it('round-trips switched-off tools', () => {
+    const json = serializeMcpServersJson([
+      { id: '1', name: 'files', transport: 'stdio', command: 'npx', disabledTools: ['delete_file'], enabled: true }
+    ], { maskSecrets: true })
+    expect(JSON.parse(json).mcpServers.files.disabledTools).toEqual(['delete_file'])
+    expect(parseMcpServersJson(json).servers[0].disabledTools).toEqual(['delete_file'])
+  })
+
   it('allows an empty server list when asked', () => {
     expect(parseMcpServersJson('{"mcpServers":{}}', { allowEmpty: true })).toEqual({ servers: [], errors: [] })
   })

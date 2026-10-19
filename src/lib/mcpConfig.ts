@@ -375,6 +375,7 @@ export function parseMcpServersJson(text: string, options: { allowEmpty?: boolea
         url,
         headers: sanitizeStringRecord(entry.headers),
         oauth: sanitizeMcpOAuth(entry.oauth),
+        disabledTools: sanitizeStringArray(entry.disabledTools),
         enabled: entry.disabled !== true && entry.enabled !== false
       })
       continue
@@ -397,6 +398,7 @@ export function parseMcpServersJson(text: string, options: { allowEmpty?: boolea
       args,
       env: sanitizeStringRecord(entry.env),
       cwd: typeof entry.cwd === 'string' && entry.cwd.trim() ? entry.cwd.trim() : undefined,
+      disabledTools: sanitizeStringArray(entry.disabledTools),
       enabled: entry.disabled !== true && entry.enabled !== false
     })
   }
@@ -468,6 +470,7 @@ export function serializeMcpServersJson(servers: McpServerConfig[], options: { m
         env: maskValues(server.env, options.maskSecrets),
         cwd: server.cwd
       }
+    if (server.disabledTools?.length) entry.disabledTools = server.disabledTools
     if (!server.enabled) entry.disabled = true
     mcpServers[keys[index]] = entry
   })

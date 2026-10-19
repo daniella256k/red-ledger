@@ -43,6 +43,8 @@ const TOOL_CALL_TIMEOUT_MS = 120_000
 export const MAX_MCP_RESULT_CHARS = 100_000
 const MAX_STDERR_LINES = 20
 const MAX_CONFIRM_ARGS_CHARS = 1_500
+/** Tool descriptions sent to the settings UI are clipped; the model still gets the full text. */
+const MAX_STATUS_DESCRIPTION_CHARS = 300
 const SHUTDOWN_TIMEOUT_MS = 4_000
 /** How long the browser sign-in may take before the callback page closes. */
 const SIGN_IN_TIMEOUT_MS = 5 * 60_000
@@ -349,11 +351,13 @@ export class McpService {
       const existing = this.connections.get(server.id)
       const prefix = prefixes.get(server.id) ?? mcpServerPrefix(server.name)
       if (existing) {
-        // Same launch settings: keep the connection, but a rename changes tool names.
+        // Same launch settings: keep the connection, but a rename changes tool
+        // names and switching tools on or off changes which are registered.
         const renamed = existing.prefix !== prefix || existing.config.name !== server.name
+        const toolsChanged = JSON.stringify(existing.config.disabledTools ?? []) !== JSON.stringify(server.disabledTools ?? [])
         existing.config = server
         existing.prefix = prefix
-        if (renamed && existing.state === 'connected') this.registerTools(existing)
+        if ((renamed || toolsChanged) && existing.state === 'connected') this.registerTools(existing)
         continue
       }
       this.connect(server, prefix)
@@ -388,7 +392,18 @@ export class McpService {
         toolCount: connection.registered.size,
         ...(connection.error ? { error: connection.error } : {}),
         ...(signedIn ? { signedIn } : {}),
-        ...(this.signIns.has(id) ? { signingIn: true } : {})
+        ...(this.signIns.has(id) ? { signingIn: true } : {}),
+        ...(connection.state === 'connected'
+          ? {
+            tools: connection.tools.map((tool) => {
+              const description = (tool.description ?? tool.title ?? '').trim()
+              return {
+                name: tool.name,
+                ...(description ? { description: clipText(description, MAX_STATUS_DESCRIPTION_CHARS) } : {})
+              }
+            })
+          }
+          : {})
       }
     })
   }
@@ -693,7 +708,9 @@ export class McpService {
 
   private registerTools(connection: Connection): void {
     this.unregisterTools(connection)
+    const disabled = new Set(connection.config.disabledTools ?? [])
     for (const tool of connection.tools) {
+      if (disabled.has(tool.name)) continue
       let name = buildMcpToolName(connection.prefix, tool.name)
       for (let n = 2; connection.registered.has(name); n++) {
         const suffix = `_${n}`

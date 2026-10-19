@@ -210,6 +210,8 @@ function sanitizeMcpServer(value: unknown, index: number): McpServerConfig | nul
     transport,
     enabled: typeof raw.enabled === 'boolean' ? raw.enabled : true
   }
+  const disabledTools = sanitizeStringArray(raw.disabledTools)
+  if (disabledTools) server.disabledTools = [...new Set(disabledTools)]
 
   if (transport === 'stdio') {
     server.command = command

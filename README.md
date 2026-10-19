@@ -109,7 +109,7 @@ The LLM can invoke these tools during a conversation:
 | `wiki_search` | Search Wikipedia for article summaries |
 | `fetch_url` | Fetch and parse a full webpage by URL (includes extracted `links` for navigation) |
 
-MCP servers configured under Settings → Connections add their tools as `<server>__<tool>` (servers whose names collide get `-2`, `-3`, ...). View JSON shows the whole server list in the usual `mcpServers` format, with env and header values masked until revealed, and can be edited and applied in place.
+MCP servers configured under Settings → Connections add their tools as `<server>__<tool>` (servers whose names collide get `-2`, `-3`, ...). Click a connected server's tool count to switch individual tools on or off; switched-off tools are never sent to the model, and tools a server adds later start on. View JSON shows the whole server list in the usual `mcpServers` format, with env and header values masked until revealed, and can be edited and applied in place.
 
 Server configs can use `${workspaceFolder}`, `${workspaceFolderBasename}`, `${userHome}`, `${env:NAME}` (or `${NAME}`), each with an optional `:-fallback`, in the command, args, env, working folder, URL, headers and OAuth fields. Local commands run in their configured working folder (default: your home folder); servers that use `${workspaceFolder}` restart when the open workspace changes.
 

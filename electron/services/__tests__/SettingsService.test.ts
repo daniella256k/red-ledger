@@ -406,6 +406,13 @@ describe('sanitizeSettings mcpServers', () => {
     expect(http.cwd).toBeUndefined()
     expect(http.oauth).toEqual({ clientId: 'app' })
   })
+
+  it('keeps switched-off tools as a list of unique names', () => {
+    const [server] = sanitizeSettings({
+      mcpServers: [{ id: 's', name: 's', command: 'node', disabledTools: ['a', 'a', 3, null, 'b'] }]
+    } as any).mcpServers
+    expect(server.disabledTools).toEqual(['a', '3', 'b'])
+  })
 })
 
 describe('SettingsService on disk', () => {

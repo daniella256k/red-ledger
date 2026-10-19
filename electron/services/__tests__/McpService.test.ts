@@ -152,7 +152,12 @@ describe('McpService connections', () => {
     await waitForState(service, 'srv-1', 'connected')
 
     expect([...registry.keys()].sort()).toEqual(['everything__echo', 'everything__fail'])
-    expect(service.getStatuses()).toEqual([{ id: 'srv-1', state: 'connected', toolCount: 2 }])
+    expect(service.getStatuses()).toEqual([{
+      id: 'srv-1',
+      state: 'connected',
+      toolCount: 2,
+      tools: [{ name: 'echo', description: 'Echo a message' }, { name: 'fail', description: 'Always fails' }]
+    }])
   })
 
   it('passes the server JSON Schema through unchanged', async () => {
@@ -502,7 +507,8 @@ describe('McpService legacy SSE fallback', () => {
     await waitForState(service, 'remote-1', 'connected')
 
     await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(service.getStatuses()[0]).toEqual({ id: 'remote-1', state: 'connected', toolCount: 2 })
+    expect(service.getStatuses()[0]).toMatchObject({ id: 'remote-1', state: 'connected', toolCount: 2 })
+    expect(service.getStatuses()[0].error).toBeUndefined()
   })
 
   it('does not fall back on auth errors', async () => {
@@ -587,6 +593,47 @@ describe('flattenMcpToolResult', () => {
     expect(flattenMcpToolResult({ toolResult: { ok: true } })).toEqual({ content: '{"ok":true}' })
     const big = flattenMcpToolResult({ content: [{ type: 'text', text: 'x'.repeat(MAX_MCP_RESULT_CHARS + 10) }] })
     expect(String(big.content)).toMatch(/\[truncated: 10 more characters\]$/)
+  })
+})
+
+// ─── Tool selection ─────────────────────────────────────────────────────────
+
+describe('McpService tool selection', () => {
+  it('registers only tools that are switched on, but lists them all', async () => {
+    const { service, registry, factory } = setup()
+    activeService = service
+    service.applyServers([stdioServer({ disabledTools: ['fail'] })])
+    await waitForState(service, 'srv-1', 'connected')
+
+    expect([...registry.keys()]).toEqual(['everything__echo'])
+    expect(service.getStatuses()[0]).toMatchObject({
+      toolCount: 1,
+      tools: [{ name: 'echo', description: 'Echo a message' }, { name: 'fail', description: 'Always fails' }]
+    })
+    expect(factory.createTransport).toHaveBeenCalledTimes(1)
+  })
+
+  it('switches tools on and off without reconnecting', async () => {
+    const { service, registry, factory } = setup()
+    activeService = service
+    service.applyServers([stdioServer()])
+    await waitForState(service, 'srv-1', 'connected')
+    expect(registry.size).toBe(2)
+
+    service.applyServers([stdioServer({ disabledTools: ['echo', 'fail'] })])
+    expect(registry.size).toBe(0)
+    expect(service.getStatuses()[0]).toMatchObject({ state: 'connected', toolCount: 0 })
+
+    service.applyServers([stdioServer({ disabledTools: ['fail'] })])
+    expect([...registry.keys()]).toEqual(['everything__echo'])
+    expect(factory.createTransport).toHaveBeenCalledTimes(1)
+  })
+
+  it('leaves tools out of the status until connected', () => {
+    const { service } = setup()
+    activeService = service
+    service.applyServers([stdioServer()])
+    expect(service.getStatuses()[0].tools).toBeUndefined()
   })
 })
 
