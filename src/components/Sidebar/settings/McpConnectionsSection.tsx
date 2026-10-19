@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react'
-import { Copy, RotateCw, X } from 'lucide-react'
-import type { McpServerConfig, McpServerStatus, McpTransport } from '@/types'
+import { Copy, LogIn, RotateCw, X } from 'lucide-react'
+import type { McpOAuthConfig, McpServerConfig, McpServerStatus, McpTransport } from '@/types'
 import {
   formatKeyValueLines,
   joinCommandLine,
+  MCP_VARIABLES_HELP,
   mcpServerJsonKeys,
   parseKeyValueLines,
   parseMcpServersJson,
@@ -50,17 +51,37 @@ function useMcpStatuses(): Record<string, McpServerStatus> {
 
 interface ServerFormProps {
   initial?: McpServerConfig
+  /** Live status of the server being edited, for the sign-out control. */
+  status?: McpServerStatus
   onSave: (server: Omit<McpServerConfig, 'id' | 'enabled'>) => void
   onCancel: () => void
+  onSignOut?: () => void
 }
 
-function ServerForm({ initial, onSave, onCancel }: ServerFormProps) {
+const FIELD_LABEL_CLASS = 'text-[11px] font-medium text-soft-charcoal/60 block uppercase tracking-wide'
+
+/** Label with a help icon, used above most form fields. */
+function FieldLabel({ label, help }: { label: string; help: string }) {
+  return (
+    <div className="mb-1 flex items-center justify-between">
+      <label className={FIELD_LABEL_CLASS}>{label}</label>
+      <HelpIcon title={help} label={`${label} help`} />
+    </div>
+  )
+}
+
+function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerFormProps) {
   const [name, setName] = useState(initial?.name ?? '')
   const [transport, setTransport] = useState<McpTransport>(initial?.transport ?? 'stdio')
   const [commandLine, setCommandLine] = useState(joinCommandLine(initial?.command, initial?.args))
   const [envText, setEnvText] = useState(formatKeyValueLines(initial?.env, '='))
+  const [cwd, setCwd] = useState(initial?.cwd ?? '')
   const [url, setUrl] = useState(initial?.url ?? '')
   const [headersText, setHeadersText] = useState(formatKeyValueLines(initial?.headers, ':'))
+  const [clientId, setClientId] = useState(initial?.oauth?.clientId ?? '')
+  const [clientSecret, setClientSecret] = useState(initial?.oauth?.clientSecret ?? '')
+  const [scope, setScope] = useState(initial?.oauth?.scope ?? '')
+  const [callbackPort, setCallbackPort] = useState(initial?.oauth?.callbackPort ? String(initial.oauth.callbackPort) : '')
   const [error, setError] = useState<string | null>(null)
 
   const handleSubmit = (event: React.FormEvent) => {
@@ -78,27 +99,51 @@ function ServerForm({ initial, onSave, onCancel }: ServerFormProps) {
         transport,
         command,
         ...(args.length > 0 ? { args } : {}),
-        ...(Object.keys(env).length > 0 ? { env } : {})
+        ...(Object.keys(env).length > 0 ? { env } : {}),
+        ...(cwd.trim() ? { cwd: cwd.trim() } : {})
       })
       return
     }
 
     const trimmedUrl = url.trim()
-    try {
-      const parsed = new URL(trimmedUrl)
-      if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('bad protocol')
-    } catch {
-      setError('Enter a full http:// or https:// URL.')
+    // A URL that starts with a variable is checked once it is filled in, when connecting.
+    if (!trimmedUrl.startsWith('${')) {
+      try {
+        const parsed = new URL(trimmedUrl)
+        if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') throw new Error('bad protocol')
+      } catch {
+        setError('Enter a full http:// or https:// URL.')
+        return
+      }
+    }
+    const port = callbackPort.trim() ? Number(callbackPort.trim()) : undefined
+    if (port !== undefined && !(Number.isInteger(port) && port > 0 && port < 65536)) {
+      setError('The callback port must be a number from 1 to 65535.')
       return
     }
+    const oauthFields: McpOAuthConfig = {
+      ...(clientId.trim() ? { clientId: clientId.trim() } : {}),
+      ...(clientSecret.trim() ? { clientSecret: clientSecret.trim() } : {}),
+      ...(scope.trim() ? { scope: scope.trim() } : {}),
+      ...(port !== undefined ? { callbackPort: port } : {})
+    }
     const headers = parseKeyValueLines(headersText, ':')
+    let fallbackName = trimmedUrl
+    try {
+      fallbackName = new URL(trimmedUrl).hostname
+    } catch {
+      // Variable URL; keep it as the name
+    }
     onSave({
-      name: name.trim() || new URL(trimmedUrl).hostname,
+      name: name.trim() || fallbackName,
       transport,
       url: trimmedUrl,
-      ...(Object.keys(headers).length > 0 ? { headers } : {})
+      ...(Object.keys(headers).length > 0 ? { headers } : {}),
+      ...(Object.keys(oauthFields).length > 0 ? { oauth: oauthFields } : {})
     })
   }
+
+  const hasOAuthOptions = !!(initial?.oauth && Object.keys(initial.oauth).length > 0)
 
   return (
     <form onSubmit={handleSubmit} className="space-y-2 rounded-card border border-weathered bg-base-200/35 p-2.5">
@@ -132,15 +177,10 @@ function ServerForm({ initial, onSave, onCancel }: ServerFormProps) {
       {transport === 'stdio' ? (
         <>
           <div>
-            <div className="mb-1 flex items-center justify-between">
-              <label className="text-[11px] font-medium text-soft-charcoal/60 block uppercase tracking-wide">
-                Command
-              </label>
-              <HelpIcon
-                title="The command that starts the server, as you would type it in a terminal. Servers started with npx need Node.js installed."
-                label="Command help"
-              />
-            </div>
+            <FieldLabel
+              label="Command"
+              help={`The command that starts the server, as you would type it in a terminal. Servers started with npx need Node.js installed. Variables: ${MCP_VARIABLES_HELP}`}
+            />
             <input
               type="text"
               value={commandLine}
@@ -153,15 +193,10 @@ function ServerForm({ initial, onSave, onCancel }: ServerFormProps) {
             />
           </div>
           <div>
-            <div className="mb-1 flex items-center justify-between">
-              <label className="text-[11px] font-medium text-soft-charcoal/60 block uppercase tracking-wide">
-                Environment
-              </label>
-              <HelpIcon
-                title="Optional. One KEY=value per line, e.g. API keys the server asks for."
-                label="Environment help"
-              />
-            </div>
+            <FieldLabel
+              label="Environment"
+              help="Optional. One KEY=value per line, e.g. API keys the server asks for. API_KEY=${env:MY_API_KEY} passes a variable from your system instead of saving the key here."
+            />
             <textarea
               value={envText}
               onChange={(e) => setEnvText(e.target.value)}
@@ -170,11 +205,30 @@ function ServerForm({ initial, onSave, onCancel }: ServerFormProps) {
               className={`${TEXTAREA_CLASS} font-mono`}
             />
           </div>
+          <div>
+            <FieldLabel
+              label="Working folder"
+              help="Optional. The folder the command runs in; leave empty for your home folder. ${workspaceFolder} uses the open workspace, and the server restarts when you switch workspaces."
+            />
+            <input
+              type="text"
+              value={cwd}
+              onChange={(e) => {
+                setCwd(e.target.value)
+                setError(null)
+              }}
+              placeholder="${workspaceFolder}"
+              className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+            />
+          </div>
         </>
       ) : (
         <>
           <div>
-            <label className={LABEL_CLASS}>URL</label>
+            <FieldLabel
+              label="URL"
+              help={`The server's address. Servers that need an account show a Sign in button after you add them. Variables: ${MCP_VARIABLES_HELP}`}
+            />
             <input
               type="text"
               value={url}
@@ -187,15 +241,10 @@ function ServerForm({ initial, onSave, onCancel }: ServerFormProps) {
             />
           </div>
           <div>
-            <div className="mb-1 flex items-center justify-between">
-              <label className="text-[11px] font-medium text-soft-charcoal/60 block uppercase tracking-wide">
-                Headers
-              </label>
-              <HelpIcon
-                title="Optional. One Name: value per line, e.g. Authorization: Bearer your-token."
-                label="Headers help"
-              />
-            </div>
+            <FieldLabel
+              label="Headers"
+              help="Optional. One Name: value per line, e.g. Authorization: Bearer ${env:MY_TOKEN}. Only for servers that use an API key; with an Authorization header set, Sign in is not offered."
+            />
             <textarea
               value={headersText}
               onChange={(e) => setHeadersText(e.target.value)}
@@ -204,6 +253,73 @@ function ServerForm({ initial, onSave, onCancel }: ServerFormProps) {
               className={`${TEXTAREA_CLASS} font-mono`}
             />
           </div>
+
+          <details open={hasOAuthOptions} className="group">
+            <summary className="cursor-pointer select-none text-[11px] font-medium text-soft-charcoal/60 uppercase tracking-wide">
+              Sign-in options
+            </summary>
+            <div className="mt-2 space-y-2">
+              <p className="text-[11px] text-soft-charcoal/50 leading-snug">
+                Usually not needed. Fill these in only if the provider asks you to create your own OAuth app; register
+                {' '}<code className="font-mono">http://127.0.0.1:&lt;port&gt;/callback</code> as its redirect address.
+              </p>
+              <div>
+                <label className={LABEL_CLASS}>Client ID</label>
+                <input
+                  type="text"
+                  value={clientId}
+                  onChange={(e) => setClientId(e.target.value)}
+                  className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+                />
+              </div>
+              <div>
+                <label className={LABEL_CLASS}>Client secret</label>
+                <input
+                  type="password"
+                  value={clientSecret}
+                  onChange={(e) => setClientSecret(e.target.value)}
+                  placeholder="Only for confidential clients"
+                  autoComplete="off"
+                  className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+                />
+              </div>
+              <div className="flex gap-2">
+                <div className="flex-1 min-w-0">
+                  <label className={LABEL_CLASS}>Scope</label>
+                  <input
+                    type="text"
+                    value={scope}
+                    onChange={(e) => setScope(e.target.value)}
+                    placeholder="read write"
+                    className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+                  />
+                </div>
+                <div className="w-24 shrink-0">
+                  <label className={LABEL_CLASS}>Port</label>
+                  <input
+                    type="text"
+                    inputMode="numeric"
+                    value={callbackPort}
+                    onChange={(e) => {
+                      setCallbackPort(e.target.value)
+                      setError(null)
+                    }}
+                    placeholder="Any"
+                    className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+                  />
+                </div>
+              </div>
+            </div>
+          </details>
+
+          {status?.signedIn && onSignOut && (
+            <div className="flex items-center justify-between text-[11px] text-soft-charcoal/60">
+              <span>Signed in</span>
+              <button type="button" onClick={onSignOut} className={SMALL_BUTTON_CLASS}>
+                Sign out
+              </button>
+            </div>
+          )}
         </>
       )}
 
@@ -437,6 +553,7 @@ function JsonView({ servers, onApply, onClose }: JsonViewProps) {
 const DOT_CLASS: Record<McpServerStatus['state'], string> = {
   connected: 'bg-success',
   connecting: 'bg-warning animate-pulse',
+  needs_auth: 'bg-warning',
   error: 'bg-error',
   disabled: 'bg-soft-charcoal/20'
 }
@@ -444,6 +561,7 @@ const DOT_CLASS: Record<McpServerStatus['state'], string> = {
 const STATE_LABEL: Record<McpServerStatus['state'], string> = {
   connected: 'Connected',
   connecting: 'Connecting…',
+  needs_auth: 'Sign-in needed',
   error: 'Error',
   disabled: 'Off'
 }
@@ -454,16 +572,21 @@ interface ServerRowProps {
   onToggle: (enabled: boolean) => void
   onEdit: () => void
   onRemove: () => void
+  onSignIn: () => void
 }
 
-function ServerRow({ server, status, onToggle, onEdit, onRemove }: ServerRowProps) {
+function ServerRow({ server, status, onToggle, onEdit, onRemove, onSignIn }: ServerRowProps) {
   // Status lags a moment behind settings saves, so trust the toggle for on/off.
   const state: McpServerStatus['state'] = !server.enabled
     ? 'disabled'
     : (status && status.state !== 'disabled' ? status.state : 'connecting')
   const tooltip = state === 'error'
     ? `Error: ${status?.error || 'Could not connect.'}`
-    : STATE_LABEL[state]
+    : state === 'needs_auth'
+      ? (status?.error || STATE_LABEL[state])
+      : state === 'connected' && status?.signedIn
+        ? 'Connected (signed in)'
+        : STATE_LABEL[state]
 
   return (
     <div className="flex items-center gap-2 py-0.5">
@@ -485,6 +608,30 @@ function ServerRow({ server, status, onToggle, onEdit, onRemove }: ServerRowProp
         <span className="shrink-0 text-[10px] text-soft-charcoal/40 tabular-nums">
           {status?.toolCount ?? 0} {status?.toolCount === 1 ? 'tool' : 'tools'}
         </span>
+      )}
+      {state === 'needs_auth' && !status?.signingIn && (
+        <button
+          type="button"
+          onClick={onSignIn}
+          title={`${tooltip}\n\nOpens the sign-in page in your browser.`}
+          className="shrink-0 inline-flex items-center gap-1 text-[10px] text-warning hover:text-warning/70 bg-transparent border-0 p-0"
+        >
+          <LogIn size={10} />
+          Sign in
+        </button>
+      )}
+      {status?.signingIn && (
+        <button
+          type="button"
+          onClick={() => {
+            void window.redLedger?.cancelMcpSignIn(server.id)
+          }}
+          title="Waiting for you to finish signing in in the browser. Click to cancel."
+          className="shrink-0 inline-flex items-center gap-1 text-[10px] text-soft-charcoal/50 hover:text-soft-charcoal/80 bg-transparent border-0 p-0"
+        >
+          <span className="loading loading-spinner loading-xs h-2.5 w-2.5" />
+          Cancel
+        </button>
       )}
       {state === 'error' && (
         <button
@@ -591,6 +738,18 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
     return true
   }
 
+  const signIn = async (server: McpServerConfig) => {
+    const result = await window.redLedger?.signInMcpServer(server.id)
+    if (!result) return
+    if (result.ok) notify({ type: 'success', message: `Signed in to ${server.name}.` })
+    else if (!result.cancelled) notify({ type: 'error', message: result.error })
+  }
+
+  const signOut = async (server: McpServerConfig) => {
+    await window.redLedger?.signOutMcpServer(server.id)
+    notify({ type: 'success', message: `Signed out of ${server.name}.` })
+  }
+
   const editing = mode.kind === 'edit' ? servers.find((s) => s.id === mode.id) : undefined
 
   return (
@@ -656,6 +815,8 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
               <ServerForm
                 key={server.id}
                 initial={server}
+                status={statuses[server.id]}
+                onSignOut={() => void signOut(server)}
                 onCancel={() => setMode({ kind: 'idle' })}
                 onSave={(updated) => {
                   saveServers(servers.map((s) => (s.id === server.id
@@ -672,6 +833,7 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
                 onToggle={(enabled) => saveServers(servers.map((s) => (s.id === server.id ? { ...s, enabled } : s)))}
                 onEdit={() => setMode({ kind: 'edit', id: server.id })}
                 onRemove={() => void removeServer(server)}
+                onSignIn={() => void signIn(server)}
               />
             )
           ))}

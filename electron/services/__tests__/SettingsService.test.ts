@@ -393,6 +393,19 @@ describe('sanitizeSettings mcpServers', () => {
     } as any)
     expect(result.mcpServers.map((s) => s.transport)).toEqual(['http', 'stdio'])
   })
+
+  it('keeps a working folder for local commands and OAuth options for remote servers', () => {
+    const [stdio, http] = sanitizeSettings({
+      mcpServers: [
+        { id: 's', name: 's', command: 'node', cwd: ' ${workspaceFolder} ', oauth: { clientId: 'x' } },
+        { id: 'h', name: 'h', transport: 'http', url: 'https://x', cwd: '/tmp', oauth: { clientId: 'app', callbackPort: 'bad' } }
+      ]
+    } as any).mcpServers
+    expect(stdio.cwd).toBe('${workspaceFolder}')
+    expect(stdio.oauth).toBeUndefined()
+    expect(http.cwd).toBeUndefined()
+    expect(http.oauth).toEqual({ clientId: 'app' })
+  })
 })
 
 describe('SettingsService on disk', () => {

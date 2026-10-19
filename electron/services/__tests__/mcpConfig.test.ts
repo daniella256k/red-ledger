@@ -2,6 +2,7 @@ import { describe, it, expect } from 'vitest'
 import {
   assignMcpServerPrefixes,
   buildMcpToolName,
+  expandMcpVariables,
   findMcpServerByPrefix,
   joinCommandLine,
   MCP_SECRET_MASK,
@@ -9,7 +10,9 @@ import {
   parseKeyValueLines,
   parseMcpServersJson,
   parseMcpToolName,
+  resolveMcpServerConfig,
   restoreMaskedSecrets,
+  sanitizeMcpOAuth,
   serializeMcpServersJson,
   splitCommandLine
 } from '../../../src/lib/mcpConfig'
@@ -163,5 +166,93 @@ describe('JSON view', () => {
 
   it('allows an empty server list when asked', () => {
     expect(parseMcpServersJson('{"mcpServers":{}}', { allowEmpty: true })).toEqual({ servers: [], errors: [] })
+  })
+})
+
+describe('expandMcpVariables', () => {
+  const context = {
+    workspaceFolder: '/work/my-project',
+    userHome: '/home/me',
+    pathSeparator: '/',
+    env: { TOKEN: 'abc', EMPTY: '' } as Record<string, string | undefined>
+  }
+
+  it('fills in workspace, home, separator and environment variables', () => {
+    expect(expandMcpVariables('${workspaceFolder}/src', context)).toBe('/work/my-project/src')
+    expect(expandMcpVariables('${workspaceFolderBasename}', context)).toBe('my-project')
+    expect(expandMcpVariables('${userHome}${/}x${pathSeparator}y', context)).toBe('/home/me/x/y')
+    expect(expandMcpVariables('Bearer ${env:TOKEN}', context)).toBe('Bearer abc')
+    expect(expandMcpVariables('${TOKEN}', context)).toBe('abc')
+    expect(expandMcpVariables('no variables', context)).toBe('no variables')
+  })
+
+  it('uses :- fallbacks for missing or empty values', () => {
+    expect(expandMcpVariables('${env:PORT:-8080}', context)).toBe('8080')
+    expect(expandMcpVariables('${EMPTY:-x}', context)).toBe('x')
+    expect(expandMcpVariables('[${EMPTY}]', context)).toBe('[]')
+    expect(expandMcpVariables('${workspaceFolder:-/tmp}', { ...context, workspaceFolder: null })).toBe('/tmp')
+  })
+
+  it('explains what could not be filled in', () => {
+    expect(() => expandMcpVariables('${workspaceFolder}', { ...context, workspaceFolder: null })).toThrow(/no workspace folder is open/)
+    expect(() => expandMcpVariables('${env:MISSING}', context)).toThrow('Environment variable MISSING is not set (used as ${env:MISSING}).')
+    expect(() => expandMcpVariables('${input:key}', context)).toThrow('Unknown variable ${input:key}.')
+  })
+
+  it('resolves every field of a server config', () => {
+    const resolved = resolveMcpServerConfig({
+      id: '1',
+      name: 'x',
+      transport: 'http',
+      url: 'https://${env:TOKEN}.example.com/mcp',
+      headers: { 'X-Key': '${TOKEN}' },
+      oauth: { clientSecret: '${env:TOKEN}', callbackPort: 7777 },
+      enabled: true
+    }, context)
+    expect(resolved).toEqual({
+      id: '1',
+      name: 'x',
+      transport: 'http',
+      url: 'https://abc.example.com/mcp',
+      headers: { 'X-Key': 'abc' },
+      oauth: { clientSecret: 'abc', callbackPort: 7777 },
+      enabled: true
+    })
+  })
+})
+
+describe('OAuth and working folder config', () => {
+  it('sanitizes OAuth options, accepting snake_case', () => {
+    expect(sanitizeMcpOAuth({ client_id: ' id ', callback_port: '8123', scope: '' })).toEqual({ clientId: 'id', callbackPort: 8123 })
+    expect(sanitizeMcpOAuth({ callbackPort: 70000 })).toBeUndefined()
+    expect(sanitizeMcpOAuth('nope')).toBeUndefined()
+  })
+
+  it('reads cwd and oauth from pasted JSON', () => {
+    const { servers } = parseMcpServersJson(JSON.stringify({
+      mcpServers: {
+        files: { command: 'npx', args: ['pkg'], cwd: '${workspaceFolder}' },
+        gh: { type: 'http', url: 'https://x/mcp', oauth: { clientId: 'app', callbackPort: 9000 } }
+      }
+    }))
+    expect(servers[0].cwd).toBe('${workspaceFolder}')
+    expect(servers[1].oauth).toEqual({ clientId: 'app', callbackPort: 9000 })
+  })
+
+  it('masks the client secret but not values that only reference variables', () => {
+    const servers: McpServerConfig[] = [
+      { id: '1', name: 'gh', transport: 'http', url: 'https://x/mcp', headers: { Authorization: 'Bearer ${env:GH_TOKEN}' }, oauth: { clientId: 'app', clientSecret: 'shh' }, enabled: true },
+      { id: '2', name: 'files', transport: 'stdio', command: 'npx', env: { KEY: '${KEY}', RAW: 'raw' }, cwd: '~/code', enabled: true }
+    ]
+    const json = JSON.parse(serializeMcpServersJson(servers, { maskSecrets: true }))
+    expect(json.mcpServers.gh.headers).toEqual({ Authorization: 'Bearer ${env:GH_TOKEN}' })
+    expect(json.mcpServers.gh.oauth).toEqual({ clientId: 'app', clientSecret: MCP_SECRET_MASK })
+    expect(json.mcpServers.files.env).toEqual({ KEY: '${KEY}', RAW: MCP_SECRET_MASK })
+    expect(json.mcpServers.files.cwd).toBe('~/code')
+
+    const { servers: restored, unresolved } = restoreMaskedSecrets(parseMcpServersJson(JSON.stringify(json)).servers, servers)
+    expect(unresolved).toEqual([])
+    expect(restored[0].oauth).toEqual({ clientId: 'app', clientSecret: 'shh' })
+    expect(restored[1].env).toEqual({ KEY: '${KEY}', RAW: 'raw' })
   })
 })

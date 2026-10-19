@@ -111,6 +111,10 @@ The LLM can invoke these tools during a conversation:
 
 MCP servers configured under Settings → Connections add their tools as `<server>__<tool>` (servers whose names collide get `-2`, `-3`, ...). View JSON shows the whole server list in the usual `mcpServers` format, with env and header values masked until revealed, and can be edited and applied in place.
 
+Server configs can use `${workspaceFolder}`, `${workspaceFolderBasename}`, `${userHome}`, `${env:NAME}` (or `${NAME}`), each with an optional `:-fallback`, in the command, args, env, working folder, URL, headers and OAuth fields. Local commands run in their configured working folder (default: your home folder); servers that use `${workspaceFolder}` restart when the open workspace changes.
+
+Remote servers that require an account show a Sign in button: Red Ledger registers itself with the server's OAuth provider, opens the sign-in page in your browser and receives the result on a one-time `http://127.0.0.1:<port>/callback` page. Tokens are stored in `mcp-auth.json` next to `settings.json`, encrypted with the OS keystore when available, and refreshed automatically. Providers that require your own OAuth app take a client ID/secret, scope and fixed callback port under "Sign-in options". A server with its own `Authorization` header is never asked to sign in.
+
 Overwrites and edits keep the previous version next to the file as `<name>.bak`. Offline Mode (Settings) hides every tool that reaches the network: web/org/wiki search, `fetch_url`, and HTTP MCP connections.
 
 Tools self-register via the tool registry. Strict mode shows a native confirmation dialog before each operation. Tool errors are caught and returned in the result so the LLM can self-correct without crashing the stream. Pressing Stop ends the whole turn: no further tool calls or model requests run, even if it is pressed while a tool is working.

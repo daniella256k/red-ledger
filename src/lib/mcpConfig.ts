@@ -1,4 +1,4 @@
-import type { McpServerConfig, McpTransport } from '../types'
+import type { McpOAuthConfig, McpServerConfig, McpTransport } from '../types'
 
 /**
  * Shared helpers for MCP connections, used by both the main process
@@ -123,6 +123,107 @@ export function joinCommandLine(command: string | undefined, args: string[] | un
     .join(' ')
 }
 
+// ─── Variables ──────────────────────────────────────────────────────────────
+
+/** What `${...}` references in a server config can see. */
+export interface McpVariableContext {
+  workspaceFolder: string | null
+  userHome: string
+  pathSeparator: string
+  env: Record<string, string | undefined>
+}
+
+export class McpVariableError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'McpVariableError'
+  }
+}
+
+/** Shown in help text; kept next to the code that implements them. */
+export const MCP_VARIABLES_HELP = '${workspaceFolder} (the open workspace), ${userHome}, ${env:NAME} or ${NAME} (an environment variable); add :-fallback for a default, e.g. ${env:PORT:-8080}.'
+
+const VARIABLE_PATTERN = /\$\{([^}]*)\}/g
+const ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+function lastPathPart(path: string): string {
+  return path.split(/[\\/]+/).filter(Boolean).pop() ?? path
+}
+
+/**
+ * Expand `${...}` references, using the names VS Code and Claude Code configs
+ * use: `${workspaceFolder}`, `${workspaceFolderBasename}`, `${userHome}`,
+ * `${pathSeparator}` (or `${/}`), `${env:NAME}` and bare `${NAME}`. Any of them
+ * takes `:-fallback`. Throws McpVariableError for anything that can't be filled.
+ */
+export function expandMcpVariables(text: string, context: McpVariableContext): string {
+  return text.replace(VARIABLE_PATTERN, (match, body: string) => {
+    const defaultIndex = body.indexOf(':-')
+    const name = (defaultIndex >= 0 ? body.slice(0, defaultIndex) : body).trim()
+    const fallback = defaultIndex >= 0 ? body.slice(defaultIndex + 2) : undefined
+
+    switch (name) {
+      case 'workspaceFolder':
+      case 'workspaceFolderBasename':
+        if (context.workspaceFolder) {
+          return name === 'workspaceFolder' ? context.workspaceFolder : lastPathPart(context.workspaceFolder)
+        }
+        if (fallback !== undefined) return fallback
+        throw new McpVariableError(`This connection uses ${match}, but no workspace folder is open.`)
+      case 'userHome':
+        return context.userHome
+      case 'pathSeparator':
+      case '/':
+        return context.pathSeparator
+    }
+
+    const envName = name.startsWith('env:') ? name.slice(4).trim() : name
+    if (!ENV_NAME_PATTERN.test(envName)) {
+      throw new McpVariableError(`Unknown variable ${match}.`)
+    }
+    const value = context.env[envName]
+    // Like the shell's :-, the fallback also covers a variable set to "".
+    if (fallback !== undefined && !value) return fallback
+    if (value !== undefined) return value
+    throw new McpVariableError(`Environment variable ${envName} is not set (used as ${match}).`)
+  })
+}
+
+function expandRecord(
+  values: Record<string, string> | undefined,
+  context: McpVariableContext
+): Record<string, string> | undefined {
+  if (!values) return undefined
+  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, expandMcpVariables(value, context)]))
+}
+
+/** The config with every `${...}` reference filled in, ready to launch or connect. */
+export function resolveMcpServerConfig(config: McpServerConfig, context: McpVariableContext): McpServerConfig {
+  const expand = (value: string | undefined) => (value === undefined ? undefined : expandMcpVariables(value, context))
+  const resolved: McpServerConfig = {
+    ...config,
+    command: expand(config.command),
+    args: config.args?.map((arg) => expandMcpVariables(arg, context)),
+    env: expandRecord(config.env, context),
+    cwd: expand(config.cwd),
+    url: expand(config.url),
+    headers: expandRecord(config.headers, context)
+  }
+  if (config.oauth) {
+    resolved.oauth = {
+      ...config.oauth,
+      clientId: expand(config.oauth.clientId),
+      clientSecret: expand(config.oauth.clientSecret),
+      scope: expand(config.oauth.scope)
+    }
+  }
+  // Drop keys that were never set so fingerprints match the stored shape.
+  for (const key of Object.keys(resolved) as Array<keyof McpServerConfig>) {
+    if (resolved[key] === undefined) delete resolved[key]
+  }
+  return resolved
+}
+
 // ─── Key/value lines (env vars, headers) ────────────────────────────────────
 
 /** Parse `KEY=value` (env) or `Name: value` (headers) lines; blank lines and `#` comments are skipped. */
@@ -166,6 +267,31 @@ export function sanitizeStringArray(value: unknown): string[] | undefined {
     .filter((entry) => typeof entry === 'string' || typeof entry === 'number')
     .map((entry) => String(entry))
   return out.length > 0 ? out : undefined
+}
+
+/** OAuth options from settings or pasted JSON (camelCase or snake_case); undefined when none are set. */
+export function sanitizeMcpOAuth(value: unknown): McpOAuthConfig | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined
+  const raw = value as Record<string, unknown>
+  const text = (...keys: string[]) => {
+    for (const key of keys) {
+      const entry = raw[key]
+      if (typeof entry === 'string' && entry.trim()) return entry.trim()
+    }
+    return undefined
+  }
+  const portValue = raw.callbackPort ?? raw.callback_port
+  const port = typeof portValue === 'string' ? Number(portValue.trim()) : portValue
+  const oauth: McpOAuthConfig = {
+    clientId: text('clientId', 'client_id'),
+    clientSecret: text('clientSecret', 'client_secret'),
+    scope: text('scope', 'scopes'),
+    callbackPort: typeof port === 'number' && Number.isInteger(port) && port > 0 && port < 65536 ? port : undefined
+  }
+  for (const key of Object.keys(oauth) as Array<keyof McpOAuthConfig>) {
+    if (oauth[key] === undefined) delete oauth[key]
+  }
+  return Object.keys(oauth).length > 0 ? oauth : undefined
 }
 
 /** Map the transport names used by common MCP config files onto ours. */
@@ -248,6 +374,7 @@ export function parseMcpServersJson(text: string, options: { allowEmpty?: boolea
         transport,
         url,
         headers: sanitizeStringRecord(entry.headers),
+        oauth: sanitizeMcpOAuth(entry.oauth),
         enabled: entry.disabled !== true && entry.enabled !== false
       })
       continue
@@ -269,6 +396,7 @@ export function parseMcpServersJson(text: string, options: { allowEmpty?: boolea
       command,
       args,
       env: sanitizeStringRecord(entry.env),
+      cwd: typeof entry.cwd === 'string' && entry.cwd.trim() ? entry.cwd.trim() : undefined,
       enabled: entry.disabled !== true && entry.enabled !== false
     })
   }
@@ -299,10 +427,22 @@ export function mcpServerJsonKeys(servers: McpServerConfig[]): string[] {
   })
 }
 
+/**
+ * Whether a value holds no secret of its own: only `${...}` references,
+ * optionally after an auth scheme, e.g. "Bearer ${env:TOKEN}".
+ */
+function isOnlyVariableReferences(value: string): boolean {
+  if (!value.includes('${')) return false
+  return /^(?:bearer|basic|token)?$/i.test(value.replace(VARIABLE_PATTERN, '').trim())
+}
+
+function maskValue(value: string, mask: boolean): string {
+  return mask && value && !isOnlyVariableReferences(value) ? MCP_SECRET_MASK : value
+}
+
 function maskValues(values: Record<string, string> | undefined, mask: boolean): Record<string, string> | undefined {
   if (!values || Object.keys(values).length === 0) return undefined
-  if (!mask) return values
-  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value ? MCP_SECRET_MASK : value]))
+  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, maskValue(value, mask)]))
 }
 
 /**
@@ -314,12 +454,19 @@ export function serializeMcpServersJson(servers: McpServerConfig[], options: { m
   const mcpServers: Record<string, Record<string, unknown>> = {}
 
   servers.forEach((server, index) => {
+    const oauth = server.oauth
+      ? {
+        ...server.oauth,
+        ...(server.oauth.clientSecret ? { clientSecret: maskValue(server.oauth.clientSecret, options.maskSecrets) } : {})
+      }
+      : undefined
     const entry: Record<string, unknown> = server.transport === 'http'
-      ? { type: 'http', url: server.url, headers: maskValues(server.headers, options.maskSecrets) }
+      ? { type: 'http', url: server.url, headers: maskValues(server.headers, options.maskSecrets), oauth }
       : {
         command: server.command,
         args: server.args?.length ? server.args : undefined,
-        env: maskValues(server.env, options.maskSecrets)
+        env: maskValues(server.env, options.maskSecrets),
+        cwd: server.cwd
       }
     if (!server.enabled) entry.disabled = true
     mcpServers[keys[index]] = entry
@@ -369,11 +516,17 @@ export function restoreMaskedSecrets(
 
   const servers = parsed.map((server) => {
     const saved = byKey.get(server.name.toLowerCase())
-    return {
+    const restored = {
       ...server,
       ...(server.env ? { env: restoreRecord(server.env, saved?.env, server.name, unresolved) } : {}),
       ...(server.headers ? { headers: restoreRecord(server.headers, saved?.headers, server.name, unresolved) } : {})
     }
+    if (server.oauth?.clientSecret === MCP_SECRET_MASK) {
+      const secret = saved?.oauth?.clientSecret
+      if (secret === undefined) unresolved.push(`"${server.name}": oauth.clientSecret`)
+      restored.oauth = { ...server.oauth, clientSecret: secret }
+    }
+    return restored
   })
 
   return { servers, unresolved }

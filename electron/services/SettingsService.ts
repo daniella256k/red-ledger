@@ -8,6 +8,7 @@ import type {
 } from '../../src/types'
 import {
   normalizeMcpTransport,
+  sanitizeMcpOAuth,
   sanitizeStringArray,
   sanitizeStringRecord
 } from '../../src/lib/mcpConfig'
@@ -216,10 +217,13 @@ function sanitizeMcpServer(value: unknown, index: number): McpServerConfig | nul
     const env = sanitizeStringRecord(raw.env)
     if (args) server.args = args
     if (env) server.env = env
+    if (typeof raw.cwd === 'string' && raw.cwd.trim()) server.cwd = raw.cwd.trim()
   } else {
     server.url = url
     const headers = sanitizeStringRecord(raw.headers)
+    const oauth = sanitizeMcpOAuth(raw.oauth)
     if (headers) server.headers = headers
+    if (oauth) server.oauth = oauth
   }
 
   return server

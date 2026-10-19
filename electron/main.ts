@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, Menu, shell } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
-import { join } from 'path'
+import { dirname, join } from 'path'
 import { readFileSync } from 'fs'
 import {
   COMMON_TEXT_EXTENSIONS,
@@ -347,7 +347,7 @@ function registerIpcHandlers(): void {
     }
     // Same for MCP connections: unchanged servers are left alone.
     try {
-      getMcpService().applyServers(settings.mcpServers)
+      getMcpService().applyServers(settings.mcpServers, settings.lastWorkspacePath ?? null)
     } catch {
       // McpService not initialized yet — initial connect handled below
     }
@@ -365,8 +365,9 @@ function registerIpcHandlers(): void {
   registerSearchHandlers(getCurrentSettings)
 
   // 6. MCP connections (registers each server's tools in the tool registry)
-  registerMcpHandlers(getCurrentSettings)
-  getMcpService().applyServers(getCurrentSettings().mcpServers)
+  // Sign-in tokens live next to settings.json (so portable mode keeps them together).
+  registerMcpHandlers(getCurrentSettings, join(dirname(settingsPath), 'mcp-auth.json'))
+  getMcpService().applyServers(getCurrentSettings().mcpServers, getCurrentSettings().lastWorkspacePath ?? null)
 
   // 7. LLM streaming (needs settings + context for system prompt)
   registerLlmHandlers({

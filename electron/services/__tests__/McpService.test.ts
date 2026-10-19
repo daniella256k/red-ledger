@@ -1,4 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
+import { mkdtempSync, rmSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { CallToolRequestSchema, ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js'
@@ -9,9 +12,12 @@ import {
   McpService,
   flattenMcpToolResult,
   resolveStdioLaunch,
+  resolveWorkingFolder,
   shouldFallBackToSse,
-  MAX_MCP_RESULT_CHARS
+  MAX_MCP_RESULT_CHARS,
+  type McpServiceDeps
 } from '../McpService'
+import { McpSignInRequiredError, createMemoryAuthStore } from '../mcpOAuth'
 import type { ToolEntry } from '../../lib/tools/registry'
 import type { DialogAdapter } from '../WorkspaceService'
 import type { McpServerConfig, McpServerStatus, Settings } from '../../../src/types'
@@ -97,7 +103,12 @@ function stdioServer(overrides: Partial<McpServerConfig> = {}): McpServerConfig 
   }
 }
 
-function setup(options: { settings?: Partial<Settings>; dialog?: DialogAdapter | null; tools?: Tool[] } = {}) {
+function setup(options: {
+  settings?: Partial<Settings>
+  dialog?: DialogAdapter | null
+  tools?: Tool[]
+  deps?: Partial<McpServiceDeps>
+} = {}) {
   const registry = new Map<string, ToolEntry>()
   const statuses: McpServerStatus[][] = []
   const settings = makeSettings(options.settings)
@@ -110,7 +121,8 @@ function setup(options: { settings?: Partial<Settings>; dialog?: DialogAdapter |
     registerTool: (entry) => registry.set(entry.definition.function.name, entry),
     unregisterTool: (name) => registry.delete(name),
     onStatusChange: (next) => statuses.push(next),
-    createTransport: factory.createTransport
+    createTransport: factory.createTransport,
+    ...options.deps
   })
 
   return { service, registry, statuses, settings, factory, getDialog }
@@ -575,6 +587,134 @@ describe('flattenMcpToolResult', () => {
     expect(flattenMcpToolResult({ toolResult: { ok: true } })).toEqual({ content: '{"ok":true}' })
     const big = flattenMcpToolResult({ content: [{ type: 'text', text: 'x'.repeat(MAX_MCP_RESULT_CHARS + 10) }] })
     expect(String(big.content)).toMatch(/\[truncated: 10 more characters\]$/)
+  })
+})
+
+// ─── Variables and working folder ───────────────────────────────────────────
+
+describe('McpService variables and working folder', () => {
+  const variableContext = () => ({ userHome: tmpdir(), pathSeparator: '/', env: { MY_KEY: 'from-env' } })
+
+  it('fills in variables before launching', async () => {
+    const workspace = mkdtempSync(join(tmpdir(), 'mcp-ws-'))
+    try {
+      const { service, factory } = setup({ deps: { variableContext } })
+      activeService = service
+      service.applyServers([stdioServer({
+        args: ['--root', '${workspaceFolder}'],
+        env: { API_KEY: '${env:MY_KEY}' },
+        cwd: '${workspaceFolder}'
+      })], workspace)
+
+      await waitForState(service, 'srv-1', 'connected')
+      const launched = factory.createTransport.mock.calls[0][0]
+      expect(launched.args).toEqual(['--root', workspace])
+      expect(launched.env).toEqual({ API_KEY: 'from-env' })
+      expect(launched.cwd).toBe(workspace)
+    } finally {
+      rmSync(workspace, { recursive: true, force: true })
+    }
+  })
+
+  it('reports a missing workspace or variable without launching', async () => {
+    const { service, factory } = setup({ deps: { variableContext } })
+    activeService = service
+    service.applyServers([
+      stdioServer({ args: ['${workspaceFolder}'] }),
+      stdioServer({ id: 'srv-2', name: 'Two', env: { K: '${NOPE}' } })
+    ], null)
+
+    await waitForState(service, 'srv-1', 'error')
+    await waitForState(service, 'srv-2', 'error')
+    expect(service.getStatuses()[0].error).toMatch(/no workspace folder is open/)
+    expect(service.getStatuses()[1].error).toMatch(/NOPE is not set/)
+    expect(factory.createTransport).not.toHaveBeenCalled()
+  })
+
+  it('reports a working folder that does not exist', async () => {
+    const { service, factory } = setup({ deps: { variableContext } })
+    activeService = service
+    service.applyServers([stdioServer({ cwd: join(tmpdir(), 'definitely-missing-mcp-folder') })])
+
+    await waitForState(service, 'srv-1', 'error')
+    expect(service.getStatuses()[0].error).toMatch(/does not exist/)
+    expect(factory.createTransport).not.toHaveBeenCalled()
+  })
+
+  it('restarts only servers that use the workspace folder when it changes', async () => {
+    const first = mkdtempSync(join(tmpdir(), 'mcp-ws-'))
+    const second = mkdtempSync(join(tmpdir(), 'mcp-ws-'))
+    try {
+      const { service, factory } = setup({ deps: { variableContext } })
+      activeService = service
+      const servers = [
+        stdioServer({ cwd: '${workspaceFolder}' }),
+        stdioServer({ id: 'srv-2', name: 'Plain' })
+      ]
+      service.applyServers(servers, first)
+      await waitForState(service, 'srv-1', 'connected')
+      await waitForState(service, 'srv-2', 'connected')
+      expect(factory.createTransport).toHaveBeenCalledTimes(2)
+
+      service.applyServers(servers, second)
+      await waitForState(service, 'srv-1', 'connected')
+      expect(factory.createTransport).toHaveBeenCalledTimes(3)
+      expect(factory.createTransport.mock.calls[2][0].cwd).toBe(second)
+    } finally {
+      rmSync(first, { recursive: true, force: true })
+      rmSync(second, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('resolveWorkingFolder', () => {
+  it('defaults to the home folder and expands ~', () => {
+    expect(resolveWorkingFolder(undefined, '/home/me')).toBe('/home/me')
+    expect(resolveWorkingFolder('  ', '/home/me')).toBe('/home/me')
+    expect(resolveWorkingFolder('~', '/home/me')).toBe('/home/me')
+    expect(resolveWorkingFolder('~/code', '/home/me')).toBe(join('/home/me', 'code'))
+    expect(resolveWorkingFolder('/srv/app', '/home/me')).toBe('/srv/app')
+  })
+})
+
+// ─── OAuth state ────────────────────────────────────────────────────────────
+
+describe('McpService OAuth', () => {
+  it('gives remote servers an auth provider unless they send their own Authorization header', async () => {
+    const { service, factory } = setup({ deps: { authStore: createMemoryAuthStore() } })
+    activeService = service
+    service.applyServers([
+      remoteServer({ headers: undefined }),
+      remoteServer({ id: 'remote-2', name: 'Keyed', headers: { authorization: 'Bearer k' } })
+    ])
+    await waitForState(service, 'remote-1', 'connected')
+    await waitForState(service, 'remote-2', 'connected')
+
+    const options = factory.createTransport.mock.calls.map((call) => (call as unknown[])[2] as { authProvider?: unknown })
+    expect(options[0].authProvider).toBeDefined()
+    expect(options[1].authProvider).toBeUndefined()
+  })
+
+  it('shows needs_auth instead of an error when the server wants a sign-in', async () => {
+    const createTransport = vi.fn((): Transport => {
+      throw new McpSignInRequiredError('Sign in to use this server.')
+    })
+    const { service } = setup({ deps: { authStore: createMemoryAuthStore(), createTransport } })
+    activeService = service
+    service.applyServers([remoteServer({ headers: undefined })])
+
+    await waitForState(service, 'remote-1', 'needs_auth')
+    expect(service.getStatuses()[0]).toMatchObject({ error: 'Sign in to use this server.', toolCount: 0 })
+  })
+
+  it('forgets sign-ins of removed servers', () => {
+    const store = createMemoryAuthStore()
+    store.set('gone', { binding: 'x' })
+    store.set('remote-1', { binding: 'y' })
+    const { service } = setup({ deps: { authStore: store } })
+    activeService = service
+    service.applyServers([remoteServer()])
+    expect(store.ids()).toEqual(['remote-1'])
   })
 })
 

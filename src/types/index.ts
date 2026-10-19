@@ -44,6 +44,20 @@ export interface Settings {
 /** 'stdio' launches a local command; 'http' talks to a Streamable HTTP endpoint. */
 export type McpTransport = 'stdio' | 'http'
 
+/**
+ * Optional OAuth settings for a remote server. Most servers need none of
+ * these: the app registers itself with the server's sign-in provider.
+ */
+export interface McpOAuthConfig {
+  /** Pre-registered client, for providers without dynamic registration. */
+  clientId?: string
+  clientSecret?: string
+  /** Space-separated scopes, when the server doesn't say which it needs. */
+  scope?: string
+  /** Fixed port for the http://127.0.0.1:<port>/callback redirect. */
+  callbackPort?: number
+}
+
 export interface McpServerConfig {
   id: string
   name: string
@@ -51,19 +65,29 @@ export interface McpServerConfig {
   command?: string
   args?: string[]
   env?: Record<string, string>
+  /** Folder a local command runs in; defaults to the user's home folder. */
+  cwd?: string
   url?: string
   headers?: Record<string, string>
+  oauth?: McpOAuthConfig
   enabled: boolean
 }
 
-export type McpConnectionState = 'disabled' | 'connecting' | 'connected' | 'error'
+/** 'needs_auth': a remote server that wants the user to sign in first. */
+export type McpConnectionState = 'disabled' | 'connecting' | 'connected' | 'needs_auth' | 'error'
 
 export interface McpServerStatus {
   id: string
   state: McpConnectionState
   toolCount: number
   error?: string
+  /** Remote servers only: OAuth tokens are saved for this server. */
+  signedIn?: boolean
+  /** A browser sign-in is in progress. */
+  signingIn?: boolean
 }
+
+export type McpSignInResult = { ok: true } | { ok: false; error: string; cancelled?: boolean }
 
 // ─── Conversations ───────────────────────────────────────────────────────────
 
@@ -323,6 +347,10 @@ export interface RedLedgerAPI {
   // MCP Connections
   getMcpStatus(): Promise<McpServerStatus[]>
   reconnectMcpServer(serverId: string): Promise<void>
+  /** Browser OAuth sign-in for a remote server; resolves when it finishes, fails or is cancelled. */
+  signInMcpServer(serverId: string): Promise<McpSignInResult>
+  cancelMcpSignIn(serverId: string): Promise<void>
+  signOutMcpServer(serverId: string): Promise<void>
   onMcpStatus(handler: (statuses: McpServerStatus[]) => void): () => void
 
   // Dialogs

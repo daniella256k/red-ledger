@@ -8,7 +8,7 @@
 import type {
   Conversation, Message, Settings, FileNode, SearchResult,
   Attachment, AttachmentParseResult, LLMRequest, StreamChunk, ContextProfile, TitleGenerationRequest,
-  McpServerStatus
+  McpServerStatus, McpSignInResult
 } from '../../src/types'
 
 export type ChatExportFormat = 'markdown' | 'xml'
@@ -84,6 +84,9 @@ export interface IpcContract {
   // MCP connections
   'mcp:getStatus':              { params: [];                                          result: McpServerStatus[] }
   'mcp:reconnect':              { params: [serverId: string];                          result: void }
+  'mcp:signIn':                 { params: [serverId: string];                          result: McpSignInResult }
+  'mcp:cancelSignIn':           { params: [serverId: string];                          result: void }
+  'mcp:signOut':                { params: [serverId: string];                          result: void }
 
   // LLM (non-streaming)
   'llm:listModels':             { params: [provider: string];                          result: string[] }

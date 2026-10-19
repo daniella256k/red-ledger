@@ -171,6 +171,15 @@ const api: RedLedgerAPI = {
   reconnectMcpServer: (serverId: string) =>
     ipcRenderer.invoke('mcp:reconnect', serverId),
 
+  signInMcpServer: (serverId: string) =>
+    ipcRenderer.invoke('mcp:signIn', serverId),
+
+  cancelMcpSignIn: (serverId: string) =>
+    ipcRenderer.invoke('mcp:cancelSignIn', serverId),
+
+  signOutMcpServer: (serverId: string) =>
+    ipcRenderer.invoke('mcp:signOut', serverId),
+
   onMcpStatus: (handler) => {
     const listener = (_event: Electron.IpcRendererEvent, statuses: unknown) => {
       if (Array.isArray(statuses)) handler(statuses as McpServerStatus[])

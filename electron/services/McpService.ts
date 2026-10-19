@@ -1,7 +1,10 @@
 import { spawn } from 'child_process'
+import { randomBytes } from 'crypto'
+import { statSync } from 'fs'
 import { homedir } from 'os'
-import { extname } from 'path'
+import { extname, isAbsolute, join, sep } from 'path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { auth, UnauthorizedError, type OAuthClientProvider } from '@modelcontextprotocol/sdk/client/auth.js'
 import { StdioClientTransport, getDefaultEnvironment } from '@modelcontextprotocol/sdk/client/stdio.js'
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js'
 import { StreamableHTTPClientTransport, StreamableHTTPError } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
@@ -10,8 +13,25 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import type { ToolDefinition, ToolParametersSchema } from '../lib/providers/base'
 import type { ToolEntry } from '../lib/tools/registry'
 import type { DialogAdapter } from './WorkspaceService'
-import { assignMcpServerPrefixes, buildMcpToolName, mcpServerPrefix, MAX_TOOL_NAME_LENGTH } from '../../src/lib/mcpConfig'
-import type { McpServerConfig, McpServerStatus, Settings } from '../../src/types'
+import {
+  assignMcpServerPrefixes,
+  buildMcpToolName,
+  mcpServerPrefix,
+  MAX_TOOL_NAME_LENGTH,
+  resolveMcpServerConfig,
+  type McpVariableContext
+} from '../../src/lib/mcpConfig'
+import {
+  hasSavedTokens,
+  McpOAuthProvider,
+  McpSignInCancelledError,
+  McpSignInRequiredError,
+  startOAuthCallbackServer,
+  type CallbackServerOptions,
+  type McpAuthStore,
+  type OAuthCallbackServer
+} from './mcpOAuth'
+import type { McpServerConfig, McpServerStatus, McpSignInResult, Settings } from '../../src/types'
 
 /** Window handle the tool registry passes through to executors (BrowserWindow in production). */
 type ToolWindow = Parameters<ToolEntry['execute']>[1]['win']
@@ -24,6 +44,8 @@ export const MAX_MCP_RESULT_CHARS = 100_000
 const MAX_STDERR_LINES = 20
 const MAX_CONFIRM_ARGS_CHARS = 1_500
 const SHUTDOWN_TIMEOUT_MS = 4_000
+/** How long the browser sign-in may take before the callback page closes. */
+const SIGN_IN_TIMEOUT_MS = 5 * 60_000
 
 /** Bare commands that are .cmd shims on Windows and can't be spawned directly. */
 const WINDOWS_CMD_SHIMS = new Set(['npx', 'npm', 'pnpm', 'pnpx', 'yarn', 'yarnpkg'])
@@ -42,16 +64,39 @@ export class McpToolError extends Error {
   }
 }
 
+/** A server's working folder: the configured one (`~` = home), or the home folder. */
+export function resolveWorkingFolder(cwd: string | undefined, home: string = homedir()): string {
+  const trimmed = (cwd ?? '').trim()
+  if (!trimmed) return home
+  if (trimmed === '~') return home
+  if (/^~[\\/]/.test(trimmed)) return join(home, trimmed.slice(2))
+  return trimmed
+}
+
+/** Throws a readable error unless `cwd` is an existing folder given as a full path. */
+export function checkWorkingFolder(cwd: string): void {
+  if (!isAbsolute(cwd)) {
+    throw new Error(`Working folder "${cwd}" must be a full path.`)
+  }
+  let isDirectory = false
+  try {
+    isDirectory = statSync(cwd).isDirectory()
+  } catch {
+    // Missing; reported below
+  }
+  if (!isDirectory) throw new Error(`Working folder "${cwd}" does not exist.`)
+}
+
 /**
- * Command, args and env actually used to launch a stdio server.
+ * Command, args, env and working folder actually used to launch a stdio server.
  * Windows can't spawn .cmd shims like `npx` directly, so they get their
  * extension (cross-spawn inside the SDK then runs them through cmd.exe).
  */
 export function resolveStdioLaunch(
-  config: Pick<McpServerConfig, 'command' | 'args' | 'env'>,
+  config: Pick<McpServerConfig, 'command' | 'args' | 'env' | 'cwd'>,
   platform: NodeJS.Platform = process.platform,
   baseEnv: Record<string, string | undefined> = process.env
-): { command: string; args: string[]; env: Record<string, string> } {
+): { command: string; args: string[]; env: Record<string, string>; cwd: string } {
   let command = (config.command ?? '').trim()
   if (platform === 'win32' && WINDOWS_CMD_SHIMS.has(command.toLowerCase()) && !extname(command)) {
     command = `${command}.cmd`
@@ -71,7 +116,7 @@ export function resolveStdioLaunch(
     env.PATH = pathEntries.join(':')
   }
 
-  return { command, args: config.args ?? [], env: { ...env, ...config.env } }
+  return { command, args: config.args ?? [], env: { ...env, ...config.env }, cwd: resolveWorkingFolder(config.cwd) }
 }
 
 /** Kill a process and everything it started (npx → node). Windows needs taskkill for the tree. */
@@ -181,6 +226,15 @@ export function shouldFallBackToSse(err: unknown): boolean {
   return err.code >= 400 && err.code < 500 && err.code !== 401 && err.code !== 403
 }
 
+/** The server wants the user to sign in (no saved tokens, or they stopped working). */
+function isSignInRequired(err: unknown): boolean {
+  return err instanceof McpSignInRequiredError || err instanceof UnauthorizedError
+}
+
+function hasStaticAuthorization(config: McpServerConfig): boolean {
+  return Object.keys(config.headers ?? {}).some((name) => name.toLowerCase() === 'authorization')
+}
+
 function describeConnectError(err: unknown, config: McpServerConfig, stderrTail: string[]): string {
   const error = err as NodeJS.ErrnoException | undefined
   let message = error instanceof Error ? error.message : String(err)
@@ -199,6 +253,8 @@ function describeConnectError(err: unknown, config: McpServerConfig, stderrTail:
 
 interface Connection {
   config: McpServerConfig
+  /** Config with `${...}` variables filled in; null when one couldn't be. */
+  resolved: McpServerConfig | null
   fingerprint: string
   prefix: string
   state: McpServerStatus['state']
@@ -221,14 +277,24 @@ export interface McpServiceDeps {
   registerTool: (entry: ToolEntry) => void
   unregisterTool: (name: string) => void
   onStatusChange?: (statuses: McpServerStatus[]) => void
+  /** Saved OAuth sign-ins. Without one, remote servers can't sign in. */
+  authStore?: McpAuthStore
+  /** Opens a sign-in page in the user's browser. */
+  openUrl?: (url: string) => void | Promise<void>
+  /** Override for tests; defaults to a loopback page on 127.0.0.1. */
+  startCallbackServer?: (options: CallbackServerOptions) => Promise<OAuthCallbackServer>
+  /** Override for tests; defaults to this process's environment and home folder. */
+  variableContext?: () => Omit<McpVariableContext, 'workspaceFolder'>
   /**
    * Override for tests; defaults to the real stdio / Streamable HTTP transports.
-   * `legacySse` is set on the retry for remote servers that only speak HTTP+SSE.
+   * `config` has variables filled in. `legacySse` is set on the retry for
+   * remote servers that only speak HTTP+SSE; `authProvider` is set for remote
+   * servers that may use OAuth.
    */
   createTransport?: (
     config: McpServerConfig,
     onStderr: (chunk: string) => void,
-    options: { legacySse: boolean }
+    options: { legacySse: boolean; authProvider?: OAuthClientProvider }
   ) => Transport
 }
 
@@ -243,6 +309,9 @@ export class McpService {
   private connections = new Map<string, Connection>()
   private order: string[] = []
   private configs = new Map<string, McpServerConfig>()
+  private workspaceFolder: string | null = null
+  /** Browser sign-ins in progress, by server id. */
+  private signIns = new Map<string, OAuthCallbackServer>()
 
   constructor(deps: McpServiceDeps) {
     this.deps = deps
@@ -250,9 +319,11 @@ export class McpService {
 
   /**
    * Bring connections in line with the configured servers. Unchanged servers
-   * are left alone, so this is cheap to call on every settings save.
+   * are left alone, so this is cheap to call on every settings save. Servers
+   * that use `${workspaceFolder}` restart when the workspace folder changes.
    */
-  applyServers(servers: McpServerConfig[]): void {
+  applyServers(servers: McpServerConfig[], workspaceFolder: string | null = this.workspaceFolder): void {
+    this.workspaceFolder = workspaceFolder
     for (const [id, connection] of this.connections) {
       const next = servers.find((server) => server.id === id)
       if (!next?.enabled || this.fingerprint(next) !== connection.fingerprint) {
@@ -264,6 +335,14 @@ export class McpService {
     this.order = servers.map((server) => server.id)
     this.configs = new Map(servers.map((server) => [server.id, server]))
     const prefixes = assignMcpServerPrefixes(servers)
+
+    // Forget sign-ins for servers that were removed.
+    const store = this.deps.authStore
+    if (store) {
+      for (const id of store.ids()) {
+        if (!this.configs.has(id)) store.delete(id)
+      }
+    }
 
     for (const server of servers) {
       if (!server.enabled) continue
@@ -297,20 +376,104 @@ export class McpService {
   }
 
   getStatuses(): McpServerStatus[] {
+    const store = this.deps.authStore
     return this.order.map((id) => {
       const connection = this.connections.get(id)
       if (!connection) return { id, state: 'disabled' as const, toolCount: 0 }
+      const resolved = connection.resolved
+      const signedIn = !!store && resolved?.transport === 'http' && hasSavedTokens(store, id, resolved)
       return {
         id,
         state: connection.state,
         toolCount: connection.registered.size,
-        ...(connection.error ? { error: connection.error } : {})
+        ...(connection.error ? { error: connection.error } : {}),
+        ...(signedIn ? { signedIn } : {}),
+        ...(this.signIns.has(id) ? { signingIn: true } : {})
       }
     })
   }
 
+  // ─── OAuth sign-in ────────────────────────────────────────────────────────
+
+  /**
+   * Sign in to a remote server in the browser: open the provider's page,
+   * wait for it to redirect back to a loopback address, save the tokens and
+   * reconnect. Saved tokens are refreshed automatically after that.
+   */
+  async signIn(serverId: string): Promise<McpSignInResult> {
+    const config = this.configs.get(serverId)
+    const store = this.deps.authStore
+    const openUrl = this.deps.openUrl
+    if (!config?.enabled || config.transport !== 'http') {
+      return { ok: false, error: 'Only enabled remote connections can sign in.' }
+    }
+    if (!store || !openUrl) return { ok: false, error: 'Sign-in is not available.' }
+    if (this.signIns.has(serverId)) return { ok: false, error: 'A sign-in is already in progress for this connection.' }
+
+    const resolution = this.resolve(config)
+    if ('error' in resolution) return { ok: false, error: resolution.error }
+    const resolved = resolution.resolved
+    if (!resolved.url) return { ok: false, error: 'No URL set for this connection.' }
+
+    const state = randomBytes(16).toString('hex')
+    const previousRedirect = store.get(serverId)?.redirectUrl
+    let callback: OAuthCallbackServer
+    try {
+      callback = await (this.deps.startCallbackServer ?? startOAuthCallbackServer)({
+        state,
+        preferredPort: previousRedirect ? Number(new URL(previousRedirect).port) || undefined : undefined,
+        requiredPort: resolved.oauth?.callbackPort,
+        timeoutMs: SIGN_IN_TIMEOUT_MS
+      })
+    } catch (err) {
+      return { ok: false, error: err instanceof Error ? err.message : String(err) }
+    }
+    this.signIns.set(serverId, callback)
+    this.emitStatus()
+
+    try {
+      const provider = new McpOAuthProvider({
+        serverId,
+        config: resolved,
+        store,
+        interactive: { redirectUrl: callback.redirectUrl, state, openUrl }
+      })
+      const options = { serverUrl: resolved.url, ...(resolved.oauth?.scope ? { scope: resolved.oauth.scope } : {}) }
+      if (await auth(provider, options) === 'REDIRECT') {
+        const code = await callback.code
+        await auth(provider, { ...options, authorizationCode: code })
+      }
+    } catch (err) {
+      if (err instanceof McpSignInCancelledError) return { ok: false, cancelled: true, error: err.message }
+      const message = err instanceof Error ? err.message : String(err)
+      return { ok: false, error: /^sign-in/i.test(message) ? message : `Sign-in failed: ${message}` }
+    } finally {
+      callback.close()
+      if (this.signIns.get(serverId) === callback) this.signIns.delete(serverId)
+      this.emitStatus()
+    }
+
+    await this.reconnect(serverId)
+    return { ok: true }
+  }
+
+  /** Stop waiting for the browser (the Cancel button). */
+  cancelSignIn(serverId: string): void {
+    this.signIns.get(serverId)?.close()
+  }
+
+  /** Forget a server's tokens and registration, then reconnect (it will ask to sign in again). */
+  async signOut(serverId: string): Promise<void> {
+    this.cancelSignIn(serverId)
+    this.deps.authStore?.delete(serverId)
+    await this.reconnect(serverId)
+    this.emitStatus()
+  }
+
   /** Close every connection and its child process. Resolves within a few seconds even if a server hangs. */
   async closeAll(): Promise<void> {
+    for (const callback of this.signIns.values()) callback.close()
+    this.signIns.clear()
     const connections = [...this.connections.values()]
     this.connections.clear()
     if (connections.length === 0) return
@@ -322,21 +485,45 @@ export class McpService {
 
   // ─── Connection lifecycle ─────────────────────────────────────────────────
 
+  private variableContext(): McpVariableContext {
+    const base = this.deps.variableContext?.() ?? { userHome: homedir(), pathSeparator: sep, env: process.env }
+    return { ...base, workspaceFolder: this.workspaceFolder }
+  }
+
+  private resolve(config: McpServerConfig): { resolved: McpServerConfig } | { error: string } {
+    try {
+      return { resolved: resolveMcpServerConfig(config, this.variableContext()) }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : String(err) }
+    }
+  }
+
+  /** What a connection was opened with; any change means reconnecting. Uses filled-in variables. */
   private fingerprint(config: McpServerConfig): string {
-    return JSON.stringify([config.transport, config.command, config.args, config.env, config.url, config.headers])
+    const resolution = this.resolve(config)
+    const c = 'resolved' in resolution ? resolution.resolved : config
+    return JSON.stringify([
+      c.transport, c.command, c.args, c.env, c.cwd, c.url, c.headers, c.oauth,
+      'error' in resolution ? resolution.error : null
+    ])
   }
 
   private createTransport(
+    connection: Connection,
     config: McpServerConfig,
     onStderr: (chunk: string) => void,
     legacySse: boolean
   ): Transport {
-    if (this.deps.createTransport) return this.deps.createTransport(config, onStderr, { legacySse })
+    // A fixed Authorization header means the user handles auth; otherwise OAuth kicks in on a 401.
+    const authProvider = config.transport === 'http' && this.deps.authStore && !hasStaticAuthorization(config)
+      ? new McpOAuthProvider({ serverId: connection.config.id, config, store: this.deps.authStore })
+      : undefined
+    if (this.deps.createTransport) return this.deps.createTransport(config, onStderr, { legacySse, authProvider })
 
     if (config.transport === 'http') {
       if (!config.url) throw new Error('No URL set for this connection.')
       // The SSE transport sends requestInit headers on both the event stream and its POSTs.
-      const options = { requestInit: config.headers ? { headers: config.headers } : undefined }
+      const options = { requestInit: config.headers ? { headers: config.headers } : undefined, authProvider }
       return legacySse
         ? new SSEClientTransport(new URL(config.url), options)
         : new StreamableHTTPClientTransport(new URL(config.url), options)
@@ -350,8 +537,10 @@ export class McpService {
   }
 
   private async connect(config: McpServerConfig, prefix: string): Promise<void> {
+    const resolution = this.resolve(config)
     const connection: Connection = {
       config,
+      resolved: 'resolved' in resolution ? resolution.resolved : null,
       fingerprint: this.fingerprint(config),
       prefix,
       state: 'connecting',
@@ -373,6 +562,11 @@ export class McpService {
     }
 
     try {
+      if ('error' in resolution) throw new Error(resolution.error)
+      if (resolution.resolved.transport === 'stdio') {
+        checkWorkingFolder(resolveWorkingFolder(resolution.resolved.cwd))
+      }
+
       let client: Client
       try {
         client = await this.openClient(connection, onStderr, false)
@@ -399,8 +593,13 @@ export class McpService {
       this.registerTools(connection)
     } catch (err) {
       if (connection.retired) return
-      connection.state = 'error'
-      connection.error = describeConnectError(err, config, connection.stderrTail)
+      if (isSignInRequired(err)) {
+        connection.state = 'needs_auth'
+        connection.error = err instanceof McpSignInRequiredError ? err.message : 'Sign in to use this server.'
+      } else {
+        connection.state = 'error'
+        connection.error = describeConnectError(err, connection.resolved ?? config, connection.stderrTail)
+      }
       this.unregisterTools(connection)
       void this.closeTransport(connection)
     }
@@ -413,7 +612,8 @@ export class McpService {
     onStderr: (chunk: string) => void,
     legacySse: boolean
   ): Promise<Client> {
-    const transport = this.createTransport(connection.config, onStderr, legacySse)
+    // connect() only gets here once variables resolved.
+    const transport = this.createTransport(connection, connection.resolved ?? connection.config, onStderr, legacySse)
     connection.transport = transport
     const client = new Client(CLIENT_INFO, {
       capabilities: {},
@@ -563,6 +763,14 @@ export class McpService {
       )
       return flattenMcpToolResult(result)
     } catch (err) {
+      if (isSignInRequired(err) && !connection.retired) {
+        // Tokens expired and couldn't be refreshed: drop the tools until the user signs in again.
+        this.unregisterTools(connection)
+        connection.state = 'needs_auth'
+        connection.error = 'Your sign-in expired. Sign in again to use this server.'
+        this.emitStatus()
+        throw new McpToolError('MCP_ERROR', `The "${connection.config.name}" connection needs the user to sign in again (Settings → Connections).`)
+      }
       throw new McpToolError('MCP_ERROR', err instanceof Error ? err.message : String(err))
     }
   }
