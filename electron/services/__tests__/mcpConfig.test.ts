@@ -1,13 +1,19 @@
 import { describe, it, expect } from 'vitest'
 import {
+  assignMcpServerPrefixes,
   buildMcpToolName,
+  findMcpServerByPrefix,
   joinCommandLine,
+  MCP_SECRET_MASK,
   mcpServerPrefix,
   parseKeyValueLines,
   parseMcpServersJson,
   parseMcpToolName,
+  restoreMaskedSecrets,
+  serializeMcpServersJson,
   splitCommandLine
 } from '../../../src/lib/mcpConfig'
+import type { McpServerConfig } from '../../../src/types'
 
 describe('MCP tool names', () => {
   it('slugifies server names without ever producing the separator', () => {
@@ -91,5 +97,71 @@ describe('parseMcpServersJson', () => {
     expect(result.servers).toEqual([])
     expect(result.errors).toHaveLength(2)
     expect(parseMcpServersJson('{"mcpServers":{}}').errors[0]).toMatch(/No servers/)
+  })
+})
+
+describe('server prefixes', () => {
+  const servers: McpServerConfig[] = [
+    { id: 'a', name: 'Files', transport: 'stdio', command: 'node', enabled: true },
+    { id: 'b', name: 'off', transport: 'stdio', command: 'node', enabled: false },
+    { id: 'c', name: 'files', transport: 'http', url: 'https://x', enabled: true }
+  ]
+
+  it('suffixes enabled servers whose names collide and skips disabled ones', () => {
+    expect([...assignMcpServerPrefixes(servers)]).toEqual([['a', 'files'], ['c', 'files-2']])
+  })
+
+  it('finds the server behind a suffixed prefix', () => {
+    expect(findMcpServerByPrefix(servers, 'files')?.id).toBe('a')
+    expect(findMcpServerByPrefix(servers, 'files-2')?.id).toBe('c')
+    // Disabled servers still resolve by name, for tool calls in older chats.
+    expect(findMcpServerByPrefix(servers, 'off')?.id).toBe('b')
+    expect(findMcpServerByPrefix(servers, 'nope')).toBeUndefined()
+  })
+})
+
+describe('JSON view', () => {
+  const servers: McpServerConfig[] = [
+    { id: '1', name: 'local', transport: 'stdio', command: 'npx', args: ['-y', 'pkg'], env: { API_KEY: 'secret', EMPTY: '' }, enabled: true },
+    { id: '2', name: 'remote', transport: 'http', url: 'https://example.com/mcp', headers: { Authorization: 'Bearer t' }, enabled: false },
+    { id: '3', name: 'Local', transport: 'stdio', command: 'node', enabled: true }
+  ]
+
+  it('serializes to the mcpServers shape, masking env and header values', () => {
+    expect(JSON.parse(serializeMcpServersJson(servers, { maskSecrets: true }))).toEqual({
+      mcpServers: {
+        local: { command: 'npx', args: ['-y', 'pkg'], env: { API_KEY: MCP_SECRET_MASK, EMPTY: '' } },
+        remote: { type: 'http', url: 'https://example.com/mcp', headers: { Authorization: MCP_SECRET_MASK }, disabled: true },
+        'Local (2)': { command: 'node' }
+      }
+    })
+  })
+
+  it('round-trips unmasked JSON through Paste JSON parsing', () => {
+    const parsed = parseMcpServersJson(serializeMcpServersJson(servers, { maskSecrets: false }))
+    expect(parsed.errors).toEqual([])
+    expect(parsed.servers.map(({ name, enabled }) => [name, enabled])).toEqual([['local', true], ['remote', false], ['Local (2)', true]])
+    expect(parsed.servers[0].env).toEqual({ API_KEY: 'secret', EMPTY: '' })
+    expect(parsed.servers[1].headers).toEqual({ Authorization: 'Bearer t' })
+  })
+
+  it('restores masked values and keeps edited ones', () => {
+    const json = JSON.parse(serializeMcpServersJson(servers, { maskSecrets: true }))
+    json.mcpServers.local.env.NEW = 'typed'
+    json.mcpServers.remote.headers = { authorization: MCP_SECRET_MASK }
+    const { servers: restored, unresolved } = restoreMaskedSecrets(parseMcpServersJson(JSON.stringify(json)).servers, servers)
+    expect(unresolved).toEqual([])
+    expect(restored[0].env).toEqual({ API_KEY: 'secret', EMPTY: '', NEW: 'typed' })
+    expect(restored[1].headers).toEqual({ authorization: 'Bearer t' })
+  })
+
+  it('reports masks with no saved value behind them', () => {
+    const json = { mcpServers: { renamed: { command: 'npx', env: { API_KEY: MCP_SECRET_MASK } } } }
+    const { unresolved } = restoreMaskedSecrets(parseMcpServersJson(JSON.stringify(json)).servers, servers)
+    expect(unresolved).toEqual(['"renamed": API_KEY'])
+  })
+
+  it('allows an empty server list when asked', () => {
+    expect(parseMcpServersJson('{"mcpServers":{}}', { allowEmpty: true })).toEqual({ servers: [], errors: [] })
   })
 })

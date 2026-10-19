@@ -10,7 +10,7 @@ import type { Tool } from '@modelcontextprotocol/sdk/types.js'
 import type { ToolDefinition, ToolParametersSchema } from '../lib/providers/base'
 import type { ToolEntry } from '../lib/tools/registry'
 import type { DialogAdapter } from './WorkspaceService'
-import { buildMcpToolName, mcpServerPrefix, MAX_TOOL_NAME_LENGTH } from '../../src/lib/mcpConfig'
+import { assignMcpServerPrefixes, buildMcpToolName, mcpServerPrefix, MAX_TOOL_NAME_LENGTH } from '../../src/lib/mcpConfig'
 import type { McpServerConfig, McpServerStatus, Settings } from '../../src/types'
 
 /** Window handle the tool registry passes through to executors (BrowserWindow in production). */
@@ -263,7 +263,7 @@ export class McpService {
 
     this.order = servers.map((server) => server.id)
     this.configs = new Map(servers.map((server) => [server.id, server]))
-    const prefixes = this.assignPrefixes(servers)
+    const prefixes = assignMcpServerPrefixes(servers)
 
     for (const server of servers) {
       if (!server.enabled) continue
@@ -288,7 +288,7 @@ export class McpService {
     const config = this.configs.get(serverId)
     if (!config?.enabled) return
     const existing = this.connections.get(serverId)
-    const prefix = existing?.prefix ?? this.assignPrefixes([...this.configs.values()]).get(serverId) ?? mcpServerPrefix(config.name)
+    const prefix = existing?.prefix ?? assignMcpServerPrefixes([...this.configs.values()]).get(serverId) ?? mcpServerPrefix(config.name)
     if (existing) {
       this.connections.delete(serverId)
       await this.retire(existing)
@@ -324,21 +324,6 @@ export class McpService {
 
   private fingerprint(config: McpServerConfig): string {
     return JSON.stringify([config.transport, config.command, config.args, config.env, config.url, config.headers])
-  }
-
-  /** Server prefixes for enabled servers, made unique with a numeric suffix. */
-  private assignPrefixes(servers: McpServerConfig[]): Map<string, string> {
-    const used = new Set<string>()
-    const out = new Map<string, string>()
-    for (const server of servers) {
-      if (!server.enabled) continue
-      const base = mcpServerPrefix(server.name)
-      let prefix = base
-      for (let n = 2; used.has(prefix); n++) prefix = `${base}-${n}`
-      used.add(prefix)
-      out.set(server.id, prefix)
-    }
-    return out
   }
 
   private createTransport(

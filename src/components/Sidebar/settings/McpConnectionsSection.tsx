@@ -1,11 +1,14 @@
 import { useEffect, useState } from 'react'
-import { RotateCw, X } from 'lucide-react'
+import { Copy, RotateCw, X } from 'lucide-react'
 import type { McpServerConfig, McpServerStatus, McpTransport } from '@/types'
 import {
   formatKeyValueLines,
   joinCommandLine,
+  mcpServerJsonKeys,
   parseKeyValueLines,
   parseMcpServersJson,
+  restoreMaskedSecrets,
+  serializeMcpServersJson,
   splitCommandLine
 } from '@/lib/mcpConfig'
 import { notify } from '@/lib/notify'
@@ -290,6 +293,145 @@ function PasteJsonForm({ onImport, onCancel }: PasteJsonFormProps) {
   )
 }
 
+// ─── JSON view ──────────────────────────────────────────────────────────────
+
+interface JsonViewProps {
+  servers: McpServerConfig[]
+  onApply: (servers: McpServerConfig[]) => Promise<boolean>
+  onClose: () => void
+}
+
+/**
+ * The whole server list as config JSON. Secrets are masked until revealed;
+ * masks left in place keep their saved values when the edit is applied.
+ */
+function JsonView({ servers, onApply, onClose }: JsonViewProps) {
+  const [showSecrets, setShowSecrets] = useState(false)
+  const [text, setText] = useState(() => serializeMcpServersJson(servers, { maskSecrets: true }))
+  const [dirty, setDirty] = useState(false)
+  const [errors, setErrors] = useState<string[]>([])
+
+  // Follow saved changes (toggles, edits elsewhere) until the user starts editing.
+  useEffect(() => {
+    if (!dirty) setText(serializeMcpServersJson(servers, { maskSecrets: !showSecrets }))
+  }, [servers, showSecrets, dirty])
+
+  const reset = () => {
+    setDirty(false)
+    setErrors([])
+  }
+
+  const copy = async () => {
+    try {
+      await navigator.clipboard.writeText(text)
+      notify({ type: 'success', message: showSecrets ? 'Config copied, including secrets.' : 'Config copied with secrets masked.' })
+    } catch {
+      notify({ type: 'error', message: 'Could not copy to the clipboard.' })
+    }
+  }
+
+  const apply = async () => {
+    const parsed = parseMcpServersJson(text, { allowEmpty: true })
+    if (parsed.errors.length > 0) {
+      setErrors(parsed.errors)
+      return
+    }
+    const restored = restoreMaskedSecrets(parsed.servers, servers)
+    if (restored.unresolved.length > 0) {
+      setErrors([`Replace the masked value for ${restored.unresolved.join(', ')}; there is no saved value to keep.`])
+      return
+    }
+
+    // Keep ids for servers that are still there, so their connections stay up.
+    const keys = mcpServerJsonKeys(servers)
+    const idByKey = new Map(servers.map((server, index) => [keys[index].toLowerCase(), server.id]))
+    const next = restored.servers.map((server) => ({
+      ...server,
+      id: idByKey.get(server.name.toLowerCase()) ?? newServerId()
+    }))
+
+    if (await onApply(next)) reset()
+  }
+
+  return (
+    <div className="space-y-2 rounded-card border border-weathered bg-base-200/35 p-2.5">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <label className="text-[11px] font-medium text-soft-charcoal/60 block uppercase tracking-wide">
+            Current config
+          </label>
+          <HelpIcon
+            title="Every server as config JSON, in the format other MCP apps use. Edit it and press Apply to replace the whole list; servers you delete here are removed. Masked values keep their saved value."
+            label="Current config help"
+          />
+        </div>
+        <label
+          className="flex items-center gap-1.5 text-[10px] text-soft-charcoal/60 uppercase tracking-wide cursor-pointer"
+          title={dirty ? 'Apply or reset your edits first.' : 'Show env and header values'}
+        >
+          <input
+            type="checkbox"
+            checked={showSecrets}
+            disabled={dirty}
+            onChange={(e) => setShowSecrets(e.target.checked)}
+            className="checkbox checkbox-xs"
+          />
+          Show secrets
+        </label>
+      </div>
+
+      <textarea
+        value={text}
+        onChange={(e) => {
+          setText(e.target.value)
+          setDirty(true)
+          setErrors([])
+        }}
+        rows={12}
+        spellCheck={false}
+        aria-label="MCP config JSON"
+        className={`${TEXTAREA_CLASS} font-mono text-[11px]`}
+      />
+
+      {errors.length > 0 && (
+        <ul className="text-[11px] text-error space-y-0.5">
+          {errors.map((message) => <li key={message}>{message}</li>)}
+        </ul>
+      )}
+
+      <div className="flex justify-end gap-1">
+        <button
+          type="button"
+          onClick={() => void copy()}
+          title={showSecrets ? 'Copy, including secrets' : 'Copy with secrets masked'}
+          className={`${SMALL_BUTTON_CLASS} gap-1`}
+        >
+          <Copy size={10} />
+          Copy
+        </button>
+        {dirty ? (
+          <>
+            <button type="button" onClick={reset} className={SMALL_BUTTON_CLASS}>
+              Reset
+            </button>
+            <button
+              type="button"
+              onClick={() => void apply()}
+              className="btn btn-primary btn-xs h-6 min-h-0 px-3 text-[10px] uppercase tracking-wide"
+            >
+              Apply
+            </button>
+          </>
+        ) : (
+          <button type="button" onClick={onClose} className={SMALL_BUTTON_CLASS}>
+            Close
+          </button>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ─── Server row ─────────────────────────────────────────────────────────────
 
 const DOT_CLASS: Record<McpServerStatus['state'], string> = {
@@ -380,7 +522,7 @@ function ServerRow({ server, status, onToggle, onEdit, onRemove }: ServerRowProp
 
 // ─── Section ────────────────────────────────────────────────────────────────
 
-type Mode = { kind: 'idle' } | { kind: 'add' } | { kind: 'paste' } | { kind: 'edit'; id: string }
+type Mode = { kind: 'idle' } | { kind: 'add' } | { kind: 'paste' } | { kind: 'json' } | { kind: 'edit'; id: string }
 
 /**
  * Body of the "Connections" settings section: MCP servers whose tools the
@@ -431,6 +573,24 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
     notify({ type: 'success', message: `Connections ${parts.join(', ')}.` })
   }
 
+  const applyJson = async (next: McpServerConfig[]): Promise<boolean> => {
+    // Re-read in case settings changed while editing.
+    const latest = useSettingsStore.getState().settings ?? settings
+    const keptIds = new Set(next.map((server) => server.id))
+    const removed = latest.mcpServers.filter((server) => !keptIds.has(server.id))
+    if (removed.length > 0 && window.redLedger) {
+      const confirmed = await window.redLedger.showConfirmDialog({
+        title: 'Remove Connections',
+        message: `Remove ${removed.map((server) => `"${server.name}"`).join(', ')}?`,
+        detail: 'They are missing from the edited JSON. The assistant will no longer be able to use their tools.'
+      })
+      if (!confirmed) return false
+    }
+    saveSettings({ ...latest, mcpServers: next })
+    notify({ type: 'success', message: 'Connections updated.' })
+    return true
+  }
+
   const editing = mode.kind === 'edit' ? servers.find((s) => s.id === mode.id) : undefined
 
   return (
@@ -460,6 +620,14 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
           >
             Paste JSON
           </button>
+          <button
+            type="button"
+            onClick={() => setMode(mode.kind === 'json' ? { kind: 'idle' } : { kind: 'json' })}
+            title="View and edit every server as config JSON"
+            className={SMALL_BUTTON_CLASS}
+          >
+            View JSON
+          </button>
         </div>
       </div>
 
@@ -475,6 +643,10 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
 
       {mode.kind === 'paste' && (
         <PasteJsonForm onCancel={() => setMode({ kind: 'idle' })} onImport={importServers} />
+      )}
+
+      {mode.kind === 'json' && (
+        <JsonView servers={servers} onApply={applyJson} onClose={() => setMode({ kind: 'idle' })} />
       )}
 
       {servers.length > 0 && (

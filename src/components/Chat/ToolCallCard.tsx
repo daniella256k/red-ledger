@@ -2,7 +2,7 @@ import { useState } from 'react'
 import { ChevronDown, ChevronRight, Plug, Wrench } from 'lucide-react'
 import type { ToolCall } from '@/types'
 import { cn } from '@/lib/utils'
-import { mcpServerPrefix, parseMcpToolName } from '@/lib/mcpConfig'
+import { findMcpServerByPrefix, parseMcpToolName } from '@/lib/mcpConfig'
 import { useSettingsStore } from '@/store'
 
 interface ToolCallCardProps {
@@ -14,7 +14,7 @@ function useMcpServerLabel(toolName: string): { server: string; tool: string } |
   const servers = useSettingsStore((s) => s.settings?.mcpServers)
   const parsed = parseMcpToolName(toolName)
   if (!parsed) return null
-  const match = servers?.find((server) => mcpServerPrefix(server.name) === parsed.server)
+  const match = servers ? findMcpServerByPrefix(servers, parsed.server) : undefined
   return { server: match?.name ?? parsed.server, tool: parsed.tool }
 }
 

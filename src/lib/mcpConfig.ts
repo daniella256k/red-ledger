@@ -30,6 +30,37 @@ export function mcpServerPrefix(serverName: string): string {
   return slug || 'mcp'
 }
 
+/**
+ * Tool name prefixes for enabled servers, keyed by server id. Servers whose
+ * names slugify the same get a numeric suffix (`files`, `files-2`), in list order.
+ * The main process registers tools under these, so anything mapping a tool
+ * name back to its server must use this too, not mcpServerPrefix alone.
+ */
+export function assignMcpServerPrefixes(servers: McpServerConfig[]): Map<string, string> {
+  const used = new Set<string>()
+  const out = new Map<string, string>()
+  for (const server of servers) {
+    if (!server.enabled) continue
+    const base = mcpServerPrefix(server.name)
+    let prefix = base
+    for (let n = 2; used.has(prefix); n++) prefix = `${base}-${n}`
+    used.add(prefix)
+    out.set(server.id, prefix)
+  }
+  return out
+}
+
+/**
+ * The server whose tools are registered under `prefix`. Falls back to a plain
+ * name match so tool calls in older chats still find a now-disabled server.
+ */
+export function findMcpServerByPrefix(servers: McpServerConfig[], prefix: string): McpServerConfig | undefined {
+  for (const [id, assigned] of assignMcpServerPrefixes(servers)) {
+    if (assigned === prefix) return servers.find((server) => server.id === id)
+  }
+  return servers.find((server) => mcpServerPrefix(server.name) === prefix)
+}
+
 /** Model-facing name for a server's tool, clipped to the API's name limit. */
 export function buildMcpToolName(prefix: string, toolName: string): string {
   const safeTool = toolName.replace(/[^a-zA-Z0-9_-]+/g, '_') || 'tool'
@@ -168,7 +199,7 @@ function looksLikeServerEntry(value: unknown): value is Record<string, unknown> 
  * VS Code's `{ "servers": { ... } }`, the bare inner map, or one server object
  * (which needs a "name" field or gets a name from its command/url).
  */
-export function parseMcpServersJson(text: string): ParsedMcpServers {
+export function parseMcpServersJson(text: string, options: { allowEmpty?: boolean } = {}): ParsedMcpServers {
   let parsed: unknown
   try {
     parsed = JSON.parse(text)
@@ -242,9 +273,108 @@ export function parseMcpServersJson(text: string): ParsedMcpServers {
     })
   }
 
-  if (servers.length === 0 && errors.length === 0) {
+  if (servers.length === 0 && errors.length === 0 && !options.allowEmpty) {
     errors.push('No servers found in the pasted JSON.')
   }
 
   return { servers, errors }
+}
+
+// ─── JSON view ──────────────────────────────────────────────────────────────
+
+/** Stands in for env and header values in the JSON view until the user reveals them. */
+export const MCP_SECRET_MASK = '••••••••'
+
+/**
+ * Key each server gets in the JSON view. Names that collide (ignoring case,
+ * the way Paste JSON matches) get " (2)", " (3)", so no server is lost.
+ */
+export function mcpServerJsonKeys(servers: McpServerConfig[]): string[] {
+  const used = new Set<string>()
+  return servers.map((server) => {
+    let key = server.name
+    for (let n = 2; used.has(key.toLowerCase()); n++) key = `${server.name} (${n})`
+    used.add(key.toLowerCase())
+    return key
+  })
+}
+
+function maskValues(values: Record<string, string> | undefined, mask: boolean): Record<string, string> | undefined {
+  if (!values || Object.keys(values).length === 0) return undefined
+  if (!mask) return values
+  return Object.fromEntries(Object.entries(values).map(([key, value]) => [key, value ? MCP_SECRET_MASK : value]))
+}
+
+/**
+ * The servers as `{ "mcpServers": { ... } }`, the shape Paste JSON and other
+ * MCP clients read. With maskSecrets, env and header values are hidden.
+ */
+export function serializeMcpServersJson(servers: McpServerConfig[], options: { maskSecrets: boolean }): string {
+  const keys = mcpServerJsonKeys(servers)
+  const mcpServers: Record<string, Record<string, unknown>> = {}
+
+  servers.forEach((server, index) => {
+    const entry: Record<string, unknown> = server.transport === 'http'
+      ? { type: 'http', url: server.url, headers: maskValues(server.headers, options.maskSecrets) }
+      : {
+        command: server.command,
+        args: server.args?.length ? server.args : undefined,
+        env: maskValues(server.env, options.maskSecrets)
+      }
+    if (!server.enabled) entry.disabled = true
+    mcpServers[keys[index]] = entry
+  })
+
+  return JSON.stringify({ mcpServers }, null, 2)
+}
+
+export interface RestoredMcpServers {
+  servers: Omit<McpServerConfig, 'id'>[]
+  /** `"server": KEY` for masked values with no saved value behind them. */
+  unresolved: string[]
+}
+
+function restoreRecord(
+  values: Record<string, string> | undefined,
+  saved: Record<string, string> | undefined,
+  serverName: string,
+  unresolved: string[]
+): Record<string, string> | undefined {
+  if (!values) return values
+  const out: Record<string, string> = {}
+  for (const [key, value] of Object.entries(values)) {
+    if (value !== MCP_SECRET_MASK) {
+      out[key] = value
+      continue
+    }
+    const savedValue = saved?.[key]
+      ?? Object.entries(saved ?? {}).find(([savedKey]) => savedKey.toLowerCase() === key.toLowerCase())?.[1]
+    if (savedValue === undefined) unresolved.push(`"${serverName}": ${key}`)
+    else out[key] = savedValue
+  }
+  return out
+}
+
+/**
+ * Swap masks left in an edited JSON view back to the saved values, matching
+ * servers by their JSON key and values by env/header name.
+ */
+export function restoreMaskedSecrets(
+  parsed: Omit<McpServerConfig, 'id'>[],
+  existing: McpServerConfig[]
+): RestoredMcpServers {
+  const keys = mcpServerJsonKeys(existing)
+  const byKey = new Map(existing.map((server, index) => [keys[index].toLowerCase(), server]))
+  const unresolved: string[] = []
+
+  const servers = parsed.map((server) => {
+    const saved = byKey.get(server.name.toLowerCase())
+    return {
+      ...server,
+      ...(server.env ? { env: restoreRecord(server.env, saved?.env, server.name, unresolved) } : {}),
+      ...(server.headers ? { headers: restoreRecord(server.headers, saved?.headers, server.name, unresolved) } : {})
+    }
+  })
+
+  return { servers, unresolved }
 }

@@ -109,7 +109,7 @@ The LLM can invoke these tools during a conversation:
 | `wiki_search` | Search Wikipedia for article summaries |
 | `fetch_url` | Fetch and parse a full webpage by URL (includes extracted `links` for navigation) |
 
-MCP servers configured under Settings → Connections add their tools as `<server>__<tool>`.
+MCP servers configured under Settings → Connections add their tools as `<server>__<tool>` (servers whose names collide get `-2`, `-3`, ...). View JSON shows the whole server list in the usual `mcpServers` format, with env and header values masked until revealed, and can be edited and applied in place.
 
 Overwrites and edits keep the previous version next to the file as `<name>.bak`. Offline Mode (Settings) hides every tool that reaches the network: web/org/wiki search, `fetch_url`, and HTTP MCP connections.
 

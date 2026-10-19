@@ -2,7 +2,7 @@ import type { LLMMessage, AbortHandle, LLMMessageContent, ToolDefinition } from 
 import { createProvider } from '../lib/providers/registry'
 import { getToolDefinitions } from '../lib/tools/registry'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
-import { mcpServerPrefix, parseMcpToolName } from '../../src/lib/mcpConfig'
+import { findMcpServerByPrefix, parseMcpToolName } from '../../src/lib/mcpConfig'
 import { detectFileType } from '../lib/fileType'
 import type {
   LLMRequest,
@@ -31,9 +31,8 @@ function isNetworkTool(name: string, settings: Settings): boolean {
   if (NETWORK_TOOLS.has(name)) return true
   const parsed = parseMcpToolName(name)
   if (!parsed) return false
-  return settings.mcpServers.some(
-    (server) => server.transport !== 'stdio' && mcpServerPrefix(server.name) === parsed.server
-  )
+  const server = findMcpServerByPrefix(settings.mcpServers, parsed.server)
+  return !!server && server.transport !== 'stdio'
 }
 
 /** Running totals at which the assistant is nudged to check whether it still needs tools. */
