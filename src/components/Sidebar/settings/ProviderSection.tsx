@@ -51,8 +51,8 @@ export function ProviderSection({
   const favoriteModels = activeProvider.favoriteModels ?? []
   const isActiveModelFavorite = favoriteModels.includes(activeProviderModel)
   // Follow the (already sorted) model list order rather than starring order.
+  // Favorites are also kept in "All models" so the full list stays complete.
   const listedFavoriteModels = models.filter((m) => favoriteModels.includes(m))
-  const otherModels = models.filter((m) => !favoriteModels.includes(m))
   const toggleActiveModelFavorite = () => {
     const model = activeProviderModel.trim()
     if (!model) return
@@ -201,7 +201,7 @@ export function ProviderSection({
                           ))}
                         </optgroup>
                         <optgroup label="All models">
-                          {otherModels.map((m) => (
+                          {models.map((m) => (
                             <option key={m} value={m}>{m}</option>
                           ))}
                         </optgroup>
