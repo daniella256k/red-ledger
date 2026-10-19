@@ -24,7 +24,7 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 
 ### Prerequisites
 
-- Node.js 18+
+- Node.js 22.12+ (24 recommended; Electron 44 bundles Node 24)
 - npm
 - Optional local runtimes:
   - Ollama (`http://localhost:11434`)
@@ -45,12 +45,6 @@ npm run dev
 npm run build
 ```
 
-### Native Rebuild (if needed)
-
-```bash
-npm run rebuild
-```
-
 ## Commands
 
 | Command | Purpose |
@@ -58,7 +52,6 @@ npm run rebuild
 | `npm run dev` | Start Electron + Vite dev mode |
 | `npm run build` | Production build |
 | `npm run preview` | Preview production build |
-| `npm run rebuild` | Rebuild `better-sqlite3` for Electron |
 | `npm run typecheck` | TypeScript checks |
 | `npm run lint` | ESLint |
 | `npm run test` | Run tests once |

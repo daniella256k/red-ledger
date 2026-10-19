@@ -1,28 +1,28 @@
 import { resolve } from 'path'
-import { defineConfig, externalizeDepsPlugin } from 'electron-vite'
+import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 
+// electron-vite externalizes `dependencies` for main and preload by default
+// (`build.externalizeDeps`).
 export default defineConfig({
   main: {
-    plugins: [externalizeDepsPlugin()],
     build: {
       outDir: 'out/main',
       lib: {
         entry: resolve('electron/main.ts')
       },
-      rollupOptions: {
+      rolldownOptions: {
         external: ['better-sqlite3']
       }
     }
   },
   preload: {
-    plugins: [externalizeDepsPlugin()],
     build: {
       outDir: 'out/preload',
       lib: {
         entry: resolve('electron/preload.ts')
       },
-      rollupOptions: {
+      rolldownOptions: {
         output: {
           format: 'cjs',
           entryFileNames: 'preload.js'
@@ -34,7 +34,7 @@ export default defineConfig({
     root: '.',
     build: {
       outDir: 'out/renderer',
-      rollupOptions: {
+      rolldownOptions: {
         input: resolve('index.html')
       }
     },
