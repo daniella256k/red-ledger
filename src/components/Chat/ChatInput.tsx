@@ -3,6 +3,7 @@ import { Send, Square, Paperclip, X } from 'lucide-react'
 import { useConversationStore, useSettingsStore, useUIStore } from '@/store'
 import { selectComposer } from '@/store/conversationStore'
 import type { useStreaming } from '@/hooks/useStreaming'
+import { ContextMeter } from './ContextMeter'
 import type { ImageAttachment, ImageAttachmentMimeType } from '@/types'
 
 const SUPPORTED_PASTED_IMAGE_MIME_TYPES = new Set<ImageAttachmentMimeType>([
@@ -128,6 +129,9 @@ export function ChatInput({ streaming }: ChatInputProps) {
   const onRemoveAttachment = useConversationStore((s) => s.removeComposerAttachment)
   const onClearAttachments = useConversationStore((s) => s.clearComposer)
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
+  const contextUsage = useConversationStore((s) =>
+    s.conversations.find((c) => c.id === s.activeConversationId)?.lastRequest?.usage ?? null
+  )
   const createConversation = useConversationStore((s) => s.createConversation)
   const isCreatingConversationRef = useRef(false)
   const settings = useSettingsStore((s) => s.settings)
@@ -288,10 +292,19 @@ export function ChatInput({ streaming }: ChatInputProps) {
         )}
       </div>
 
-      {isStreaming && (
+      {(isStreaming || contextUsage) && (
         <div className="flex items-center gap-2 mt-2 text-xs text-soft-charcoal/40">
-          <span className="loading loading-dots loading-xs text-rca-red" />
-          <span>Generating response...</span>
+          {isStreaming && (
+            <>
+              <span className="loading loading-dots loading-xs text-rca-red" />
+              <span>Generating response...</span>
+            </>
+          )}
+          {contextUsage && (
+            <div className="ml-auto">
+              <ContextMeter usage={contextUsage} />
+            </div>
+          )}
         </div>
       )}
     </div>

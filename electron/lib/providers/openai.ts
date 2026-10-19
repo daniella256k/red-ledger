@@ -1,5 +1,12 @@
 import axios, { AxiosResponse } from 'axios'
-import { BaseLLMProvider, type ProviderSendOptions, type AbortHandle } from './base'
+import {
+  BaseLLMProvider,
+  TRUNCATED_REPLY_NOTICE,
+  readContextLength,
+  reportedUsageChunk,
+  type ProviderSendOptions,
+  type AbortHandle
+} from './base'
 import { registerProvider } from './registry'
 import type { StreamChunk, ToolCall } from '../../../src/types'
 
@@ -91,18 +98,18 @@ function computeBackoffMs(attempt: number): number {
   return Math.min(exponential, MAX_RETRY_DELAY_MS)
 }
 
-function removeReasoningControls(body: Record<string, unknown>): Record<string, unknown> | null {
+/** Optional request fields some OpenAI-compatible servers reject with a 400. */
+const OPTIONAL_BODY_FIELDS = ['reasoning_effort', 'reasoning', 'stream_options']
+
+function removeOptionalControls(body: Record<string, unknown>): Record<string, unknown> | null {
   let changed = false
   const nextBody: Record<string, unknown> = { ...body }
 
-  if ('reasoning_effort' in nextBody) {
-    delete nextBody.reasoning_effort
-    changed = true
-  }
-
-  if ('reasoning' in nextBody) {
-    delete nextBody.reasoning
-    changed = true
+  for (const field of OPTIONAL_BODY_FIELDS) {
+    if (field in nextBody) {
+      delete nextBody[field]
+      changed = true
+    }
   }
 
   return changed ? nextBody : null
@@ -183,6 +190,8 @@ export class OpenAIProvider extends BaseLLMProvider {
       model,
       messages,
       stream: true,
+      // Final chunk reports token counts for the context meter.
+      stream_options: { include_usage: true },
       temperature: temperature ?? 0.7
     }
 
@@ -267,7 +276,7 @@ export class OpenAIProvider extends BaseLLMProvider {
       response = await requestStream(body)
     } catch (err) {
       const status = axios.isAxiosError(err) ? err.response?.status : undefined
-      const fallbackBody = status === 400 ? removeReasoningControls(body) : null
+      const fallbackBody = status === 400 ? removeOptionalControls(body) : null
 
       if (fallbackBody) {
         try {
@@ -296,6 +305,13 @@ export class OpenAIProvider extends BaseLLMProvider {
     }> = new Map()
 
     let buffer = ''
+    let truncated = false
+
+    const finish = () => {
+      this._flushToolCalls(pendingToolCalls, onChunk)
+      if (truncated) onChunk({ type: 'notice', content: TRUNCATED_REPLY_NOTICE })
+      onChunk({ type: 'done' })
+    }
 
     for await (const chunk of stream) {
       if (controller.signal.aborted) break
@@ -312,9 +328,7 @@ export class OpenAIProvider extends BaseLLMProvider {
 
         if (!trimmed || trimmed.startsWith(':')) continue // SSE comment or empty
         if (trimmed === 'data: [DONE]') {
-          // Flush any remaining tool calls
-          this._flushToolCalls(pendingToolCalls, onChunk)
-          onChunk({ type: 'done' })
+          finish()
           return
         }
 
@@ -322,6 +336,13 @@ export class OpenAIProvider extends BaseLLMProvider {
 
         try {
           const data = JSON.parse(trimmed.slice(6))
+
+          // With include_usage the last chunk carries usage and an empty choices array.
+          if (data.usage) {
+            const usageChunk = reportedUsageChunk(data.usage.prompt_tokens, data.usage.completion_tokens)
+            if (usageChunk) onChunk(usageChunk)
+          }
+
           const choice = data.choices?.[0]
           if (!choice) continue
 
@@ -363,10 +384,11 @@ export class OpenAIProvider extends BaseLLMProvider {
           }
 
           // Check finish reason
-          if (choice.finish_reason === 'tool_calls' || choice.finish_reason === 'stop') {
-            if (pendingToolCalls.size > 0 && choice.finish_reason === 'tool_calls') {
-              this._flushToolCalls(pendingToolCalls, onChunk)
-            }
+          if (choice.finish_reason === 'tool_calls' && pendingToolCalls.size > 0) {
+            this._flushToolCalls(pendingToolCalls, onChunk)
+          }
+          if (choice.finish_reason === 'length') {
+            truncated = true
           }
 
         } catch {
@@ -381,8 +403,7 @@ export class OpenAIProvider extends BaseLLMProvider {
       return
     }
 
-    this._flushToolCalls(pendingToolCalls, onChunk)
-    onChunk({ type: 'done' })
+    finish()
   }
 
   /**
@@ -428,6 +449,23 @@ export class OpenAIProvider extends BaseLLMProvider {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       throw new Error(`Failed to list models: ${msg}`)
+    }
+  }
+
+  /** Read from the /models listing; OpenAI itself doesn't report it, OpenRouter and vLLM do. */
+  override async getContextLength(model: string): Promise<number | null> {
+    try {
+      const response = await axios.get(`${this.baseUrl}/models`, {
+        headers: this.getAuthHeaders(),
+        timeout: 15_000
+      })
+      const entries: unknown[] = Array.isArray(response.data?.data) ? response.data.data : []
+      const entry = entries.find((item) =>
+        Boolean(item) && typeof item === 'object' && (item as { id?: unknown }).id === model
+      )
+      return readContextLength(entry)
+    } catch {
+      return null
     }
   }
 }

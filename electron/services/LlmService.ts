@@ -13,7 +13,8 @@ import type {
   Attachment,
   ImageAttachment,
   TitleGenerationRequest,
-  ToolCallRecord
+  ToolCallRecord,
+  ContextUsage
 } from '../../src/types'
 
 // Side-effect imports: each provider self-registers when loaded
@@ -114,6 +115,47 @@ export function buildToolCallLogTag(records: ToolCallRecord[] | undefined): stri
     + `${lines.join('\n')}\n]`
 }
 
+/** Rough tokens-per-character ratio for text when the provider reports no usage. */
+const ESTIMATED_CHARS_PER_TOKEN = 4
+/** Rough flat cost per image part; real costs vary by provider and image size. */
+const ESTIMATED_TOKENS_PER_IMAGE = 1000
+const CONTEXT_LENGTH_CACHE_MS = 10 * 60_000
+/**
+ * Longest a turn's end waits on the context window lookup (timed from the turn's
+ * start). A slower lookup still fills the cache for the next turn.
+ */
+const CONTEXT_LENGTH_TIMEOUT_MS = 3_000
+
+/**
+ * Token estimate for a request the provider gave no usage for: the text of
+ * every message, tool call and tool definition, at ~4 characters per token.
+ */
+export function estimateUsage(messages: LLMMessage[], tools: ToolDefinition[], replyText: string): ContextUsage {
+  let chars = JSON.stringify(tools).length
+  let images = 0
+
+  for (const message of messages) {
+    if (typeof message.content === 'string') {
+      chars += message.content.length
+    } else if (message.content) {
+      for (const part of message.content) {
+        if (part.type === 'text') chars += part.text.length
+        else images += 1
+      }
+    }
+    for (const toolCall of message.tool_calls ?? []) {
+      chars += toolCall.function.name.length + toolCall.function.arguments.length
+    }
+  }
+
+  return {
+    promptTokens: Math.ceil(chars / ESTIMATED_CHARS_PER_TOKEN) + images * ESTIMATED_TOKENS_PER_IMAGE,
+    completionTokens: Math.ceil(replyText.length / ESTIMATED_CHARS_PER_TOKEN),
+    contextLength: null,
+    estimated: true
+  }
+}
+
 const TOOL_LIMIT_REACHED_ERROR =
   `Tool call limit reached (${MAX_TOOL_CALLS} this turn). This tool was not run. `
   + 'Answer the user now using the information you already have, and mention anything you could not finish.'
@@ -135,7 +177,14 @@ export interface StreamSink {
 export class LlmService {
   private getSettings: () => Settings
   private getSystemPrompt: (conversationId: string) => string
-  private activeStreams = new Map<string, AbortHandle>()
+  /**
+   * In-flight turns by channel. `handle` is the provider request of the
+   * current round (null while tools run); `cancelled` stops the tool loop
+   * between rounds, where there is no request to abort.
+   */
+  private activeStreams = new Map<string, { handle: AbortHandle | null; cancelled: boolean }>()
+  /** Context windows by provider + base URL + model, so each turn doesn't refetch model listings. */
+  private contextLengthCache = new Map<string, { value: number | null; expiresAt: number }>()
 
   constructor(deps: {
     getSettings: () => Settings
@@ -373,151 +422,203 @@ export class LlmService {
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
     let totalToolCalls = 0
     let roundsAfterToolLimit = 0
+    // Looked up alongside the reply so the context meter rarely waits for it.
+    const contextLengthLookup = this.lookupContextLength(request.provider, request.model)
 
-    while (true) {
-      const collectedToolCalls: ToolCall[] = []
-      let textAccumulated = ''
+    // Tracked so Stop also ends the turn between rounds, while tools run.
+    const stream: { handle: AbortHandle | null; cancelled: boolean } = { handle: null, cancelled: false }
+    this.activeStreams.set(channel, stream)
 
-      const streamDone = await new Promise<'done' | 'tool_calls' | 'error'>((resolve) => {
-        const handle = provider.sendStreaming({
-          messages,
-          model: request.model,
-          tools,
-          temperature: request.temperature,
-          maxTokens: request.maxTokens ?? (settings.maxTokensEnabled ? settings.maxTokens : undefined),
-          reasoningEnabled: settings.reasoningEnabled,
-          onChunk: (chunk: StreamChunk) => {
-            switch (chunk.type) {
-              case 'thinking':
-                sink.send(chunk)
-                break
+    try {
+      while (true) {
+        const collectedToolCalls: ToolCall[] = []
+        let textAccumulated = ''
+        let reportedUsage: ContextUsage | null = null
 
-              case 'text':
-                textAccumulated += chunk.content || ''
-                sink.send(chunk)
-                break
+        const streamDone = await new Promise<'done' | 'tool_calls' | 'error'>((resolve) => {
+          stream.handle = provider.sendStreaming({
+            messages,
+            model: request.model,
+            tools,
+            temperature: request.temperature,
+            maxTokens: request.maxTokens ?? (settings.maxTokensEnabled ? settings.maxTokens : undefined),
+            reasoningEnabled: settings.reasoningEnabled,
+            onChunk: (chunk: StreamChunk) => {
+              switch (chunk.type) {
+                case 'thinking':
+                case 'notice':
+                  sink.send(chunk)
+                  break
 
-              case 'tool_call':
-                if (chunk.toolCall) {
-                  collectedToolCalls.push(chunk.toolCall)
-                }
-                sink.send(chunk)
-                break
+                case 'usage':
+                  // Held back: the renderer gets one figure for the whole turn.
+                  if (chunk.usage) reportedUsage = chunk.usage
+                  break
 
-              case 'error':
-                sink.send(chunk)
-                resolve('error')
-                break
+                case 'text':
+                  textAccumulated += chunk.content || ''
+                  sink.send(chunk)
+                  break
 
-              case 'done':
-                if (collectedToolCalls.length > 0) {
-                  resolve('tool_calls')
-                } else {
-                  resolve('done')
-                }
-                break
+                case 'tool_call':
+                  if (chunk.toolCall) {
+                    collectedToolCalls.push(chunk.toolCall)
+                  }
+                  sink.send(chunk)
+                  break
+
+                case 'error':
+                  sink.send(chunk)
+                  resolve('error')
+                  break
+
+                case 'done':
+                  if (collectedToolCalls.length > 0) {
+                    resolve('tool_calls')
+                  } else {
+                    resolve('done')
+                  }
+                  break
+              }
             }
-          }
+          })
         })
 
-        // Track the abort handle
-        this.activeStreams.set(channel, handle)
-      })
+        stream.handle = null
 
-      // Remove from active streams after this round
-      this.activeStreams.delete(channel)
+        if (streamDone === 'done' && !stream.cancelled) {
+          // The final round's request holds the whole turn, so it is the turn's peak context use.
+          const usage = reportedUsage ?? estimateUsage(messages, tools, textAccumulated)
+          sink.send({ type: 'usage', usage: { ...usage, contextLength: await contextLengthLookup } })
+        }
 
-      if (streamDone === 'error' || streamDone === 'done') {
-        sink.send({ type: 'done' })
-        return
-      }
+        if (streamDone === 'error' || streamDone === 'done' || stream.cancelled) {
+          sink.send({ type: 'done' })
+          return
+        }
 
-      // streamDone === 'tool_calls' — execute each tool (within budget) and loop.
-      // Once the hard limit is hit, further calls get an error result asking the
-      // assistant to wrap up; if it keeps calling tools anyway, stop the turn.
-      const previousToolCalls = totalToolCalls
-      const remainingBudget = Math.max(0, MAX_TOOL_CALLS - totalToolCalls)
-      if (remainingBudget === 0) {
-        roundsAfterToolLimit += 1
-        if (roundsAfterToolLimit > MAX_ROUNDS_AFTER_TOOL_LIMIT) {
+        // streamDone === 'tool_calls' — execute each tool (within budget) and loop.
+        // Once the hard limit is hit, further calls get an error result asking the
+        // assistant to wrap up; if it keeps calling tools anyway, stop the turn.
+        const previousToolCalls = totalToolCalls
+        const remainingBudget = Math.max(0, MAX_TOOL_CALLS - totalToolCalls)
+        if (remainingBudget === 0) {
+          roundsAfterToolLimit += 1
+          if (roundsAfterToolLimit > MAX_ROUNDS_AFTER_TOOL_LIMIT) {
+            sink.send({
+              type: 'error',
+              error: `Tool call limit (${MAX_TOOL_CALLS}) reached and the assistant kept calling tools. Stopped this turn.`
+            })
+            sink.send({ type: 'done' })
+            return
+          }
+        }
+        totalToolCalls += Math.min(collectedToolCalls.length, remainingBudget)
+        if (previousToolCalls < MAX_TOOL_CALLS && totalToolCalls >= MAX_TOOL_CALLS) {
           sink.send({
-            type: 'error',
-            error: `Tool call limit (${MAX_TOOL_CALLS}) reached and the assistant kept calling tools. Stopped this turn.`
+            type: 'notice',
+            content: `Tool call limit (${MAX_TOOL_CALLS}) reached. The assistant was asked to wrap up with what it has.`
           })
+        }
+
+        // Append the assistant's response (with tool_calls) to the conversation
+        const assistantMessage: LLMMessage = {
+          role: 'assistant',
+          content: textAccumulated || null,
+          tool_calls: collectedToolCalls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: {
+              name: tc.name,
+              arguments: JSON.stringify(tc.arguments)
+            }
+          }))
+        }
+        messages.push(assistantMessage)
+
+        // Execute each tool call and collect results
+        const budgetNotice = buildToolCallBudgetNotice(previousToolCalls, totalToolCalls)
+        for (const [index, tc] of collectedToolCalls.entries()) {
+          // Stopped while an earlier tool ran: run nothing else.
+          if (stream.cancelled) {
+            sink.send({ type: 'done' })
+            return
+          }
+
+          const withinBudget = index < remainingBudget
+          const executed = !withinBudget
+            ? { ...tc, result: { error: TOOL_LIMIT_REACHED_ERROR, code: 'LIMIT_REACHED' } }
+            : availableToolNames.has(tc.name)
+              ? await toolExecutor(tc)
+              : {
+                ...tc,
+                result: {
+                  error: settings.offlineMode && isNetworkTool(tc.name, settings)
+                    ? `Tool "${tc.name}" is unavailable: offline mode is on.`
+                    : !settings.searchToolsEnabled && SEARCH_TOOLS_REQUIRING_API_KEYS.has(tc.name)
+                    ? `Tool "${tc.name}" is disabled in Settings.`
+                    : `Tool "${tc.name}" is not available for this request.`,
+                  code: 'PERMISSION_DENIED'
+                }
+              }
+
+          // Send tool result chunk to renderer
+          sink.send({ type: 'tool_result', toolCall: executed })
+
+          // Append tool result to conversation for the next round. The budget
+          // notice rides along on the last result so every provider sees it.
+          const isLastInRound = index === collectedToolCalls.length - 1
+          const resultContent = JSON.stringify(executed.result)
+          const toolMessage: LLMMessage = {
+            role: 'tool',
+            content: isLastInRound && budgetNotice
+              ? `${resultContent}\n\n${budgetNotice}`
+              : resultContent,
+            tool_call_id: tc.id
+          }
+          messages.push(toolMessage)
+        }
+
+        // Stopped while the last tool ran: don't start another round.
+        if (stream.cancelled) {
           sink.send({ type: 'done' })
           return
         }
       }
-      totalToolCalls += Math.min(collectedToolCalls.length, remainingBudget)
-      if (previousToolCalls < MAX_TOOL_CALLS && totalToolCalls >= MAX_TOOL_CALLS) {
-        sink.send({
-          type: 'notice',
-          content: `Tool call limit (${MAX_TOOL_CALLS}) reached. The assistant was asked to wrap up with what it has.`
-        })
+    } finally {
+      if (this.activeStreams.get(channel) === stream) {
+        this.activeStreams.delete(channel)
       }
-
-      // Append the assistant's response (with tool_calls) to the conversation
-      const assistantMessage: LLMMessage = {
-        role: 'assistant',
-        content: textAccumulated || null,
-        tool_calls: collectedToolCalls.map((tc) => ({
-          id: tc.id,
-          type: 'function' as const,
-          function: {
-            name: tc.name,
-            arguments: JSON.stringify(tc.arguments)
-          }
-        }))
-      }
-      messages.push(assistantMessage)
-
-      // Execute each tool call and collect results
-      const budgetNotice = buildToolCallBudgetNotice(previousToolCalls, totalToolCalls)
-      for (const [index, tc] of collectedToolCalls.entries()) {
-        const withinBudget = index < remainingBudget
-        const executed = !withinBudget
-          ? { ...tc, result: { error: TOOL_LIMIT_REACHED_ERROR, code: 'LIMIT_REACHED' } }
-          : availableToolNames.has(tc.name)
-            ? await toolExecutor(tc)
-            : {
-              ...tc,
-              result: {
-                error: settings.offlineMode && isNetworkTool(tc.name, settings)
-                  ? `Tool "${tc.name}" is unavailable: offline mode is on.`
-                  : !settings.searchToolsEnabled && SEARCH_TOOLS_REQUIRING_API_KEYS.has(tc.name)
-                  ? `Tool "${tc.name}" is disabled in Settings.`
-                  : `Tool "${tc.name}" is not available for this request.`,
-                code: 'PERMISSION_DENIED'
-              }
-            }
-
-        // Send tool result chunk to renderer
-        sink.send({ type: 'tool_result', toolCall: executed })
-
-        // Append tool result to conversation for the next round. The budget
-        // notice rides along on the last result so every provider sees it.
-        const isLastInRound = index === collectedToolCalls.length - 1
-        const resultContent = JSON.stringify(executed.result)
-        const toolMessage: LLMMessage = {
-          role: 'tool',
-          content: isLastInRound && budgetNotice
-            ? `${resultContent}\n\n${budgetNotice}`
-            : resultContent,
-          tool_call_id: tc.id
-        }
-        messages.push(toolMessage)
-      }
-
-      textAccumulated = ''
     }
   }
 
   cancelStream(channel: string): void {
-    const handle = this.activeStreams.get(channel)
-    if (handle) {
-      handle.abort()
-      this.activeStreams.delete(channel)
-    }
+    const stream = this.activeStreams.get(channel)
+    if (!stream) return
+    stream.cancelled = true
+    stream.handle?.abort()
+  }
+
+  /** The model's context window for the meter; null when unknown, slow or failing. */
+  private lookupContextLength(providerName: ProviderName, model: string): Promise<number | null> {
+    const config = this.getSettings().providers?.[providerName]
+    const key = `${providerName}|${config?.baseUrl ?? ''}|${config?.compatibility ?? ''}|${model}`
+    const cached = this.contextLengthCache.get(key)
+    if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value)
+
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const timeout = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), CONTEXT_LENGTH_TIMEOUT_MS)
+    })
+    const lookup = Promise.resolve()
+      .then(() => this.createProvider(providerName).getContextLength(model))
+      .then((value) => {
+        this.contextLengthCache.set(key, { value, expiresAt: Date.now() + CONTEXT_LENGTH_CACHE_MS })
+        return value
+      })
+      .catch(() => null)
+
+    return Promise.race([lookup, timeout]).finally(() => clearTimeout(timer))
   }
 
   async listModels(providerName: ProviderName): Promise<string[]> {

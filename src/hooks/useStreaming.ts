@@ -11,10 +11,17 @@ import type {
   Message,
   Attachment,
   ProviderName,
-  ConversationRequestInfo
+  ConversationRequestInfo,
+  ContextUsage
 } from '@/types'
 
 const STREAM_THROTTLE_MS = 50
+/**
+ * Database writes of the in-progress reply are spaced further apart than UI
+ * updates: each write rewrites the whole message, and the final content is
+ * saved when the stream ends anyway. This only bounds what a crash loses.
+ */
+const PERSIST_THROTTLE_MS = 1000
 /** Tools that change workspace files; their results trigger a file tree reload. */
 const WORKSPACE_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'append_file', 'write_pdf', 'move_file'])
 const THINKING_ACTIVE_WINDOW_MS = 1500
@@ -48,36 +55,58 @@ function findLastUserMessage(messages: Message[]): Message | undefined {
  * info popover can show what was actually sent. Best-effort: failures are
  * ignored because this is display-only metadata.
  */
+function findConversation(conversationId: string) {
+  return useConversationStore.getState().conversations
+    .find((conversation) => conversation.id === conversationId)
+}
+
+function storeLastRequest(conversationId: string, lastRequest: ConversationRequestInfo): void {
+  useConversationStore.setState((state) => ({
+    conversations: state.conversations.map((conversation) =>
+      conversation.id === conversationId
+        ? { ...conversation, lastRequest }
+        : conversation
+    )
+  }))
+}
+
 function recordRequestInfo(
   conversationId: string,
-  info: Omit<ConversationRequestInfo, 'contextProfile'>
+  info: Omit<ConversationRequestInfo, 'contextProfile' | 'usage'>
 ): void {
   void (async () => {
     let contextProfile: string | null = null
     try {
       // Name the profile the prompt was actually built from (the chat's own).
       const profileState = await window.redLedger.listContextProfiles()
-      const profileId = useConversationStore.getState().conversations
-        .find((conversation) => conversation.id === conversationId)?.profileId
+      const profileId = findConversation(conversationId)?.profileId
       contextProfile = resolveConversationProfile(profileId, profileState).profile?.name ?? null
     } catch {
       // Profile name is optional.
     }
 
-    const lastRequest: ConversationRequestInfo = { ...info, contextProfile }
+    // Keep showing the previous reply's context use until this one reports its own.
+    const usage = findConversation(conversationId)?.lastRequest?.usage ?? null
+    const lastRequest: ConversationRequestInfo = { ...info, contextProfile, usage }
     try {
       await window.redLedger.updateConversation(conversationId, { lastRequest })
-      useConversationStore.setState((state) => ({
-        conversations: state.conversations.map((conversation) =>
-          conversation.id === conversationId
-            ? { ...conversation, lastRequest }
-            : conversation
-        )
-      }))
+      storeLastRequest(conversationId, lastRequest)
     } catch {
       // Display-only metadata; never interrupt the chat for it.
     }
   })()
+}
+
+/** Save the finished reply's context use for the chat's context meter. Best-effort, like recordRequestInfo. */
+function recordContextUsage(conversationId: string, usage: ContextUsage): void {
+  const previous = findConversation(conversationId)?.lastRequest
+  if (!previous) return
+
+  const lastRequest: ConversationRequestInfo = { ...previous, usage }
+  storeLastRequest(conversationId, lastRequest)
+  void window.redLedger.updateConversation(conversationId, { lastRequest }).catch(() => {
+    // Display-only metadata; never interrupt the chat for it.
+  })
 }
 
 /**
@@ -102,6 +131,7 @@ export function useStreaming() {
   const toolCallsRef = useRef<ToolCall[]>([])
   const lastStreamChunkTypeRef = useRef<StreamChunk['type'] | null>(null)
   const throttleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const thinkingActivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const titleGenerationInFlightRef = useRef(new Set<string>())
   const persistenceErrorNotifiedRef = useRef(false)
@@ -143,11 +173,23 @@ export function useStreaming() {
       : undefined
   }), [])
 
-  const persistStreamingMessage = useCallback((messageId: string, data: Partial<Message>) => {
-    void window.redLedger.updateMessage(messageId, data).catch((err) => {
-      reportPersistenceError(err)
-    })
-  }, [reportPersistenceError])
+  const clearPersistTimer = useCallback(() => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current)
+      persistTimerRef.current = null
+    }
+  }, [])
+
+  // Must be cleared before the stream's refs are reset, or it would save an empty message.
+  const schedulePersist = useCallback((messageId: string) => {
+    if (persistTimerRef.current) return
+    persistTimerRef.current = setTimeout(() => {
+      persistTimerRef.current = null
+      void window.redLedger.updateMessage(messageId, buildStreamingMessageUpdate()).catch((err) => {
+        reportPersistenceError(err)
+      })
+    }, PERSIST_THROTTLE_MS)
+  }, [buildStreamingMessageUpdate, reportPersistenceError])
 
   const finalizeTempMessage = useCallback(async (tempId: string, conversationId: string) => {
     const finalContent = contentRef.current
@@ -241,6 +283,7 @@ export function useStreaming() {
     const tempId = tempMessageIdRef.current
     const tempConversationId = tempConversationIdRef.current
 
+    clearPersistTimer()
     if (cleanupRef.current) {
       cleanupRef.current()
       cleanupRef.current = null
@@ -269,7 +312,7 @@ export function useStreaming() {
     lastStreamChunkTypeRef.current = null
     setStreamingMessageId(null)
     persistenceErrorNotifiedRef.current = false
-  }, [clearThinkingActivity, finalizeTempMessage])
+  }, [clearPersistTimer, clearThinkingActivity, finalizeTempMessage])
 
   const sendMessage = useCallback(async (content: string, attachments?: Attachment[]) => {
     const store = useConversationStore.getState()
@@ -379,9 +422,8 @@ export function useStreaming() {
 
       // Helper: flush accumulated content to the temp message in the store
       const flushToStore = () => {
-        const update = buildStreamingMessageUpdate()
-        useConversationStore.getState().updateMessage(tempId, update)
-        persistStreamingMessage(tempId, update)
+        useConversationStore.getState().updateMessage(tempId, buildStreamingMessageUpdate())
+        schedulePersist(tempId)
       }
 
       // Helper: throttled store update for text chunks
@@ -462,6 +504,13 @@ export function useStreaming() {
             break
           }
 
+          case 'usage': {
+            if (chunk.usage) {
+              recordContextUsage(conversationId, chunk.usage)
+            }
+            break
+          }
+
           case 'error': {
             clearThinkingActivity()
             notify({
@@ -480,6 +529,7 @@ export function useStreaming() {
               throttleRef.current = null
             }
 
+            clearPersistTimer()
             cleanup()
             void finalizeTempMessage(tempId, conversationId)
 
@@ -498,6 +548,7 @@ export function useStreaming() {
       maybeGenerateConversationTitle(conversationId, lockedProvider, lockedModel)
 
     } catch (err) {
+      clearPersistTimer()
       if (tempMessageIdRef.current && tempConversationIdRef.current) {
         await finalizeTempMessage(tempMessageIdRef.current, tempConversationIdRef.current)
       } else if (tempMessageIdRef.current) {
@@ -523,11 +574,12 @@ export function useStreaming() {
     }
   }, [
     buildStreamingMessageUpdate,
+    clearPersistTimer,
     clearThinkingActivity,
     finalizeTempMessage,
     markThinkingActivity,
     maybeGenerateConversationTitle,
-    persistStreamingMessage
+    schedulePersist
   ])
 
   useEffect(() => {
@@ -541,6 +593,10 @@ export function useStreaming() {
       if (throttleRef.current) {
         clearTimeout(throttleRef.current)
         throttleRef.current = null
+      }
+      if (persistTimerRef.current) {
+        clearTimeout(persistTimerRef.current)
+        persistTimerRef.current = null
       }
       if (thinkingActivityTimerRef.current) {
         clearTimeout(thinkingActivityTimerRef.current)

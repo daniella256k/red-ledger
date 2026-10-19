@@ -1,6 +1,5 @@
 import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import { getWorkspaceService } from '../../ipc/fs'
 import type { DialogAdapter } from '../../services/WorkspaceService'
 import { requireObjectArgs, requireStringArg } from './args'
 
@@ -35,7 +34,7 @@ registerTool({
       }
     }
   },
-  execute: async (args, win) => {
+  execute: async (args, { win, workspace }) => {
     const input = requireObjectArgs(args, 'edit_file')
     const path = requireStringArg(input, 'path', 'edit_file')
     const oldString = requireStringArg(input, 'old_string', 'edit_file', {
@@ -54,7 +53,6 @@ registerTool({
       }
     }
 
-    const workspace = getWorkspaceService()
     const adapter = dialogForWindow(win)
 
     // Read without a dialog adapter: edit_file is one logical operation, so we

@@ -1,6 +1,5 @@
 import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import { getWorkspaceService } from '../../ipc/fs'
 import type { DialogAdapter } from '../../services/WorkspaceService'
 import { numberArg, requireObjectArgs, requireStringArg } from './args'
 import { READ_FILE_MAX_LINES, sliceFileContent } from './fileSlice'
@@ -38,7 +37,7 @@ registerTool({
       }
     }
   },
-  execute: async (args, win) => {
+  execute: async (args, { win, workspace }) => {
     const input = requireObjectArgs(args, 'read_file')
     const path = requireStringArg(input, 'path', 'read_file')
     const offset = input.offset === undefined || input.offset === null
@@ -47,7 +46,6 @@ registerTool({
     const limit = input.limit === undefined || input.limit === null
       ? undefined
       : numberArg(input, 'limit', 'read_file', { integer: true, min: 1, max: READ_FILE_MAX_LINES })
-    const workspace = getWorkspaceService()
     const content = await workspace.readFile(dialogForWindow(win), path)
     return { path, ...sliceFileContent(content, { offset, limit }) }
   }

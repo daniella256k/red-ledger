@@ -9,14 +9,16 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 - Multi-provider chat with streaming: OpenAI, OpenRouter, Ollama, LM Studio, and any custom OpenAI-compatible server (llama.cpp, vLLM, Jan, a self-hosted gateway).
 - Tool calling for local file ops + web/wiki/url tools (up to 75 tool calls per turn, with check-in nudges to the model at 25, 40, and 50).
 - Workspace jail for file safety, with optional strict confirmation mode.
-- Each chat remembers its workspace folder and switches back to it when reopened.
-- 3 persistent context files (`system`, `user`, `org`) injected into every run.
+- Each chat remembers its workspace folder and switches back to it when reopened. A reply in progress keeps working in its own chat's folder even if you switch to another chat.
+- Context profiles: sets of 3 context files (`system`, `user`, `org`) injected into every run. Each chat remembers its own profile, picked in the Context panel.
+- MCP connections: add stdio or Streamable HTTP MCP servers in Settings; their tools join the built-in ones.
 - Text file attachments of any kind: plain text, code, config, and markup (`.py`, `.yaml`, `.json`, `.xml`, `.css`, `Dockerfile`, ...) are detected by content, no renaming needed. PDF and Word (`.doc`, `.docx`) text extraction included.
 - Spreadsheet attachments: Excel (`.xlsx`, `.xlsm`, `.xlsb`, `.xls`), OpenDocument (`.ods`), Apple Numbers and older formats are converted to CSV per sheet, with cell ranges, hyperlinks (as Markdown links), formulas and named ranges. `.csv` and `.tsv` attach as-is.
 - Image file attachments from `.png`, `.jpeg/.jpg`, `.webp`, and `.gif` for vision capable models.
 - Local SQLite conversation history with retry/copy message actions.
 - Favorite models: star models in Settings for one-click switching.
 - Per-chat info popover (model, request settings, counts) from the chat header.
+- Context meter under the message box: how much of the model's context window the chat's last reply used. See [Context Meter](#context-meter).
 
 ## Quick Start
 
@@ -72,6 +74,14 @@ npm run rebuild
 
 LM Studio compatibility mode is set in the app Settings panel.
 - Custom (OpenAI-compatible) takes any base URL up to the `/v1` path (default `http://localhost:8080/v1`, llama.cpp's server). The API key is optional and only sent when set.
+- A reply cut off by the Max Tokens limit shows a warning instead of passing as a complete answer.
+
+## Context Meter
+
+After each reply, the bottom right of the chat shows the tokens the reply's final request used (history, tool results and tool definitions, plus the generated text) against the model's context window, e.g. `12.4k / 128k tokens`. It turns red past 80%. Hover it for the breakdown. It is saved with the chat, so it changes with the chat you select.
+
+- Token counts come from the provider: OpenAI-compatible servers report them via `stream_options.include_usage`, and Ollama via its eval counts. When a server reports nothing, the count is estimated from text length (shown with `~`).
+- The context window comes from the provider when it publishes one: OpenRouter and vLLM model listings, the window LM Studio loaded the model with, or Ollama's loaded `num_ctx` (`/api/ps`). OpenAI's API doesn't publish it, so only the token count is shown there.
 
 ## Data + Storage
 
@@ -103,7 +113,7 @@ MCP servers configured under Settings → Connections add their tools as `<serve
 
 Overwrites and edits keep the previous version next to the file as `<name>.bak`. Offline Mode (Settings) hides every tool that reaches the network: web/org/wiki search, `fetch_url`, and HTTP MCP connections.
 
-Tools self-register via the tool registry. Strict mode shows a native confirmation dialog before each operation. Tool errors are caught and returned in the result so the LLM can self-correct without crashing the stream.
+Tools self-register via the tool registry. Strict mode shows a native confirmation dialog before each operation. Tool errors are caught and returned in the result so the LLM can self-correct without crashing the stream. Pressing Stop ends the whole turn: no further tool calls or model requests run, even if it is pressed while a tool is working.
 
 ## Project Map
 
@@ -112,31 +122,38 @@ red-ledger/
 |-- electron/
 |   |-- main.ts                      # App lifecycle + IPC wiring
 |   |-- preload.ts                   # Exposes window.redLedger
-|   |-- ipc/                         # Typed IPC contract + handlers
+|   |-- ipc/                         # Typed IPC contract (contract.ts) + thin handlers
 |   |-- services/                    # Core domain services
-|   |   |-- AttachmentService.ts
-|   |   |-- ConversationService.ts
-|   |   |-- ContextService.ts
+|   |   |-- AttachmentService.ts     # Attachment parsing (text, images, documents)
+|   |   |-- ChatTransferService.ts   # Chat import/export (Markdown, XML)
+|   |   |-- ContextService.ts        # Context profiles + system prompt assembly
+|   |   |-- ConversationService.ts   # SQLite chats/messages + full-text search
 |   |   |-- DocumentTextService.ts   # PDF/Word/spreadsheet text extraction dispatch
-|   |   |-- LlmService.ts
+|   |   |-- LlmService.ts            # Streaming, tool loop, context usage
+|   |   |-- McpService.ts            # MCP connections; registers <server>__<tool> tools
 |   |   |-- PdfAttachmentService.ts
-|   |   |-- SearchService.ts
+|   |   |-- PdfRenderService.ts      # Markdown -> PDF for write_pdf
+|   |   |-- SearchService.ts         # Web/wiki search + fetch_url
 |   |   |-- SettingsService.ts
 |   |   |-- SpreadsheetAttachmentService.ts
 |   |   |-- WordAttachmentService.ts
-|   |   `-- WorkspaceService.ts
+|   |   |-- WorkspaceService.ts      # Jailed file operations
+|   |   |-- pathJail.ts
+|   |   `-- gitignore.ts
 |   `-- lib/
-|       |-- providers/               # openai/openrouter/ollama/lmstudio
+|       |-- providers/               # openai/openrouter/ollama/lmstudio/custom
 |       `-- tools/                   # tool registry, executor, arg validation
 |-- src/
 |   |-- components/
 |   |   |-- Chat/
 |   |   |-- Context/
 |   |   |-- Editor/
-|   |   `-- Sidebar/
-|   |-- hooks/
+|   |   |-- FileTree/
+|   |   |-- Sidebar/
+|   |   `-- ui/
+|   |-- hooks/                       # useStreaming (stream lifecycle)
 |   |-- lib/
-|   |-- store/
+|   |-- store/                       # Zustand stores
 |   |-- styles/
 |   `-- types/
 |-- contexts/                        # bundled prompt seeds

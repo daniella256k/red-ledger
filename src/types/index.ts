@@ -91,6 +91,20 @@ export interface ConversationRequestInfo {
   reasoningEnabled: boolean
   searchToolsEnabled: boolean
   contextProfile: string | null
+  /** Context used by the reply to this request; carried over from the previous one until it finishes. */
+  usage?: ContextUsage | null
+}
+
+/** How much of the model's context window the last reply used. */
+export interface ContextUsage {
+  /** Tokens sent in the reply's final request: history, tool results and tool definitions. */
+  promptTokens: number
+  /** Tokens the model generated in that request. */
+  completionTokens: number
+  /** The model's context window, when the provider reports it. */
+  contextLength: number | null
+  /** True when the provider reported no usage and the counts are estimated from text length. */
+  estimated: boolean
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -156,10 +170,14 @@ export interface ToolCallRecord {
 // ─── Stream Chunks ───────────────────────────────────────────────────────────
 
 export interface StreamChunk {
-  /** 'notice' is a non-fatal heads-up for the user (e.g. tool call limit reached). */
-  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'notice' | 'error' | 'done'
+  /**
+   * 'notice' is a non-fatal heads-up for the user (e.g. tool call limit reached).
+   * 'usage' carries token counts: per request from providers, once per turn to the renderer.
+   */
+  type: 'text' | 'thinking' | 'tool_call' | 'tool_result' | 'notice' | 'usage' | 'error' | 'done'
   content?: string
   toolCall?: ToolCall
+  usage?: ContextUsage
   error?: string
 }
 

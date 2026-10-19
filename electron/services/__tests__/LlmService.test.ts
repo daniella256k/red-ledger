@@ -1,10 +1,11 @@
 import { describe, expect, it } from 'vitest'
-import { LlmService, MAX_TOOL_CALLS, buildToolCallBudgetNotice, buildToolCallLogTag } from '../LlmService'
+import { LlmService, MAX_TOOL_CALLS, buildToolCallBudgetNotice, buildToolCallLogTag, estimateUsage } from '../LlmService'
 import { toToolCallRecords } from '../../../src/lib/toolCallRecords'
 import { sanitizeSettings } from '../SettingsService'
-import { BaseLLMProvider } from '../../lib/providers/base'
+import { BaseLLMProvider, readContextLength, reportedUsageChunk } from '../../lib/providers/base'
 import type { LLMMessage, ProviderSendOptions } from '../../lib/providers/base'
 import { registerProvider } from '../../lib/providers/registry'
+import { registerTool } from '../../lib/tools/registry'
 import { detectFileType } from '../../lib/fileType'
 import type { Attachment, StreamChunk } from '../../../src/types'
 
@@ -326,5 +327,133 @@ describe('LlmService system prompt', () => {
       { role: 'system', content: 'Committee B prompt' },
       { role: 'system', content: 'Campaign A prompt' }
     ])
+  })
+})
+
+describe('LlmService cancellation', () => {
+  it('stops between rounds when cancelled while a tool runs', async () => {
+    let rounds = 0
+    class ToolCallingProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        rounds += 1
+        queueMicrotask(() => {
+          options.onChunk({ type: 'tool_call', toolCall: { id: `a-${rounds}`, name: 'noop', arguments: {} } })
+          options.onChunk({ type: 'tool_call', toolCall: { id: `b-${rounds}`, name: 'noop', arguments: {} } })
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+    }
+    registerProvider({ name: 'openai', displayName: 'Tools', defaultBaseUrl: '', factory: () => new ToolCallingProvider('', '') })
+    // Only registered tools reach the executor.
+    registerTool({
+      definition: { type: 'function', function: { name: 'noop', description: 'Does nothing', parameters: { type: 'object' } } },
+      execute: async () => ({ ok: true })
+    })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    const executed: string[] = []
+    const chunks: StreamChunk[] = []
+    await service.orchestrateStream(
+      { conversationId: 'c1', model: 'test', provider: 'openai', messages: [{ role: 'user', content: 'go', timestamp: 't' }] },
+      'stream-cancel',
+      { send: (chunk) => chunks.push(chunk) },
+      async (tc) => {
+        executed.push(tc.id)
+        service.cancelStream('stream-cancel')
+        return { ...tc, result: { ok: true } }
+      }
+    )
+
+    expect(rounds).toBe(1)
+    expect(executed).toEqual(['a-1'])
+    expect(chunks.some((c) => c.type === 'usage')).toBe(false)
+    expect(chunks[chunks.length - 1].type).toBe('done')
+  })
+
+  it('ignores a cancel for a channel that is not streaming', () => {
+    expect(() => createService().cancelStream('unknown')).not.toThrow()
+  })
+})
+
+describe('LlmService context usage', () => {
+  function createUsageService(reported: StreamChunk | null, contextLength: number | null) {
+    class UsageProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        queueMicrotask(() => {
+          options.onChunk({ type: 'text', content: 'Hello there' })
+          if (reported) options.onChunk(reported)
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+      override async getContextLength() { return contextLength }
+    }
+    registerProvider({ name: 'openai', displayName: 'Usage', defaultBaseUrl: '', factory: () => new UsageProvider('', '') })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    const chunks: StreamChunk[] = []
+    const run = () => service.orchestrateStream(
+      { conversationId: 'c1', model: 'test', provider: 'openai', messages: [{ role: 'user', content: 'hi', timestamp: 't' }] },
+      'stream-usage',
+      { send: (chunk) => chunks.push(chunk) },
+      async (tc) => tc
+    )
+    return { run, chunks }
+  }
+
+  it('sends the reported usage once, with the context window, before done', async () => {
+    const { run, chunks } = createUsageService(reportedUsageChunk(1200, 30), 8192)
+    await run()
+
+    const usageChunks = chunks.filter((c) => c.type === 'usage')
+    expect(usageChunks).toHaveLength(1)
+    expect(usageChunks[0].usage).toEqual({ promptTokens: 1200, completionTokens: 30, contextLength: 8192, estimated: false })
+    expect(chunks[chunks.length - 2].type).toBe('usage')
+    expect(chunks[chunks.length - 1].type).toBe('done')
+  })
+
+  it('estimates usage when the provider reports none', async () => {
+    const { run, chunks } = createUsageService(null, null)
+    await run()
+
+    const usage = chunks.find((c) => c.type === 'usage')?.usage
+    expect(usage?.estimated).toBe(true)
+    expect(usage?.contextLength).toBeNull()
+    expect(usage?.promptTokens).toBeGreaterThan(0)
+    expect(usage?.completionTokens).toBe(Math.ceil('Hello there'.length / 4))
+  })
+
+  it('counts text, tool calls and images in an estimate', () => {
+    const estimate = estimateUsage(
+      [
+        { role: 'user', content: [{ type: 'text', text: 'x'.repeat(400) }, { type: 'image_url', image_url: { url: 'data:' } }] },
+        { role: 'assistant', content: null, tool_calls: [{ id: '1', type: 'function', function: { name: 'read', arguments: '{}' } }] }
+      ],
+      [],
+      ''
+    )
+    // 400 text + "read{}" + "[]" tool definitions = 408 chars -> 102 tokens, plus one image.
+    expect(estimate.promptTokens).toBe(102 + 1000)
+    expect(estimate.completionTokens).toBe(0)
+  })
+
+  it('ignores missing or zero reported usage', () => {
+    expect(reportedUsageChunk(undefined, 5)).toBeNull()
+    expect(reportedUsageChunk(0, 5)).toBeNull()
+    expect(reportedUsageChunk(10, undefined)?.usage?.completionTokens).toBe(0)
+  })
+})
+
+describe('readContextLength', () => {
+  it('reads the field each server uses and prefers the loaded window', () => {
+    expect(readContextLength({ id: 'm', context_length: 128000 })).toBe(128000)
+    expect(readContextLength({ id: 'm', max_model_len: 32768 })).toBe(32768)
+    expect(readContextLength({ id: 'm', max_context_length: 131072, loaded_context_length: 8192 })).toBe(8192)
+    expect(readContextLength({ key: 'm', max_context_length: 131072, loaded_instances: [{ config: { context_length: 4096 } }] })).toBe(4096)
+    expect(readContextLength({ id: 'gpt-x' })).toBeNull()
+    expect(readContextLength(undefined)).toBeNull()
   })
 })

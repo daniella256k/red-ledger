@@ -187,3 +187,16 @@ describe('WorkspaceService backups and moves', () => {
     expect(readFileSync(join(workspaceRoot, 'b.md'), 'utf-8')).toBe('b')
   })
 })
+
+describe('WorkspaceService.snapshot', () => {
+  it('stays on the folder it was taken in when the active workspace changes', () => {
+    const service = new WorkspaceService(() => BASE_SETTINGS)
+    service.setWorkspacePath('/chats/a')
+
+    const pinned = service.snapshot()
+    service.setWorkspacePath('/chats/b')
+
+    expect(pinned.getWorkspacePath()).toBe('/chats/a')
+    expect(service.getWorkspacePath()).toBe('/chats/b')
+  })
+})

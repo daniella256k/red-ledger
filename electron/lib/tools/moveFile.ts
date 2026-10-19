@@ -1,6 +1,5 @@
 import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import { getWorkspaceService } from '../../ipc/fs'
 import type { DialogAdapter } from '../../services/WorkspaceService'
 import { requireObjectArgs, requireStringArg } from './args'
 
@@ -31,11 +30,10 @@ registerTool({
       }
     }
   },
-  execute: async (args, win) => {
+  execute: async (args, { win, workspace }) => {
     const input = requireObjectArgs(args, 'move_file')
     const source = requireStringArg(input, 'source', 'move_file')
     const destination = requireStringArg(input, 'destination', 'move_file')
-    const workspace = getWorkspaceService()
     const moved = await workspace.moveFile(dialogForWindow(win), source, destination)
     return { success: true, ...moved }
   }

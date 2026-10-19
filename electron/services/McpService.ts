@@ -14,7 +14,7 @@ import { buildMcpToolName, mcpServerPrefix, MAX_TOOL_NAME_LENGTH } from '../../s
 import type { McpServerConfig, McpServerStatus, Settings } from '../../src/types'
 
 /** Window handle the tool registry passes through to executors (BrowserWindow in production). */
-type ToolWindow = Parameters<ToolEntry['execute']>[1]
+type ToolWindow = Parameters<ToolEntry['execute']>[1]['win']
 
 const CLIENT_INFO = { name: 'red-ledger', version: '1.0.0' }
 /** Per-call timeout; progress notifications from the server reset it. */
@@ -517,7 +517,7 @@ export class McpService {
       connection.registered.set(name, tool.name)
       this.deps.registerTool({
         definition: toToolDefinition(name, tool, connection.config.name),
-        execute: (args, win) => this.callTool(connection, tool.name, args, win)
+        execute: (args, { win }) => this.callTool(connection, tool.name, args, win)
       })
     }
   }

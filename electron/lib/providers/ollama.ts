@@ -1,6 +1,9 @@
 import axios, { type AxiosResponse } from 'axios'
 import {
   BaseLLMProvider,
+  TRUNCATED_REPLY_NOTICE,
+  readContextLength,
+  reportedUsageChunk,
   type ProviderSendOptions,
   type AbortHandle,
   type LLMMessageContent
@@ -185,6 +188,11 @@ export class OllamaProvider extends BaseLLMProvider {
 
           // Stream complete
           if (data.done === true) {
+            const usageChunk = reportedUsageChunk(data.prompt_eval_count, data.eval_count)
+            if (usageChunk) onChunk(usageChunk)
+            if (data.done_reason === 'length') {
+              onChunk({ type: 'notice', content: TRUNCATED_REPLY_NOTICE })
+            }
             onChunk({ type: 'done' })
             return
           }
@@ -215,6 +223,25 @@ export class OllamaProvider extends BaseLLMProvider {
         throw new Error('Cannot reach Ollama. Is it running? (ollama serve)')
       }
       throw new Error(`Failed to list Ollama models: ${msg}`)
+    }
+  }
+
+  /**
+   * The window the model is loaded with (num_ctx), from /api/ps. That is what
+   * Ollama actually truncates at, unlike the model's trained maximum.
+   */
+  override async getContextLength(model: string): Promise<number | null> {
+    try {
+      const response = await axios.get(`${this.baseUrl}/api/ps`, { timeout: 10_000 })
+      const loaded: unknown[] = Array.isArray(response.data?.models) ? response.data.models : []
+      const entry = loaded.find((item) => {
+        if (!item || typeof item !== 'object') return false
+        const record = item as { name?: unknown; model?: unknown }
+        return record.name === model || record.model === model
+      })
+      return readContextLength(entry)
+    } catch {
+      return null
     }
   }
 }

@@ -1,6 +1,5 @@
-import type { BrowserWindow } from 'electron'
 import type { ToolCall } from '../../../src/types'
-import { dispatchTool } from './registry'
+import { dispatchTool, type ToolContext } from './registry'
 import { PathJailError } from '../../services/pathJail'
 
 // Side-effect imports: each tool self-registers when loaded
@@ -32,10 +31,10 @@ import './fetchUrl'
  */
 export async function executeTool(
   toolCall: ToolCall,
-  win: BrowserWindow | null
+  context: ToolContext
 ): Promise<ToolCall> {
   try {
-    const result = await dispatchTool(toolCall, win)
+    const result = await dispatchTool(toolCall, context)
     return { ...toolCall, result }
   } catch (err) {
     const isRLError = err instanceof PathJailError ||

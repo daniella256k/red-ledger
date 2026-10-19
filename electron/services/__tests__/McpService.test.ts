@@ -306,6 +306,11 @@ describe('McpService connections', () => {
 
 // ─── Tool calls ─────────────────────────────────────────────────────────────
 
+/** MCP tools only use the window (for Strict Mode); they never touch the workspace. */
+function toolContext(win: unknown = null) {
+  return { win, workspace: null } as never
+}
+
 describe('McpService tool calls', () => {
   it('calls the original tool name and flattens text results', async () => {
     const { service, registry, factory } = setup()
@@ -313,7 +318,7 @@ describe('McpService tool calls', () => {
     service.applyServers([stdioServer()])
     await waitForState(service, 'srv-1', 'connected')
 
-    const result = await registry.get('everything__echo')!.execute({ message: 'hi' }, null)
+    const result = await registry.get('everything__echo')!.execute({ message: 'hi' }, toolContext())
     expect(result).toEqual({ content: 'echo: hi' })
     expect(factory.servers[0].calls).toEqual([{ name: 'echo', args: { message: 'hi' } }])
   })
@@ -324,7 +329,7 @@ describe('McpService tool calls', () => {
     service.applyServers([stdioServer()])
     await waitForState(service, 'srv-1', 'connected')
 
-    const result = await registry.get('everything__fail')!.execute({}, null)
+    const result = await registry.get('everything__fail')!.execute({}, toolContext())
     expect(result).toEqual({ error: 'Something broke', code: 'MCP_ERROR' })
   })
 
@@ -337,7 +342,7 @@ describe('McpService tool calls', () => {
 
     await factory.servers[0].server.close()
     await waitForState(service, 'srv-1', 'error')
-    await expect(entry.execute({ message: 'x' }, null)).rejects.toMatchObject({ code: 'MCP_ERROR' })
+    await expect(entry.execute({ message: 'x' }, toolContext())).rejects.toMatchObject({ code: 'MCP_ERROR' })
   })
 
   describe('Strict Mode', () => {
@@ -353,8 +358,8 @@ describe('McpService tool calls', () => {
       await waitForState(service, 'srv-1', 'connected')
 
       const win = { id: 'window' }
-      await registry.get('everything__echo')!.execute({ message: 'a' }, win as never)
-      await registry.get('everything__echo')!.execute({ message: 'b' }, win as never)
+      await registry.get('everything__echo')!.execute({ message: 'a' }, toolContext(win))
+      await registry.get('everything__echo')!.execute({ message: 'b' }, toolContext(win))
 
       expect(dialog.showMessageBox).toHaveBeenCalledTimes(2)
       const options = (dialog.showMessageBox.mock.calls[0] as unknown[])[0] as Record<string, unknown>
@@ -371,7 +376,7 @@ describe('McpService tool calls', () => {
       service.applyServers([stdioServer()])
       await waitForState(service, 'srv-1', 'connected')
 
-      await expect(registry.get('everything__echo')!.execute({ message: 'a' }, null))
+      await expect(registry.get('everything__echo')!.execute({ message: 'a' }, toolContext()))
         .rejects.toMatchObject({ code: 'USER_DENIED' })
       expect(factory.servers[0].calls).toHaveLength(0)
     })
@@ -382,7 +387,7 @@ describe('McpService tool calls', () => {
       service.applyServers([stdioServer()])
       await waitForState(service, 'srv-1', 'connected')
 
-      await expect(registry.get('everything__echo')!.execute({ message: 'a' }, null))
+      await expect(registry.get('everything__echo')!.execute({ message: 'a' }, toolContext()))
         .rejects.toMatchObject({ code: 'USER_DENIED' })
       expect(factory.servers[0].calls).toHaveLength(0)
     })
@@ -394,7 +399,7 @@ describe('McpService tool calls', () => {
       service.applyServers([stdioServer()])
       await waitForState(service, 'srv-1', 'connected')
 
-      await registry.get('everything__echo')!.execute({ message: 'a' }, null)
+      await registry.get('everything__echo')!.execute({ message: 'a' }, toolContext())
       expect(dialog.showMessageBox).not.toHaveBeenCalled()
     })
   })
@@ -474,7 +479,7 @@ describe('McpService legacy SSE fallback', () => {
     expect(rejected[0].closed).toBe(true)
     expect([...registry.keys()].sort()).toEqual(['remote__echo', 'remote__fail'])
 
-    const result = await registry.get('remote__echo')!.execute({ message: 'over sse' }, null)
+    const result = await registry.get('remote__echo')!.execute({ message: 'over sse' }, toolContext())
     expect(result).toEqual({ content: 'echo: over sse' })
   })
 

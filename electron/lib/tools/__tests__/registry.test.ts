@@ -50,14 +50,14 @@ describe('tool registry', () => {
 
     const result = await dispatchTool(
       { id: 'tc1', name: 'echo', arguments: { msg: 'hello' } },
-      null
+      { win: null, workspace: null as never }
     )
     expect(result).toEqual({ echoed: { msg: 'hello' } })
   })
 
   it('dispatchTool throws for unknown tool', async () => {
     await expect(
-      dispatchTool({ id: 'tc1', name: 'nonexistent', arguments: {} }, null)
+      dispatchTool({ id: 'tc1', name: 'nonexistent', arguments: {} }, { win: null, workspace: null as never })
     ).rejects.toThrow('Unknown tool: nonexistent')
   })
 })

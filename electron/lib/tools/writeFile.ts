@@ -1,6 +1,5 @@
 import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import { getWorkspaceService } from '../../ipc/fs'
 import type { DialogAdapter } from '../../services/WorkspaceService'
 import { requireObjectArgs, requireStringArg } from './args'
 
@@ -33,14 +32,13 @@ registerTool({
       }
     }
   },
-  execute: async (args, win) => {
+  execute: async (args, { win, workspace }) => {
     const input = requireObjectArgs(args, 'write_file')
     const path = requireStringArg(input, 'path', 'write_file')
     const content = requireStringArg(input, 'content', 'write_file', {
       trim: false,
       allowEmpty: true
     })
-    const workspace = getWorkspaceService()
     await workspace.writeFile(dialogForWindow(win), path, content, false)
     return { success: true, path }
   }

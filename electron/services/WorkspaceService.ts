@@ -156,6 +156,16 @@ export class WorkspaceService {
     this.workspacePath = path
   }
 
+  /**
+   * A copy fixed to the current folder. A chat's tool calls run against one so
+   * switching chats (and so the active workspace) mid-reply can't redirect them.
+   */
+  snapshot(): WorkspaceService {
+    const pinned = new WorkspaceService(this.getSettings)
+    pinned.setWorkspacePath(this.workspacePath)
+    return pinned
+  }
+
   private resolveWriteTarget(relativePath: string): { fullPath: string; fileExists: boolean } {
     if (!this.workspacePath) {
       throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')

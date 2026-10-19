@@ -1,4 +1,4 @@
-import type { StreamChunk } from '../../../src/types'
+import type { ContextUsage, StreamChunk } from '../../../src/types'
 
 /**
  * JSON Schema for a tool's arguments. Built-in tools use the simple
@@ -76,6 +76,57 @@ export interface AbortHandle {
   abort: () => void
 }
 
+/** Shown when a reply stops because it hit the output token limit. */
+export const TRUNCATED_REPLY_NOTICE =
+  'The reply was cut off because it reached the max tokens limit. Raise or turn off Max Tokens in Settings for longer replies.'
+
+/** A 'usage' chunk for counts the provider reported; LlmService fills in the context window. */
+export function reportedUsageChunk(promptTokens: unknown, completionTokens: unknown): StreamChunk | null {
+  if (typeof promptTokens !== 'number' || !Number.isFinite(promptTokens) || promptTokens <= 0) return null
+  const usage: ContextUsage = {
+    promptTokens,
+    completionTokens: typeof completionTokens === 'number' && Number.isFinite(completionTokens) ? completionTokens : 0,
+    contextLength: null,
+    estimated: false
+  }
+  return { type: 'usage', usage }
+}
+
+const CONTEXT_LENGTH_FIELDS = [
+  'loaded_context_length',
+  'context_length',
+  'max_model_len',
+  'context_window',
+  'max_context_length'
+]
+
+/**
+ * Context window from a model listing entry. Servers name it differently
+ * (OpenRouter: context_length, vLLM: max_model_len, LM Studio:
+ * loaded_context_length / max_context_length); the loaded window wins over
+ * the model's maximum.
+ */
+export function readContextLength(entry: unknown): number | null {
+  if (!entry || typeof entry !== 'object') return null
+  const record = entry as Record<string, unknown>
+
+  const loaded = Array.isArray(record.loaded_instances) ? record.loaded_instances[0] : undefined
+  const loadedConfig = loaded && typeof loaded === 'object'
+    ? (loaded as Record<string, unknown>).config
+    : undefined
+  const candidates = [
+    loadedConfig && typeof loadedConfig === 'object'
+      ? (loadedConfig as Record<string, unknown>).context_length
+      : undefined,
+    ...CONTEXT_LENGTH_FIELDS.map((field) => record[field])
+  ]
+
+  for (const value of candidates) {
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value
+  }
+  return null
+}
+
 /**
  * Abstract base class for all LLM providers.
  * Subclasses implement streaming and model listing
@@ -103,4 +154,12 @@ export abstract class BaseLLMProvider {
    * Fetch the list of available models from this provider.
    */
   abstract listModels(): Promise<string[]>
+
+  /**
+   * The model's context window in tokens, or null when the server doesn't say.
+   * Only used for the chat's context meter, so failures resolve to null.
+   */
+  async getContextLength(_model: string): Promise<number | null> {
+    return null
+  }
 }

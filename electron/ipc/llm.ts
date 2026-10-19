@@ -1,6 +1,7 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { LlmService, type StreamSink } from '../services/LlmService'
 import { executeTool } from '../lib/tools/executor'
+import { getWorkspaceService } from './fs'
 import { assertString, assertObject, assertOptionalNumber } from './validate'
 import type { LLMRequest, StreamChunk, ProviderName, Settings, TitleGenerationRequest } from '../../src/types'
 import { handleIpc } from './typedIpc'
@@ -35,12 +36,14 @@ export function registerLlmHandlers(deps: {
       const sink: StreamSink = {
         send: (chunk) => win.webContents.send(channel, chunk)
       }
+      // The folder this chat is in now; later chat switches don't move the turn.
+      const workspace = getWorkspaceService().snapshot()
 
       await service.orchestrateStream(
         request,
         channel,
         sink,
-        (tc) => executeTool(tc, win)
+        (tc) => executeTool(tc, { win, workspace })
       )
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)

@@ -1,6 +1,5 @@
 import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import { getWorkspaceService } from '../../ipc/fs'
 import type { DialogAdapter } from '../../services/WorkspaceService'
 import { PathJailError } from '../../services/pathJail'
 import { renderMarkdownToPdf } from '../../services/PdfRenderService'
@@ -39,7 +38,7 @@ registerTool({
       }
     }
   },
-  execute: async (args, win) => {
+  execute: async (args, { win, workspace }) => {
     const input = requireObjectArgs(args, 'write_pdf')
     const path = requireStringArg(input, 'path', 'write_pdf')
     const markdown = requireStringArg(input, 'markdown', 'write_pdf', {
@@ -53,7 +52,6 @@ registerTool({
     }
 
     const pdfBuffer = await renderMarkdownToPdf(markdown, { title })
-    const workspace = getWorkspaceService()
     await workspace.writeBinaryFile(dialogForWindow(win), path, pdfBuffer)
 
     return { success: true, path, bytes: pdfBuffer.byteLength }

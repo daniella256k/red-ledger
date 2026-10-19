@@ -1,6 +1,9 @@
 import axios, { type AxiosResponse } from 'axios'
 import {
   BaseLLMProvider,
+  TRUNCATED_REPLY_NOTICE,
+  readContextLength,
+  reportedUsageChunk,
   type ProviderSendOptions,
   type AbortHandle,
   type LLMMessageContent
@@ -20,6 +23,11 @@ function normalizeBaseUrl(baseUrl: string, compatibility: LMStudioCompatibility)
   if (trimmed.endsWith('/api/v1')) return trimmed
   if (trimmed.endsWith('/v1')) return trimmed.replace(/\/v1$/, '/api/v1')
   return `${trimmed}/api/v1`
+}
+
+/** Server root without the /v1 or /api/v1 suffix. */
+function serverRoot(baseUrl: string): string {
+  return baseUrl.replace(/\/+$/, '').replace(/(\/api)?\/v1$/, '')
 }
 
 function parseCompatibility(settings: ProviderSettings): LMStudioCompatibility {
@@ -99,7 +107,19 @@ class LMStudioNativeProvider extends BaseLLMProvider {
       onChunk({ type: 'text', content })
     }
 
-    const done = payload.done === true || choice?.finish_reason === 'stop'
+    const usage = payload.usage as Record<string, unknown> | undefined
+    if (usage) {
+      const usageChunk = reportedUsageChunk(usage.prompt_tokens, usage.completion_tokens)
+      if (usageChunk) onChunk(usageChunk)
+    }
+
+    if (choice?.finish_reason === 'length') {
+      onChunk({ type: 'notice', content: TRUNCATED_REPLY_NOTICE })
+    }
+
+    const done = payload.done === true
+      || choice?.finish_reason === 'stop'
+      || choice?.finish_reason === 'length'
     return done
   }
 
@@ -213,6 +233,21 @@ class LMStudioNativeProvider extends BaseLLMProvider {
       throw new Error(`Failed to list LM Studio models: ${msg}`)
     }
   }
+
+  override async getContextLength(model: string): Promise<number | null> {
+    try {
+      const response = await axios.get(`${this.baseUrl}/models`, { timeout: 10_000 })
+      const raw = response.data as Record<string, unknown>
+      const list: unknown[] = Array.isArray(raw.data)
+        ? raw.data
+        : Array.isArray(raw.models)
+          ? raw.models
+          : []
+      return readContextLength(list.find((entry) => extractModelId(entry) === model))
+    } catch {
+      return null
+    }
+  }
 }
 
 export class LMStudioProvider extends BaseLLMProvider {
@@ -234,6 +269,21 @@ export class LMStudioProvider extends BaseLLMProvider {
 
   listModels(): Promise<string[]> {
     return this.provider.listModels()
+  }
+
+  /** The REST API reports the loaded window in either compatibility mode; fall back to the mode's own listing. */
+  override async getContextLength(model: string): Promise<number | null> {
+    try {
+      const response = await axios.get(
+        `${serverRoot(this.baseUrl)}/api/v0/models/${encodeURIComponent(model)}`,
+        { timeout: 10_000 }
+      )
+      const fromRest = readContextLength(response.data)
+      if (fromRest) return fromRest
+    } catch {
+      // Older or newer servers without this endpoint.
+    }
+    return this.provider.getContextLength(model)
   }
 }
 

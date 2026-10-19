@@ -1,5 +1,4 @@
 import { registerTool } from './registry'
-import { getWorkspaceService } from '../../ipc/fs'
 import {
   numberArg,
   optionalStringArg,
@@ -49,7 +48,7 @@ registerTool({
       }
     }
   },
-  execute: async (args) => {
+  execute: async (args, { workspace }) => {
     const input = requireObjectArgs(args, 'grep_files')
     const pattern = requireStringArg(input, 'pattern', 'grep_files', { trim: false, allowEmpty: false })
     const path = optionalStringArg(input, 'path', 'grep_files')
@@ -64,7 +63,6 @@ registerTool({
       ? undefined
       : numberArg(input, 'context_chars', 'grep_files', { integer: true, min: 20, max: 1000 })
 
-    const workspace = getWorkspaceService()
     const matches = workspace.grepFiles({
       pattern,
       isRegex,

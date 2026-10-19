@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Info } from 'lucide-react'
 import { resolveConversationProfile, useContextProfileStore, useConversationStore } from '@/store'
-import type { Conversation, Message, ProviderName } from '@/types'
+import { contextRatio, describeContextUsage } from '@/lib/contextUsage'
+import type { Conversation, ContextUsage, Message, ProviderName } from '@/types'
 
 const PROVIDER_LABELS: Record<ProviderName, string> = {
   openai: 'OpenAI',
@@ -35,6 +36,13 @@ function countToolCalls(messages: Message[]): number {
     }
   }
   return total
+}
+
+function describeContextRow(usage: ContextUsage): string {
+  const ratio = contextRatio(usage)
+  return ratio === null
+    ? describeContextUsage(usage)
+    : `${describeContextUsage(usage)} (${Math.round(ratio * 100)}%)`
 }
 
 function InfoRow({ label, value, mono }: { label: string; value: string; mono?: boolean }) {
@@ -155,6 +163,9 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
                 />
                 <InfoRow label="Reasoning" value={lastRequest.reasoningEnabled ? 'On' : 'Off'} />
                 <InfoRow label="Web search" value={lastRequest.searchToolsEnabled ? 'On' : 'Off'} />
+                {lastRequest.usage && (
+                  <InfoRow label="Context used" value={describeContextRow(lastRequest.usage)} />
+                )}
               </>
             )}
 
