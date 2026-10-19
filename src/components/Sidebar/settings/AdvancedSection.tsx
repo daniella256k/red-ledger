@@ -70,7 +70,7 @@ export function AdvancedSection({ settings, saveSettings }: SettingsSectionProps
               onChange={(e) =>
                 saveSettings({ ...settings, maxTokens: parseInt(e.target.value, 10) || 8192 })
               }
-              className={`input input-sm input-bordered w-full bg-base-100 ${settings.maxTokensEnabled ? '' : 'opacity-40 cursor-not-allowed'}`}
+              className={`input input-sm w-full ${settings.maxTokensEnabled ? '' : 'opacity-40 cursor-not-allowed'}`}
             />
           </div>
 

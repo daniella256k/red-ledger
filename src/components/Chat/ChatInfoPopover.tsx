@@ -128,7 +128,7 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
         aria-expanded={isOpen}
         aria-label="Chat info"
         title="Chat info"
-        className={`flex items-center justify-center h-6 w-6 rounded transition-colors ${isOpen
+        className={`flex items-center justify-center h-6 w-6 rounded-sm transition-colors ${isOpen
           ? 'text-soft-charcoal/70 bg-base-200'
           : 'text-soft-charcoal/30 hover:text-soft-charcoal/60'
         }`}

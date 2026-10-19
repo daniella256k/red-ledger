@@ -38,7 +38,7 @@ export function SearchSection({ settings, saveSettings }: SettingsSectionProps) 
                 value={settings.tavilyApiKey}
                 onChange={(e) => saveSettings({ ...settings, tavilyApiKey: e.target.value })}
                 placeholder="tvly-..."
-                className="input input-sm input-bordered w-full bg-base-100"
+                className="input input-sm w-full"
               />
             </div>
 
@@ -49,7 +49,7 @@ export function SearchSection({ settings, saveSettings }: SettingsSectionProps) 
                 type="password"
                 value={settings.serpApiKey}
                 onChange={(e) => saveSettings({ ...settings, serpApiKey: e.target.value })}
-                className="input input-sm input-bordered w-full bg-base-100"
+                className="input input-sm w-full"
               />
             </div>
 
@@ -67,7 +67,7 @@ export function SearchSection({ settings, saveSettings }: SettingsSectionProps) 
                 value={settings.orgSite}
                 onChange={(e) => saveSettings({ ...settings, orgSite: e.target.value })}
                 placeholder="example.com"
-                className="input input-sm input-bordered w-full bg-base-100"
+                className="input input-sm w-full"
               />
             </div>
           </fieldset>

@@ -89,7 +89,7 @@ export function ProviderSection({
                   ...(remembered ? { defaultModel: remembered } : {})
                 })
               }}
-              className="select select-sm select-bordered w-full bg-base-100"
+              className="select select-sm w-full"
             >
               {PROVIDERS.map((p) => (
                 <option key={p.id} value={p.id}>{p.label}</option>
@@ -106,7 +106,7 @@ export function ProviderSection({
                 value={activeProvider.apiKey}
                 onChange={(e) => saveActiveProvider({ apiKey: e.target.value })}
                 placeholder={settings.activeProvider === 'custom' ? 'Optional' : 'sk-...'}
-                className="input input-sm input-bordered w-full bg-base-100"
+                className="input input-sm w-full"
               />
             </div>
           )}
@@ -120,7 +120,7 @@ export function ProviderSection({
                 onChange={(e) =>
                   saveActiveProvider({ compatibility: e.target.value as 'openai' | 'lmstudio' })
                 }
-                className="select select-sm select-bordered w-full bg-base-100"
+                className="select select-sm w-full"
               >
                 <option value="openai">OpenAI Endpoints</option>
                 <option value="lmstudio">LM Studio Endpoints</option>
@@ -147,7 +147,7 @@ export function ProviderSection({
               type="text"
               value={activeProvider.baseUrl}
               onChange={(e) => saveActiveProvider({ baseUrl: e.target.value })}
-              className="input input-sm input-bordered w-full bg-base-100 text-xs"
+              className="input input-sm w-full text-xs"
             />
             {settings.activeProvider === 'custom' && (
               <p className="mt-1 text-[10px] text-soft-charcoal/45">
@@ -182,13 +182,13 @@ export function ProviderSection({
                     value={activeProviderModel}
                     onChange={(e) => saveActiveProviderModel(e.target.value)}
                     placeholder={PROVIDER_PREFERRED_MODELS[settings.activeProvider] ?? 'Model ID'}
-                    className="input input-sm input-bordered flex-1 min-w-0 bg-base-100"
+                    className="input input-sm flex-1 min-w-0"
                   />
                 ) : (
                   <select
                     value={activeProviderModel}
                     onChange={(e) => saveActiveProviderModel(e.target.value)}
-                    className="select select-sm select-bordered flex-1 min-w-0 bg-base-100"
+                    className="select select-sm flex-1 min-w-0"
                   >
                     {!models.includes(activeProviderModel) && activeProviderModel && (
                       <option value={activeProviderModel}>{activeProviderModel}</option>
@@ -219,7 +219,7 @@ export function ProviderSection({
                   disabled={!activeProviderModel.trim()}
                   aria-pressed={isActiveModelFavorite}
                   title={isActiveModelFavorite ? 'Remove from favorites' : 'Add to favorites'}
-                  className={`btn btn-ghost btn-sm h-8 min-h-0 w-8 p-0 shrink-0 ${isActiveModelFavorite ? 'text-rca-red' : 'text-soft-charcoal/40 hover:text-soft-charcoal/70'}`}
+                  className={`btn btn-ghost btn-sm h-8 min-h-0 w-8 p-0 shrink-0 disabled:text-soft-charcoal/20 ${isActiveModelFavorite ? 'text-rca-red' : 'text-soft-charcoal/40 hover:text-soft-charcoal/70'}`}
                 >
                   <Star size={14} fill={isActiveModelFavorite ? 'currentColor' : 'none'} />
                 </button>

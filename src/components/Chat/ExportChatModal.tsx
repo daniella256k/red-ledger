@@ -88,7 +88,7 @@ export function ExportChatModal({ conversation, onClose }: ExportChatModalProps)
             type="button"
             onClick={onClose}
             disabled={isExporting}
-            className="p-1 rounded hover:bg-base-300 text-soft-charcoal/60 hover:text-soft-charcoal transition-colors disabled:opacity-50"
+            className="p-1 rounded-sm hover:bg-base-300 text-soft-charcoal/60 hover:text-soft-charcoal transition-colors disabled:opacity-50"
             aria-label="Close"
           >
             <X size={16} />
@@ -101,14 +101,14 @@ export function ExportChatModal({ conversation, onClose }: ExportChatModalProps)
           </div>
 
           <fieldset className="space-y-2">
-            <legend className="text-xs font-medium text-soft-charcoal/80 mb-1">Format</legend>
+            <legend className="text-xs font-medium text-soft-charcoal/80 mb-3">Format</legend>
             {FORMAT_OPTIONS.map((option) => {
               const checked = format === option.value
               return (
                 <label
                   key={option.value}
                   className={cn(
-                    'flex gap-3 p-3 rounded border cursor-pointer transition-colors',
+                    'flex gap-3 p-3 rounded-sm border cursor-pointer transition-colors',
                     checked
                       ? 'border-rca-red bg-rca-red/5'
                       : 'border-weathered hover:bg-paper-stack/40'

@@ -3,6 +3,7 @@ import { Layout } from './components/Layout'
 import { Toaster } from './components/ui/Toast'
 import { ExportChatModal } from './components/Chat/ExportChatModal'
 import { useConversationStore, useSettingsStore, useUIStore } from './store'
+import { DARK_THEME, LIGHT_THEME, useDarkMode } from './hooks/useDarkMode'
 import { notify } from './lib/notify'
 import { formatError } from './lib/errors'
 import type { MenuAction } from './types'
@@ -12,8 +13,10 @@ export default function App() {
   const settings = useSettingsStore((s) => s.settings)
   const conversations = useConversationStore((s) => s.conversations)
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
-  const activeTheme = settings?.darkMode ? 'red-ledger-dark' : 'red-ledger'
-  const previousThemeRef = useRef(activeTheme)
+  const darkMode = useDarkMode()
+  const activeTheme = darkMode ? DARK_THEME : LIGHT_THEME
+  const settingsDarkMode = settings?.darkMode
+  const previousSettingsDarkModeRef = useRef(settingsDarkMode)
   const [exportModalOpen, setExportModalOpen] = useState(false)
 
   const activeConversation = useMemo(
@@ -25,8 +28,20 @@ export default function App() {
     loadSettings()
   }, [loadSettings])
 
+  // Keep <html> and the page URL on the active theme, so the page behind the
+  // app matches and View > Reload boots straight into it (see theme-boot.js).
   useLayoutEffect(() => {
-    if (previousThemeRef.current === activeTheme) return
+    document.documentElement.setAttribute('data-theme', activeTheme)
+    const url = new URL(window.location.href)
+    url.searchParams.set('theme', activeTheme === DARK_THEME ? 'dark' : 'light')
+    window.history.replaceState(window.history.state, '', url)
+  }, [activeTheme])
+
+  // Fade only when the user flips Dark mode, never when settings first load.
+  useLayoutEffect(() => {
+    const previous = previousSettingsDarkModeRef.current
+    previousSettingsDarkModeRef.current = settingsDarkMode
+    if (previous === undefined || previous === settingsDarkMode) return
 
     const root = document.documentElement
     root.classList.add('theme-transition')
@@ -35,13 +50,11 @@ export default function App() {
       root.classList.remove('theme-transition')
     }, 240)
 
-    previousThemeRef.current = activeTheme
-
     return () => {
       window.clearTimeout(timeoutId)
       root.classList.remove('theme-transition')
     }
-  }, [activeTheme])
+  }, [settingsDarkMode])
 
   // Switching chats restores the workspace that chat was working in.
   // Saving lastWorkspacePath points the main process at it; the effect below validates it.

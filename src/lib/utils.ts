@@ -2,6 +2,10 @@ export function cn(...classes: (string | boolean | undefined | null)[]): string 
   return classes.filter(Boolean).join(' ')
 }
 
+// Created once: toLocaleDateString builds a new formatter on every call.
+const monthDayFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric' })
+const monthDayYearFormat = new Intl.DateTimeFormat(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+
 export function formatTimestamp(ts: number): string {
   const date = new Date(ts)
   const now = new Date()
@@ -24,10 +28,10 @@ export function formatTimestamp(ts: number): string {
 
   // Same year
   if (date.getFullYear() === now.getFullYear()) {
-    return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })
+    return monthDayFormat.format(date)
   }
 
-  return date.toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })
+  return monthDayYearFormat.format(date)
 }
 
 export function truncate(str: string, maxLen: number): string {

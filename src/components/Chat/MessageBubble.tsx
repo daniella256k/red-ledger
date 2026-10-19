@@ -342,7 +342,7 @@ export function MessageBubble({
                 onKeyDown={handleEditKeyDown}
                 disabled={isSubmittingEdit}
                 rows={3}
-                className="textarea textarea-bordered w-full bg-base-100/70 text-sm resize-none min-h-[84px] max-h-[220px] leading-relaxed focus:outline-none focus:border-weathered"
+                className="textarea w-full bg-base-100/70 text-sm resize-none min-h-[84px] max-h-[220px] leading-relaxed focus:outline-hidden focus:border-weathered"
               />
               <div className="mt-2 flex items-center justify-end gap-1.5">
                 <button
@@ -378,16 +378,16 @@ export function MessageBubble({
                     <span className="text-[10px] opacity-50 group-open/attach:rotate-90 transition-transform">&#9654;</span>
                   </summary>
                   {isImageAttachment(a) ? (
-                    <div className="mt-1 p-2 bg-base-200/60 rounded max-w-[320px]">
+                    <div className="mt-1 p-2 bg-base-200/60 rounded-sm max-w-[320px]">
                       <img
                         src={a.dataUrl}
                         alt={a.name}
-                        className="block max-w-full max-h-[260px] rounded border border-weathered object-contain bg-base-100"
+                        className="block max-w-full max-h-[260px] rounded-sm border border-weathered object-contain bg-base-100"
                         loading="lazy"
                       />
                     </div>
                   ) : (
-                    <pre className="whitespace-pre-wrap font-mono text-xs mt-1 p-2 bg-base-200/60 rounded max-h-[200px] overflow-y-auto m-0">{a.content}</pre>
+                    <pre className="whitespace-pre-wrap font-mono text-xs mt-1 p-2 bg-base-200/60 rounded-sm max-h-[200px] overflow-y-auto m-0">{a.content}</pre>
                   )}
                 </details>
               ))}

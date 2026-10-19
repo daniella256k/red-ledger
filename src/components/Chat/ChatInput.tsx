@@ -225,7 +225,7 @@ export function ChatInput({ streaming }: ChatInputProps) {
           {attachments.map((a, i) => (
             <span
               key={i}
-              className="inline-flex items-center gap-1 px-2 py-0.5 bg-base-100 border border-weathered rounded text-xs text-soft-charcoal"
+              className="inline-flex items-center gap-1 px-2 py-0.5 bg-base-100 border border-weathered rounded-sm text-xs text-soft-charcoal"
             >
               <Paperclip size={10} className="shrink-0 text-soft-charcoal/40" />
               <span className="truncate max-w-[150px]">{a.name}</span>
@@ -259,7 +259,7 @@ export function ChatInput({ streaming }: ChatInputProps) {
           }
           disabled={isDisabled || isStreaming}
           rows={1}
-          className="textarea textarea-bordered flex-1 bg-base-100 resize-none overflow-y-hidden text-sm min-h-[40px] max-h-[200px] leading-relaxed focus:outline-none focus:border-weathered"
+          className="textarea flex-1 resize-none overflow-y-hidden text-sm min-h-[40px] max-h-[200px] leading-relaxed focus:outline-hidden focus:border-weathered"
         />
 
         {isStreaming ? (
@@ -275,7 +275,7 @@ export function ChatInput({ streaming }: ChatInputProps) {
             <button
               onClick={handleAttach}
               disabled={isDisabled}
-              className="btn btn-ghost btn-sm h-10 w-10 min-w-[40px] p-0 shrink-0 text-soft-charcoal/50 hover:text-soft-charcoal"
+              className="btn btn-ghost btn-sm h-10 w-10 min-w-[40px] p-0 shrink-0 text-soft-charcoal/50 hover:text-soft-charcoal disabled:text-soft-charcoal/20"
               title="Attach files: text and code (.py, .yaml, .json, .xml, ...), PDFs, Word documents, spreadsheets (.xlsx, .xls, .ods, .csv, ...), or images. You can also paste an image into the message box."
             >
               <Paperclip size={16} />

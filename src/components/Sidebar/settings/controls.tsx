@@ -39,7 +39,7 @@ export function SectionToggle({
       type="button"
       aria-expanded={expanded}
       onClick={onToggle}
-      className="divider text-[10px] text-soft-charcoal/30 uppercase tracking-widest my-1 w-full cursor-pointer bg-transparent border-0 p-0 hover:text-soft-charcoal/50 transition-colors"
+      className="divider text-[10px] text-soft-charcoal/30 uppercase tracking-widest mt-1 w-full cursor-pointer bg-transparent border-0 p-0 hover:text-soft-charcoal/50 transition-colors"
     >
       <span className="inline-flex items-center gap-1">
         {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}

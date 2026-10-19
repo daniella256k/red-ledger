@@ -110,7 +110,7 @@ export function ChatPanel() {
     >
       {showDropOverlay && (
         <div className="pointer-events-none absolute inset-0 z-30 flex items-center justify-center bg-paper/75">
-          <div className="rounded-lg border-2 border-dashed border-rca-red/45 bg-paper-stack/95 px-6 py-5 text-center shadow-sm">
+          <div className="rounded-lg border-2 border-dashed border-rca-red/45 bg-paper-stack/95 px-6 py-5 text-center shadow-xs">
             <p className="text-sm font-medium text-soft-charcoal">
               {isParsingDrop ? 'Attaching files...' : 'Drop files to attach to your next message'}
             </p>

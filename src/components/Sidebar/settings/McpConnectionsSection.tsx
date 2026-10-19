@@ -16,7 +16,7 @@ import { notify } from '@/lib/notify'
 import { useSettingsStore } from '@/store'
 import { HelpIcon, LABEL_CLASS, SMALL_BUTTON_CLASS, type SettingsSectionProps } from './controls'
 
-const TEXTAREA_CLASS = 'textarea textarea-bordered w-full bg-base-100 text-xs leading-snug min-h-0 px-3 py-1.5'
+const TEXTAREA_CLASS = 'textarea w-full text-xs leading-snug min-h-0 px-3 py-1.5'
 
 function newServerId(): string {
   return typeof crypto !== 'undefined' && 'randomUUID' in crypto
@@ -154,7 +154,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
           value={name}
           onChange={(e) => setName(e.target.value)}
           placeholder="Everything"
-          className="input input-sm input-bordered w-full bg-base-100"
+          className="input input-sm w-full"
           autoFocus
         />
       </div>
@@ -167,7 +167,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
             setTransport(e.target.value as McpTransport)
             setError(null)
           }}
-          className="select select-sm select-bordered w-full bg-base-100"
+          className="select select-sm w-full"
         >
           <option value="stdio">Local command</option>
           <option value="http">Remote URL</option>
@@ -189,7 +189,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
                 setError(null)
               }}
               placeholder="npx -y @modelcontextprotocol/server-everything"
-              className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+              className="input input-sm w-full text-xs font-mono"
             />
           </div>
           <div>
@@ -218,7 +218,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
                 setError(null)
               }}
               placeholder="${workspaceFolder}"
-              className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+              className="input input-sm w-full text-xs font-mono"
             />
           </div>
         </>
@@ -237,7 +237,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
                 setError(null)
               }}
               placeholder="https://example.com/mcp"
-              className="input input-sm input-bordered w-full bg-base-100 text-xs"
+              className="input input-sm w-full text-xs"
             />
           </div>
           <div>
@@ -269,7 +269,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
                   type="text"
                   value={clientId}
                   onChange={(e) => setClientId(e.target.value)}
-                  className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+                  className="input input-sm w-full text-xs font-mono"
                 />
               </div>
               <div>
@@ -280,7 +280,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
                   onChange={(e) => setClientSecret(e.target.value)}
                   placeholder="Only for confidential clients"
                   autoComplete="off"
-                  className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+                  className="input input-sm w-full text-xs font-mono"
                 />
               </div>
               <div className="flex gap-2">
@@ -291,7 +291,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
                     value={scope}
                     onChange={(e) => setScope(e.target.value)}
                     placeholder="read write"
-                    className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+                    className="input input-sm w-full text-xs font-mono"
                   />
                 </div>
                 <div className="w-24 shrink-0">
@@ -305,7 +305,7 @@ function ServerForm({ initial, status, onSave, onCancel, onSignOut }: ServerForm
                       setError(null)
                     }}
                     placeholder="Any"
-                    className="input input-sm input-bordered w-full bg-base-100 text-xs font-mono"
+                    className="input input-sm w-full text-xs font-mono"
                   />
                 </div>
               </div>

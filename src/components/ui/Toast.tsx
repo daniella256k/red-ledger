@@ -28,7 +28,7 @@ function ToastItem({ toast }: { toast: Toast }) {
       <span className="flex-1">{toast.message}</span>
       <button
         onClick={() => removeToast(toast.id)}
-        className="btn btn-ghost btn-xs"
+        className="btn btn-ghost btn-xs text-current hover:bg-base-content/20 hover:border-transparent hover:shadow-none"
       >
         <X size={14} />
       </button>

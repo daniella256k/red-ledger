@@ -235,7 +235,7 @@ export function ContextPanel() {
             value={profileState.activeProfileId}
             disabled={profileControlsDisabled}
             onChange={(e) => handleProfileChange(e.target.value)}
-            className={`select select-xs select-bordered ${selectWidthClass} bg-base-100 text-xs shrink-0`}
+            className={`select select-xs ${selectWidthClass} text-xs shrink-0`}
             title="Select context profile"
           >
             {profileState.profiles.map((profile) => (
@@ -253,7 +253,7 @@ export function ContextPanel() {
                 setProfileNameDraft(activeProfile?.name ?? '')
               }
             }}
-            className="btn btn-ghost btn-xs text-soft-charcoal/55 hover:text-soft-charcoal"
+            className="btn btn-ghost btn-xs text-soft-charcoal/55 hover:text-soft-charcoal disabled:text-soft-charcoal/20"
             title="Rename selected profile"
             aria-label="Rename selected profile"
           >
@@ -270,7 +270,7 @@ export function ContextPanel() {
                 setProfileNameDraft('')
               }
             }}
-            className="btn btn-ghost btn-xs text-soft-charcoal/55 hover:text-soft-charcoal"
+            className="btn btn-ghost btn-xs text-soft-charcoal/55 hover:text-soft-charcoal disabled:text-soft-charcoal/20"
             title="Create profile"
             aria-label="Create profile"
           >
@@ -280,7 +280,7 @@ export function ContextPanel() {
             type="button"
             disabled={profileControlsDisabled || !canDeleteActiveProfile}
             onClick={() => void handleDeleteActiveProfile()}
-            className="btn btn-ghost btn-xs text-soft-charcoal/55 hover:text-error disabled:hover:text-soft-charcoal/55"
+            className="btn btn-ghost btn-xs text-soft-charcoal/55 hover:text-error disabled:text-soft-charcoal/20"
             title={canDeleteActiveProfile ? 'Delete selected profile' : 'Default profile cannot be deleted'}
             aria-label="Delete selected profile"
           >
@@ -309,7 +309,7 @@ export function ContextPanel() {
             onFocus={(e) => e.currentTarget.select()}
             placeholder={profileFormMode === 'rename' ? 'Profile name' : 'New profile name'}
             maxLength={48}
-            className="input input-xs input-bordered flex-1 min-w-0 bg-base-100 text-xs"
+            className="input input-xs flex-1 min-w-0 text-xs"
           />
           <button
             type="button"

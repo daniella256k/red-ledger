@@ -41,7 +41,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
           {mcp ? (
             <>
               <span
-                className="shrink-0 max-w-[40%] truncate rounded bg-base-100/70 px-1.5 py-px text-[10px] font-medium uppercase tracking-wide opacity-80"
+                className="shrink-0 max-w-[40%] truncate rounded-sm bg-base-100/70 px-1.5 py-px text-[10px] font-medium uppercase tracking-wide opacity-80"
                 title={`From the "${mcp.server}" connection`}
               >
                 {mcp.server}
@@ -60,7 +60,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
           {/* Arguments */}
           <div>
             <div className="font-medium text-soft-charcoal/60 mb-1">Arguments</div>
-            <pre className="bg-base-200 rounded p-2 overflow-x-auto font-mono">
+            <pre className="bg-base-200 rounded-sm p-2 overflow-x-auto font-mono">
               {JSON.stringify(toolCall.arguments, null, 2)}
             </pre>
           </div>
@@ -70,7 +70,7 @@ export function ToolCallCard({ toolCall }: ToolCallCardProps) {
             <div>
               <div className="font-medium text-soft-charcoal/60 mb-1">Result</div>
               <pre className={cn(
-                'rounded p-2 overflow-x-auto font-mono',
+                'rounded-sm p-2 overflow-x-auto font-mono',
                 hasError ? 'bg-error/5 text-error' : 'bg-success/5 text-success'
               )}>
                 {typeof toolCall.result === 'string'

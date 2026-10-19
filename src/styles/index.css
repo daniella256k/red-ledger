@@ -1,12 +1,130 @@
-/* ─── Google Fonts ────────────────────────────────────────────────────────── */
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap');
+/* ─── Fonts ───────────────────────────────────────────────────────────────── */
+@import "./fonts.css";
 
 /* ─── Local Fonts ─────────────────────────────────────────────────────────── */
 /* Built Titling is a display font used for the app title / branding */
 
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+/* Class sources match the old tailwind.config.js `content` list. */
+@import "tailwindcss" source(none);
+@source "../../index.html";
+@source "../**/*.{js,ts,jsx,tsx}";
+
+@plugin "@tailwindcss/typography";
+
+/* Only the two Red Ledger themes below; no built-in daisyUI themes. */
+@plugin "daisyui" {
+  themes: false;
+}
+
+/* ─── daisyUI Themes ──────────────────────────────────────────────────────── */
+/* daisyUI 4's --rounded-btn / --rounded-box map to --radius-field / --radius-box.
+   --radius-selector keeps toggles as pills and checkbox-xs round, as before.
+   --animation-btn, --animation-input and --btn-focus-scale have no daisyUI 5
+   equivalent and are dropped. */
+
+@plugin "daisyui/theme" {
+  name: "red-ledger";
+  default: true;
+  color-scheme: light;
+  --color-primary: #DB1E1E;
+  --color-primary-content: #FFFFFF;
+  --color-secondary: #2C2C2C;
+  --color-secondary-content: #FDFCF8;
+  --color-accent: #8B4513;
+  --color-accent-content: #FDFCF8;
+  --color-neutral: #F5F1E8;
+  --color-neutral-content: #2C2C2C;
+  --color-base-100: #FDFCF8;
+  --color-base-200: #F4F1EA;
+  --color-base-300: #E5E0D5;
+  --color-base-content: #2C2C2C;
+  --color-info: #5D737E;
+  --color-info-content: #FDFCF8;
+  --color-success: #4A5D4A;
+  --color-success-content: #FDFCF8;
+  --color-warning: #B85C38;
+  --color-warning-content: #FDFCF8;
+  --color-error: #A92525;
+  --color-error-content: #FDFCF8;
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.75rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+@plugin "daisyui/theme" {
+  name: "red-ledger-dark";
+  color-scheme: dark;
+  --color-primary: #E24848;
+  --color-primary-content: #FFF4F4;
+  --color-secondary: #D8CAC0;
+  --color-secondary-content: #1F1A19;
+  --color-accent: #B77E4F;
+  --color-accent-content: #FFF6ED;
+  --color-neutral: #2A2321;
+  --color-neutral-content: #F2E5DB;
+  --color-base-100: #1F1A19;
+  --color-base-200: #272120;
+  --color-base-300: #352E2C;
+  --color-base-content: #F1E7DE;
+  --color-info: #7AA6B9;
+  --color-info-content: #111111;
+  --color-success: #78A489;
+  --color-success-content: #111111;
+  --color-warning: #D39A63;
+  --color-warning-content: #1C140F;
+  --color-error: #EC7272;
+  --color-error-content: #160B0B;
+  --radius-selector: 0.5rem;
+  --radius-field: 0.5rem;
+  --radius-box: 0.75rem;
+  --size-selector: 0.25rem;
+  --size-field: 0.25rem;
+  --border: 1px;
+  --depth: 1;
+  --noise: 0;
+}
+
+/* ─── Theme ───────────────────────────────────────────────────────────────── */
+
+@theme {
+  --font-sans: Inter, system-ui, sans-serif;
+  --font-mono: 'JetBrains Mono', Menlo, monospace;
+  --font-title: 'Built Titling', Inter, system-ui, sans-serif;
+  --radius-btn: 0.5rem;
+  --radius-card: 0.75rem;
+  --default-transition-duration: 200ms;
+
+  /* Tailwind 3's absolute line heights. Tailwind 4 uses ratios, which shrink
+     the line box of smaller nested text (tool card headers, badges). */
+  --text-xs--line-height: 1rem;
+  --text-sm--line-height: 1.25rem;
+  --text-base--line-height: 1.5rem;
+  --text-lg--line-height: 1.75rem;
+  --text-xl--line-height: 1.75rem;
+  --text-2xl--line-height: 2rem;
+  --text-3xl--line-height: 2.25rem;
+  --text-4xl--line-height: 2.5rem;
+}
+
+/* Palette utilities (bg-paper, text-rca-red/45, …). The --color-* variables
+   below stay RGB triplets so the plain CSS in this file can keep using
+   rgb(var(--color-x) / alpha). `inline` writes rgb(var(--color-x)) into each
+   utility, so it resolves per element and follows [data-theme]; `reference`
+   stops Tailwind from emitting its own --color-x over the triplets. */
+@theme inline reference {
+  --color-rca-red: rgb(var(--color-rca-red));
+  --color-soft-charcoal: rgb(var(--color-soft-charcoal));
+  --color-paper: rgb(var(--color-paper));
+  --color-paper-stack: rgb(var(--color-paper-stack));
+  --color-manila: rgb(var(--color-manila));
+  --color-weathered: rgb(var(--color-weathered));
+  --color-leather: rgb(var(--color-leather));
+}
 
 :root {
   --color-rca-red: 219 30 30;
@@ -59,25 +177,45 @@
   color-scheme: dark;
 }
 
-@media (prefers-reduced-motion: no-preference) {
-  :root {
-    --theme-transition-duration: 0ms;
-  }
+/* In the base layer so transition utilities and component transitions still
+   win; unlayered, this would override every one of them. */
+@layer base {
+  @media (prefers-reduced-motion: no-preference) {
+    :root {
+      --theme-transition-duration: 0ms;
+    }
 
-  :root.theme-transition {
-    --theme-transition-duration: 240ms;
-  }
+    :root.theme-transition {
+      --theme-transition-duration: 240ms;
+    }
 
-  :where([data-theme], [data-theme] *, [data-theme] *::before, [data-theme] *::after) {
-    transition-property: background-color, border-color, color, fill, stroke, box-shadow;
-    transition-duration: var(--theme-transition-duration);
-    transition-timing-function: ease;
+    :where([data-theme], [data-theme] *, [data-theme] *::before, [data-theme] *::after) {
+      transition-property: background-color, border-color, color, fill, stroke, box-shadow;
+      transition-duration: var(--theme-transition-duration);
+      transition-timing-function: ease;
+    }
   }
 }
 
 /* ─── Base Styles ─────────────────────────────────────────────────────────── */
 
 @layer base {
+  /* Tailwind 4 defaults borders to currentColor; keep the ledger line color. */
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: rgb(var(--color-weathered));
+  }
+
+  /* Tailwind 4 preflight and daisyUI 5 leave these on the default cursor. */
+  button:not(:disabled),
+  [role='button']:not(:disabled),
+  select:not(:disabled) {
+    cursor: pointer;
+  }
+
   html, body, #root {
     @apply h-full w-full overflow-hidden;
     font-family: 'Inter', system-ui, sans-serif;
@@ -167,7 +305,7 @@
 
   /* File Tree Items */
   .file-tree-item {
-    @apply flex items-center gap-2 px-2 py-1 rounded text-sm cursor-pointer
+    @apply flex items-center gap-2 px-2 py-1 rounded-sm text-sm cursor-pointer
            hover:bg-base-200 transition-colors duration-200;
   }
 
@@ -306,7 +444,7 @@
 }
 
 .prose code {
-  @apply bg-base-200 px-1 py-0.5 rounded text-sm;
+  @apply bg-base-200 px-1 py-0.5 rounded-sm text-sm;
   font-family: 'JetBrains Mono', 'Menlo', monospace;
 }
 

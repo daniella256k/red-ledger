@@ -216,13 +216,16 @@ function createWindow(): void {
     openExternalUrl(url)
   })
 
-  // Load the app
+  // Load the app. The theme rides along in the URL so the page can apply it
+  // before first paint (public/theme-boot.js); settings arrive later over IPC.
+  const theme = prefersDarkMode ? 'dark' : 'light'
   if (process.env.NODE_ENV === 'development' || process.env.ELECTRON_RENDERER_URL) {
-    const url = process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173'
-    mainWindow.loadURL(url)
+    const url = new URL(process.env.ELECTRON_RENDERER_URL || 'http://localhost:5173')
+    url.searchParams.set('theme', theme)
+    mainWindow.loadURL(url.toString())
     mainWindow.webContents.openDevTools()
   } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
+    mainWindow.loadFile(join(__dirname, '../renderer/index.html'), { query: { theme } })
   }
 
   // ─── Right-click context menu (spell suggestions + edit actions) ─────────

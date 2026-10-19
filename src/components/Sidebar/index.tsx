@@ -65,7 +65,7 @@ export function Sidebar() {
                 className={cn(
                   'flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium rounded-t-lg transition-all border border-b-0',
                   isActive
-                    ? 'bg-paper text-soft-charcoal border-weathered relative z-10 shadow-sm'
+                    ? 'bg-paper text-soft-charcoal border-weathered relative z-10 shadow-xs'
                     : 'bg-transparent text-soft-charcoal/50 border-transparent hover:text-soft-charcoal/80 hover:bg-paper/40'
                 )}
                 title={label}

@@ -63,7 +63,7 @@ export function Layout() {
             event.preventDefault()
             event.stopPropagation()
           }}
-          className="absolute left-0 top-1.5 z-20 flex h-8 w-8 -translate-x-[120%] items-center justify-center rounded-sm text-soft-charcoal/45 transition-colors hover:bg-paper-stack/65 hover:text-soft-charcoal/80 focus:outline-none focus-visible:bg-paper focus-visible:text-soft-charcoal focus-visible:ring-2 focus-visible:ring-rca-red/45"
+          className="absolute left-0 top-1.5 z-20 flex h-8 w-8 -translate-x-[120%] items-center justify-center rounded-xs text-soft-charcoal/45 transition-colors hover:bg-paper-stack/65 hover:text-soft-charcoal/80 focus:outline-hidden focus-visible:bg-paper focus-visible:text-soft-charcoal focus-visible:ring-2 focus-visible:ring-rca-red/45"
           title={contextToggleLabel}
           aria-label={contextToggleLabel}
         >

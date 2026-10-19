@@ -3,7 +3,7 @@ import { EditorView, keymap, placeholder as cmPlaceholder } from '@codemirror/vi
 import { EditorState } from '@codemirror/state'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { markdown } from '@codemirror/lang-markdown'
-import { useSettingsStore } from '@/store'
+import { useDarkMode } from '@/hooks/useDarkMode'
 import { createRedLedgerTheme } from './redLedgerTheme'
 
 interface EditorProps {
@@ -16,7 +16,7 @@ interface EditorProps {
 export function Editor({ value, onChange, placeholder, readOnly = false }: EditorProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const viewRef = useRef<EditorView | null>(null)
-  const isDarkMode = useSettingsStore((s) => s.settings?.darkMode ?? false)
+  const isDarkMode = useDarkMode()
 
   // Create editor on mount
   useEffect(() => {
