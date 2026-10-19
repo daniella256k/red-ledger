@@ -1,3 +1,4 @@
+import { existsSync } from 'fs'
 import { v4 as uuidv4 } from 'uuid'
 import type Database from 'better-sqlite3'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
@@ -71,12 +72,14 @@ export interface ConversationServiceOptions {
 
 export class ConversationService {
   private db: Database.Database
+  private dbPath: string
   private statements: Map<string, Database.Statement> = new Map()
   private getDefaultProfileId: () => string | null
   private messageSearchIndexed = false
 
   constructor(dbPath: string, options: ConversationServiceOptions = {}) {
     this.getDefaultProfileId = options.getDefaultProfileId ?? (() => null)
+    this.dbPath = dbPath
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const BetterSqlite3 = require('better-sqlite3')
     this.db = new BetterSqlite3(dbPath) as Database.Database
@@ -214,6 +217,7 @@ export class ConversationService {
     // 1.5.x databases already have it alongside the CHECK constraint.
     const lastRequest = columns.some((column) => column.name === 'last_request') ? ', last_request' : ''
 
+    this.backupBeforeMigration('1.6.0')
     this.db.exec('PRAGMA foreign_keys = OFF')
     try {
       const migrate = this.db.transaction(() => {
@@ -251,6 +255,25 @@ export class ConversationService {
       migrate()
     } finally {
       this.db.exec('PRAGMA foreign_keys = ON')
+    }
+  }
+
+  /**
+   * Copies the database to `<name>.pre-<version>.db` next to it before a table
+   * rebuild, once. The rebuild runs in a transaction, but people may upgrade
+   * rarely, and their chat history shouldn't depend on it going right.
+   * Best-effort: a failed backup is logged and the migration still runs.
+   */
+  private backupBeforeMigration(version: string): void {
+    if (!this.dbPath || this.dbPath === ':memory:') return
+    const backupPath = `${this.dbPath.replace(/\.db$/i, '')}.pre-${version}.db`
+    if (existsSync(backupPath)) return
+
+    try {
+      // A consistent snapshot, including anything still in the WAL file.
+      this.db.prepare('VACUUM INTO ?').run(backupPath)
+    } catch (err) {
+      console.warn('[ConversationService] Could not back up the database before migrating:', err)
     }
   }
 

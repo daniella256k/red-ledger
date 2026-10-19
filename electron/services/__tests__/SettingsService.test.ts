@@ -1,7 +1,10 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { DEFAULT_MODEL } from '../../../src/lib/providers'
-import { sanitizeSettings } from '../SettingsService'
+import { SettingsService, sanitizeSettings } from '../SettingsService'
 
 describe('sanitizeSettings', () => {
   it('returns defaults for undefined input', () => {
@@ -389,5 +392,48 @@ describe('sanitizeSettings mcpServers', () => {
       ]
     } as any)
     expect(result.mcpServers.map((s) => s.transport)).toEqual(['http', 'stdio'])
+  })
+})
+
+describe('SettingsService on disk', () => {
+  function withTempDir(fn: (dir: string) => void) {
+    const dir = mkdtempSync(join(tmpdir(), 'rl-settings-'))
+    try {
+      fn(dir)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  }
+
+  it('saves through a temp file and leaves only settings.json behind', () => {
+    withTempDir((dir) => {
+      const path = join(dir, 'settings.json')
+      const service = new SettingsService(path)
+      service.save({ ...service.getCurrent(), tavilyApiKey: 'tvly-key' })
+
+      expect(JSON.parse(readFileSync(path, 'utf-8')).tavilyApiKey).toBe('tvly-key')
+      expect(existsSync(`${path}.tmp`)).toBe(false)
+      expect(new SettingsService(path).getCurrent().tavilyApiKey).toBe('tvly-key')
+    })
+  })
+
+  it('keeps one copy of a corrupt file before falling back to defaults', () => {
+    withTempDir((dir) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const path = join(dir, 'settings.json')
+        writeFileSync(path, '{"tavilyApiKey": "tvly-key", ')
+
+        const service = new SettingsService(path)
+        service.load()
+        expect(service.getCurrent().tavilyApiKey).toBe('')
+
+        const kept = readdirSync(dir).filter((name) => name.startsWith('settings.json.corrupt-'))
+        expect(kept).toHaveLength(1)
+        expect(readFileSync(join(dir, kept[0]), 'utf-8')).toContain('tvly-key')
+      } finally {
+        warn.mockRestore()
+      }
+    })
   })
 })

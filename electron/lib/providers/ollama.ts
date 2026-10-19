@@ -1,4 +1,5 @@
 import axios, { type AxiosResponse } from 'axios'
+import { randomUUID } from 'crypto'
 import {
   BaseLLMProvider,
   TRUNCATED_REPLY_NOTICE,
@@ -86,7 +87,7 @@ export class OllamaProvider extends BaseLLMProvider {
   }
 
   private async _stream(options: ProviderSendOptions, controller: AbortController): Promise<void> {
-    const { messages, model, tools, temperature, reasoningEnabled, onChunk } = options
+    const { messages, model, tools, temperature, maxTokens, reasoningEnabled, onChunk } = options
 
     // Convert messages to Ollama format
     // Ollama uses the same role/content structure but uses 'tool' role differently
@@ -103,7 +104,9 @@ export class OllamaProvider extends BaseLLMProvider {
       messages: ollamaMessages,
       stream: true,
       options: {
-        temperature: temperature ?? 0.7
+        temperature: temperature ?? 0.7,
+        // Ollama's name for the output token limit.
+        ...(maxTokens ? { num_predict: maxTokens } : {})
       }
     }
 
@@ -178,7 +181,9 @@ export class OllamaProvider extends BaseLLMProvider {
               onChunk({
                 type: 'tool_call',
                 toolCall: {
-                  id: tc.function?.name || `ollama_tool_${Date.now()}`,
+                  // Ollama sends no call IDs. Each needs its own, or results of two
+                  // calls to the same tool land on both calls in the chat.
+                  id: typeof tc.id === 'string' && tc.id ? tc.id : `call_${randomUUID()}`,
                   name: tc.function?.name || 'unknown',
                   arguments: tc.function?.arguments || {}
                 }

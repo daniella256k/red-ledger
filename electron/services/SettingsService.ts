@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, writeFileSync } from 'fs'
+import { copyFileSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
 import type {
   Settings,
   ProviderName,
@@ -82,6 +82,23 @@ function sanitizeCompatibility(
 }
 
 /**
+ * Write to a temp file, then rename it over the target, so a crash or power
+ * loss mid-save can't leave a half-written settings.json (and lost API keys).
+ */
+function writeFileAtomic(path: string, content: string): void {
+  const tempPath = `${path}.tmp`
+  writeFileSync(tempPath, content, 'utf-8')
+  try {
+    renameSync(tempPath, path)
+  } catch {
+    // Windows refuses to replace a file another process holds open (antivirus,
+    // sync clients). Fall back to a direct write rather than failing the save.
+    writeFileSync(path, content, 'utf-8')
+    rmSync(tempPath, { force: true })
+  }
+}
+
+/**
  * Domain service for application settings.
  * Owns load/save/sanitize logic. No Electron imports.
  *
@@ -91,6 +108,8 @@ function sanitizeCompatibility(
 export class SettingsService {
   private settingsPath: string
   private currentSettings: Settings
+  /** Set once a corrupt settings file has been copied aside, so repeat loads don't copy it again. */
+  private keptCorruptCopy = false
 
   constructor(settingsPath: string) {
     this.settingsPath = settingsPath
@@ -108,7 +127,7 @@ export class SettingsService {
 
   save(settings: Settings): Settings {
     const sanitized = sanitizeSettings(settings)
-    writeFileSync(this.settingsPath, JSON.stringify(sanitized, null, 2), 'utf-8')
+    writeFileAtomic(this.settingsPath, JSON.stringify(sanitized, null, 2))
     this.currentSettings = sanitized
     return sanitized
   }
@@ -120,8 +139,19 @@ export class SettingsService {
         const parsed = JSON.parse(raw) as Partial<Settings>
         return sanitizeSettings(parsed)
       }
-    } catch {
-      // Corrupted settings file — use defaults
+    } catch (err) {
+      // Corrupted settings file: use defaults, but keep a copy first, since the
+      // next save overwrites it and it may hold the only copy of API keys.
+      if (!this.keptCorruptCopy) {
+        try {
+          const keptPath = `${this.settingsPath}.corrupt-${Date.now()}`
+          copyFileSync(this.settingsPath, keptPath)
+          this.keptCorruptCopy = true
+          console.warn(`[SettingsService] Could not read settings; kept a copy at ${keptPath}:`, err)
+        } catch {
+          // Nothing more we can do; fall back to defaults.
+        }
+      }
     }
     return sanitizeSettings(undefined)
   }

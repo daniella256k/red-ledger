@@ -1,4 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
 import { ConversationService } from '../ConversationService'
 
 type MigrationHarness = {
@@ -110,6 +113,70 @@ describe('ConversationService schema migrations', () => {
 
     expect(exec).not.toHaveBeenCalled()
     expect(transaction).not.toHaveBeenCalled()
+  })
+
+  describe('backup before the provider migration', () => {
+    const LEGACY_TABLE = `CREATE TABLE conversations (
+      provider TEXT NOT NULL DEFAULT 'openai' CHECK(provider IN ('openai', 'openrouter'))
+    )`
+
+    function backupHarness(dbPath: string) {
+      const order: string[] = []
+      const run = vi.fn((path: string) => order.push(`backup ${path}`))
+      const exec = vi.fn((sql: string) => order.push(sql))
+      const prepare = vi.fn((sql: string) => ({
+        get: () => (sql.includes('sqlite_master') ? { sql: LEGACY_TABLE } : undefined),
+        all: () => (sql.includes('table_info') ? BASE_COLUMNS.map((name) => ({ name })) : []),
+        run
+      }))
+      const service = Object.create(ConversationService.prototype) as unknown as MigrationHarness & { dbPath: string }
+      service.db = { exec, prepare, transaction: (fn: () => void) => fn }
+      service.dbPath = dbPath
+      return { service, run, order, prepare }
+    }
+
+    it('snapshots the database next to it before rebuilding', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'rl-backup-'))
+      try {
+        const { service, run, order, prepare } = backupHarness(join(dir, 'conversations.db'))
+        service.migrateConversationProviderConstraintIfNeeded()
+
+        expect(prepare).toHaveBeenCalledWith('VACUUM INTO ?')
+        expect(run).toHaveBeenCalledWith(join(dir, 'conversations.pre-1.6.0.db'))
+        expect(order.indexOf(`backup ${join(dir, 'conversations.pre-1.6.0.db')}`))
+          .toBeLessThan(order.indexOf('PRAGMA foreign_keys = OFF'))
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('keeps an existing backup and still migrates', () => {
+      const dir = mkdtempSync(join(tmpdir(), 'rl-backup-'))
+      try {
+        writeFileSync(join(dir, 'conversations.pre-1.6.0.db'), 'earlier backup')
+        const { service, run, order } = backupHarness(join(dir, 'conversations.db'))
+        service.migrateConversationProviderConstraintIfNeeded()
+
+        expect(run).not.toHaveBeenCalled()
+        expect(order).toContain('PRAGMA foreign_keys = OFF')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    it('still migrates when the backup fails', () => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const { service, run, order } = backupHarness(join(tmpdir(), 'rl-missing-dir', 'conversations.db'))
+        run.mockImplementation(() => { throw new Error('unable to open database') })
+        service.migrateConversationProviderConstraintIfNeeded()
+
+        expect(warn).toHaveBeenCalled()
+        expect(order).toContain('PRAGMA foreign_keys = OFF')
+      } finally {
+        warn.mockRestore()
+      }
+    })
   })
 
   it('rejects unknown providers in app code', () => {
