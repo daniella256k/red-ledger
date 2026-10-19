@@ -104,7 +104,7 @@
         "AppImage",
         "deb"
       ],
-      "maintainer": "Red Ledger Maintainers <domwxyz@tutamail.com>"
+      "maintainer": "Red Ledger Maintainers <daniella256k@tutamail.com>"
     },
     "nsis": {
       "oneClick": false,
