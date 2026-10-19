@@ -1,4 +1,4 @@
-import { Fragment, useEffect, useState } from 'react'
+import { Fragment, useEffect, useMemo, useState } from 'react'
 import { ChevronDown, ChevronRight, Copy, LogIn, RotateCw, X } from 'lucide-react'
 import type { McpOAuthConfig, McpServerConfig, McpServerStatus, McpToolInfo, McpTransport } from '@/types'
 import {
@@ -423,17 +423,16 @@ interface JsonViewProps {
  */
 function JsonView({ servers, onApply, onClose }: JsonViewProps) {
   const [showSecrets, setShowSecrets] = useState(false)
-  const [text, setText] = useState(() => serializeMcpServersJson(servers, { maskSecrets: true }))
-  const [dirty, setDirty] = useState(false)
+  // The user's edit. Until they start editing, the text follows saved changes
+  // (toggles, edits elsewhere).
+  const [draft, setDraft] = useState<string | null>(null)
   const [errors, setErrors] = useState<string[]>([])
-
-  // Follow saved changes (toggles, edits elsewhere) until the user starts editing.
-  useEffect(() => {
-    if (!dirty) setText(serializeMcpServersJson(servers, { maskSecrets: !showSecrets }))
-  }, [servers, showSecrets, dirty])
+  const savedText = useMemo(() => serializeMcpServersJson(servers, { maskSecrets: !showSecrets }), [servers, showSecrets])
+  const text = draft ?? savedText
+  const dirty = draft !== null
 
   const reset = () => {
-    setDirty(false)
+    setDraft(null)
     setErrors([])
   }
 
@@ -499,8 +498,7 @@ function JsonView({ servers, onApply, onClose }: JsonViewProps) {
       <textarea
         value={text}
         onChange={(e) => {
-          setText(e.target.value)
-          setDirty(true)
+          setDraft(e.target.value)
           setErrors([])
         }}
         rows={12}
@@ -774,12 +772,10 @@ export function McpConnectionsSection({ settings, saveSettings }: SettingsSectio
   /** A just-added server, whose tools open once it connects. */
   const [revealToolsId, setRevealToolsId] = useState<string | null>(null)
 
-  useEffect(() => {
-    if (revealToolsId && statuses[revealToolsId]?.state === 'connected') {
-      setToolsOpenId(revealToolsId)
-      setRevealToolsId(null)
-    }
-  }, [revealToolsId, statuses])
+  if (revealToolsId && statuses[revealToolsId]?.state === 'connected') {
+    setToolsOpenId(revealToolsId)
+    setRevealToolsId(null)
+  }
   const servers = settings.mcpServers
 
   const saveServers = (next: McpServerConfig[]) => saveSettings({ ...settings, mcpServers: next })

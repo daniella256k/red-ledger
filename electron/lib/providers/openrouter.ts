@@ -39,7 +39,7 @@ export class OpenRouterProvider extends OpenAIProvider {
       return models
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      throw new Error(`Failed to list OpenRouter models: ${msg}`)
+      throw new Error(`Failed to list OpenRouter models: ${msg}`, { cause: err })
     }
   }
 }

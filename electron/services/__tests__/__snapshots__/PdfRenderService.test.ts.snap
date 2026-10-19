@@ -1,0 +1,50 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`renderMarkdownToPdf > renders GFM markdown to stable HTML 1`] = `
+"<h1>Heading</h1>
+<p>Some <strong>bold</strong>, <em>italic</em> and <code>code</code>.<br>Next line after a single break.</p>
+<ul>
+<li>tight item</li>
+<li>item with nested list<ul>
+<li>nested one</li>
+<li>nested two</li>
+</ul>
+</li>
+</ul>
+<ol>
+<li>first</li>
+<li>second</li>
+</ol>
+<ul>
+<li><p>loose item one</p>
+</li>
+<li><p>loose item two</p>
+</li>
+<li><p><input disabled="" type="checkbox"> open task</p>
+</li>
+<li><p><input checked="" disabled="" type="checkbox"> done task</p>
+</li>
+</ul>
+<table>
+<thead>
+<tr>
+<th>Name</th>
+<th align="right">Value</th>
+</tr>
+</thead>
+<tbody><tr>
+<td>a</td>
+<td align="right">1</td>
+</tr>
+<tr>
+<td>b</td>
+<td align="right">2</td>
+</tr>
+</tbody></table>
+<blockquote>
+<p>quoted text</p>
+</blockquote>
+<pre><code class="language-ts">const x = 1
+</code></pre>
+<p>Trailing paragraph.</p>"
+`;

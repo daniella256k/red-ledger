@@ -8,32 +8,31 @@ import { Editor } from '../Editor/Editor'
 export function FileViewer() {
   const selectedFilePath = useUIStore((s) => s.selectedFilePath)
   const setSelectedFilePath = useUIStore((s) => s.setSelectedFilePath)
-  const [content, setContent] = useState('')
-  const [isLoading, setIsLoading] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  // The last read, tagged with its path; it is still loading until the tag matches.
+  const [loaded, setLoaded] = useState<{ path: string; content: string; error: string | null } | null>(null)
 
   useEffect(() => {
-    if (!selectedFilePath) {
-      setContent('')
-      setError(null)
-      return
-    }
+    if (!selectedFilePath) return
 
-    setIsLoading(true)
-    setError(null)
-
+    let cancelled = false
     window.redLedger
       .readFile(selectedFilePath)
       .then((text) => {
-        setContent(text)
-        setError(null)
+        if (!cancelled) setLoaded({ path: selectedFilePath, content: text, error: null })
       })
       .catch((err) => {
-        setError(err?.message || 'Failed to read file')
-        setContent('')
+        if (!cancelled) setLoaded({ path: selectedFilePath, content: '', error: err?.message || 'Failed to read file' })
       })
-      .finally(() => setIsLoading(false))
+
+    return () => {
+      cancelled = true
+    }
   }, [selectedFilePath])
+
+  const current = loaded?.path === selectedFilePath ? loaded : null
+  const isLoading = current === null
+  const content = current?.content ?? ''
+  const error = current?.error ?? null
 
   if (!selectedFilePath) return null
 

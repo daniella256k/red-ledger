@@ -1,5 +1,5 @@
 import { existsSync } from 'fs'
-import { v4 as uuidv4 } from 'uuid'
+import { randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
 import type {
@@ -426,7 +426,7 @@ export class ConversationService {
   createConversation(data: Partial<Conversation>): Conversation {
     assertValidProvider(data.provider)
     assertValidProfileId(data.profileId)
-    const id = uuidv4()
+    const id = randomUUID()
     const now = Date.now()
     const profileId = data.profileId !== undefined ? data.profileId : this.getDefaultProfileId()
 
@@ -562,7 +562,7 @@ export class ConversationService {
       created_at: number
     }>
 
-    const forkConversationId = uuidv4()
+    const forkConversationId = randomUUID()
     const now = Date.now()
     const forkTitle = this.buildForkTitle(sourceConversation.title as string)
 
@@ -592,7 +592,7 @@ export class ConversationService {
 
       for (const message of sourceMessages) {
         insertForkMessage.run(
-          uuidv4(),
+          randomUUID(),
           forkConversationId,
           message.role,
           message.content,
@@ -625,7 +625,7 @@ export class ConversationService {
   }
 
   createMessage(data: Omit<Message, 'id' | 'createdAt' | 'timestamp'>): Message {
-    const id = uuidv4()
+    const id = randomUUID()
     const now = Date.now()
     const timestamp = new Date().toISOString()
 

@@ -225,9 +225,9 @@ export class OllamaProvider extends BaseLLMProvider {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('ECONNREFUSED')) {
-        throw new Error('Cannot reach Ollama. Is it running? (ollama serve)')
+        throw new Error('Cannot reach Ollama. Is it running? (ollama serve)', { cause: err })
       }
-      throw new Error(`Failed to list Ollama models: ${msg}`)
+      throw new Error(`Failed to list Ollama models: ${msg}`, { cause: err })
     }
   }
 

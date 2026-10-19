@@ -195,7 +195,7 @@
   }
 
   .pane-divider:hover,
-  .pane-divider[data-resize-handle-active] {
+  .pane-divider[data-separator='active'] {
     @apply bg-rca-red/30;
   }
 

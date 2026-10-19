@@ -19,8 +19,10 @@ export function WorkspaceTree({ compactOpenFolderButton = false }: WorkspaceTree
   const setConversationWorkspace = useConversationStore((s) => s.setConversationWorkspace)
   const settings = useSettingsStore((s) => s.settings)
   const saveSettings = useSettingsStore((s) => s.saveSettings)
-  const [files, setFiles] = useState<FileNode[]>([])
-  const [isLoading, setIsLoading] = useState(false)
+  // The last listing, tagged with the folder and refresh it was made for; it is
+  // still loading until the tag matches.
+  const [listing, setListing] = useState<{ key: string; files: FileNode[] } | null>(null)
+  const listingKey = `${fileTreeVersion}:${workspacePath ?? ''}`
 
   const handleOpenFolder = useCallback(async () => {
     if (!window.redLedger) return
@@ -41,19 +43,23 @@ export function WorkspaceTree({ compactOpenFolderButton = false }: WorkspaceTree
   }, [workspacePath, setSelectedFilePath, setWorkspacePath, settings, saveSettings, activeConversationId, setConversationWorkspace])
 
   useEffect(() => {
-    if (!workspacePath) {
-      setFiles([])
-      return
-    }
+    if (!workspacePath || !window.redLedger) return
 
-    if (!window.redLedger) return
-    setIsLoading(true)
+    let cancelled = false
     window.redLedger
       .listFiles()
-      .then(setFiles)
-      .catch(() => setFiles([]))
-      .finally(() => setIsLoading(false))
-  }, [workspacePath, fileTreeVersion])
+      .catch(() => [] as FileNode[])
+      .then((nodes) => {
+        if (!cancelled) setListing({ key: listingKey, files: nodes })
+      })
+
+    return () => {
+      cancelled = true
+    }
+  }, [workspacePath, listingKey])
+
+  const files = workspacePath ? listing?.files ?? [] : []
+  const isLoading = Boolean(workspacePath && window.redLedger) && listing?.key !== listingKey
 
   return (
     <div className="h-full flex flex-col">

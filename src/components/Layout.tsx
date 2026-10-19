@@ -1,5 +1,5 @@
-import { useCallback, useRef, useState } from 'react'
-import { Panel, PanelGroup, PanelResizeHandle, type ImperativePanelHandle } from 'react-resizable-panels'
+import { useCallback, useState } from 'react'
+import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels'
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './Chat/ChatPanel'
 import { ContextPanel } from './Context/ContextPanel'
@@ -25,7 +25,7 @@ function SidebarTriangle({ direction }: SidebarTriangleProps) {
 }
 
 export function Layout() {
-  const contextPanelRef = useRef<ImperativePanelHandle>(null)
+  const contextPanelRef = usePanelRef()
   const [isContextCollapsed, setIsContextCollapsed] = useState(false)
 
   const toggleContextPanel = useCallback(() => {
@@ -37,25 +37,25 @@ export function Layout() {
     } else {
       panel.collapse()
     }
-  }, [])
+  }, [contextPanelRef])
 
   const contextToggleLabel = isContextCollapsed ? 'Expand context sidebar' : 'Collapse context sidebar'
 
   return (
-    <PanelGroup direction="horizontal" className="h-full w-full">
+    <Group className="h-full w-full">
       {/* Left Sidebar */}
-      <Panel defaultSize={20} minSize={15} maxSize={30}>
+      <Panel defaultSize="20%" minSize="15%" maxSize="30%">
         <Sidebar />
       </Panel>
 
-      <PanelResizeHandle className="pane-divider w-1" />
+      <Separator className="pane-divider w-1" />
 
       {/* Center Chat */}
-      <Panel defaultSize={50} minSize={30}>
+      <Panel defaultSize="50%" minSize="30%">
         <ChatPanel />
       </Panel>
 
-      <PanelResizeHandle className="pane-divider relative w-1 overflow-visible">
+      <Separator className="pane-divider relative w-1 overflow-visible">
         <button
           type="button"
           onClick={toggleContextPanel}
@@ -69,22 +69,21 @@ export function Layout() {
         >
           <SidebarTriangle direction={isContextCollapsed ? 'left' : 'right'} />
         </button>
-      </PanelResizeHandle>
+      </Separator>
 
       {/* Right Context */}
       <Panel
-        ref={contextPanelRef}
-        defaultSize={30}
-        minSize={20}
-        maxSize={40}
+        panelRef={contextPanelRef}
+        defaultSize="30%"
+        minSize="20%"
+        maxSize="40%"
         collapsible
-        collapsedSize={0}
+        collapsedSize="0%"
         className="overflow-hidden"
-        onCollapse={() => setIsContextCollapsed(true)}
-        onExpand={() => setIsContextCollapsed(false)}
+        onResize={() => setIsContextCollapsed(contextPanelRef.current?.isCollapsed() ?? false)}
       >
         <ContextPanel />
       </Panel>
-    </PanelGroup>
+    </Group>
   )
 }

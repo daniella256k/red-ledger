@@ -409,7 +409,7 @@ export async function startOAuthCallbackServer(options: CallbackServerOptions): 
     } catch (err) {
       throw new Error((err as NodeJS.ErrnoException).code === 'EADDRINUSE'
         ? `Port ${options.requiredPort} is in use, and this connection's sign-in needs it. Close whatever is using it and try again.`
-        : `Could not open the sign-in callback on port ${options.requiredPort}: ${(err as Error).message}`)
+        : `Could not open the sign-in callback on port ${options.requiredPort}: ${(err as Error).message}`, { cause: err })
     }
   } else {
     port = await (options.preferredPort ? listen(options.preferredPort).catch(() => listen(0)) : listen(0))

@@ -415,7 +415,7 @@ export class OpenAIProvider extends BaseLLMProvider {
     onChunk: (chunk: StreamChunk) => void
   ): void {
     for (const [, tc] of pending) {
-      let parsedArgs: Record<string, unknown> = {}
+      let parsedArgs: Record<string, unknown>
       try {
         parsedArgs = JSON.parse(tc.arguments)
       } catch {
@@ -448,7 +448,7 @@ export class OpenAIProvider extends BaseLLMProvider {
       return models
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
-      throw new Error(`Failed to list models: ${msg}`)
+      throw new Error(`Failed to list models: ${msg}`, { cause: err })
     }
   }
 

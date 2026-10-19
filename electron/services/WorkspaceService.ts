@@ -283,7 +283,7 @@ export class WorkspaceService {
       if (documentText !== null) return documentText
     } catch (err) {
       if (err instanceof DocumentExtractionError) {
-        throw new Error(`Could not extract text from ${relativePath}: ${err.message}`)
+        throw new Error(`Could not extract text from ${relativePath}: ${err.message}`, { cause: err })
       }
       throw err
     }

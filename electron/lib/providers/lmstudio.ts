@@ -228,9 +228,9 @@ class LMStudioNativeProvider extends BaseLLMProvider {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('ECONNREFUSED')) {
-        throw new Error('Cannot reach LM Studio. Is its local server running?')
+        throw new Error('Cannot reach LM Studio. Is its local server running?', { cause: err })
       }
-      throw new Error(`Failed to list LM Studio models: ${msg}`)
+      throw new Error(`Failed to list LM Studio models: ${msg}`, { cause: err })
     }
   }
 

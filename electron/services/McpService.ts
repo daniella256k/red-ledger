@@ -595,7 +595,7 @@ export class McpService {
         } catch (sseErr) {
           const first = err instanceof Error ? err.message : String(err)
           const second = sseErr instanceof Error ? sseErr.message : String(sseErr)
-          throw new Error(`${first}\nLegacy SSE also failed: ${second}`)
+          throw new Error(`${first}\nLegacy SSE also failed: ${second}`, { cause: sseErr })
         }
       }
       if (connection.retired) return

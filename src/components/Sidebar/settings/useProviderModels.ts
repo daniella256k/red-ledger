@@ -2,6 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { Settings } from '@/types'
 import { resolveProviderModel } from './providerDefaults'
 
+const NO_MODELS: string[] = []
+
 export interface ProviderModelsState {
   models: string[]
   modelsLoading: boolean
@@ -18,10 +20,10 @@ export function useProviderModels(
   settings: Settings | null,
   saveSettings: (settings: Settings) => void
 ): ProviderModelsState {
-  const [models, setModels] = useState<string[]>([])
-  const [modelsLoading, setModelsLoading] = useState(false)
-  const [modelsFetchFailed, setModelsFetchFailed] = useState(false)
   const [modelsRefreshNonce, setModelsRefreshNonce] = useState(0)
+  // The last fetch, tagged with the request it answers; until the tag matches
+  // the current request, the list is loading.
+  const [fetched, setFetched] = useState<{ key: string; models: string[]; failed: boolean } | null>(null)
   const lastSyncedModelFetchKeyRef = useRef('')
   const activeProviderConfig = settings
     ? settings.providers[settings.activeProvider]
@@ -30,6 +32,12 @@ export function useProviderModels(
     ? `${settings.activeProvider}|${activeProviderConfig.baseUrl}|${activeProviderConfig.apiKey}|${activeProviderConfig.compatibility || ''}`
     : ''
   const refreshModels = () => setModelsRefreshNonce((n) => n + 1)
+  const requestKey = `${modelsRefreshNonce}|${modelFetchKey}`
+  const canFetch = Boolean(settings && window.redLedger)
+  const current = fetched?.key === requestKey ? fetched : null
+  const models = current?.models ?? NO_MODELS
+  const modelsLoading = canFetch && current === null
+  const modelsFetchFailed = current?.failed ?? false
 
   // Fetch models when provider identity/config changes.
   useEffect(() => {
@@ -37,10 +45,6 @@ export function useProviderModels(
     let cancelled = false
     const didConfigChange = lastSyncedModelFetchKeyRef.current !== modelFetchKey
     lastSyncedModelFetchKeyRef.current = modelFetchKey
-
-    setModels([])
-    setModelsFetchFailed(false)
-    setModelsLoading(true)
 
     const timer = setTimeout(() => {
       ;(async () => {
@@ -50,16 +54,10 @@ export function useProviderModels(
         return window.redLedger.listModels(settings.activeProvider)
       })()
         .then((list) => {
-          if (cancelled) return
-          setModels(list)
-          setModelsFetchFailed(false)
+          if (!cancelled) setFetched({ key: requestKey, models: list, failed: false })
         })
         .catch(() => {
-          if (cancelled) return
-          setModelsFetchFailed(true)
-        })
-        .finally(() => {
-          if (!cancelled) setModelsLoading(false)
+          if (!cancelled) setFetched({ key: requestKey, models: NO_MODELS, failed: true })
         })
     }, 250)
 
@@ -68,7 +66,7 @@ export function useProviderModels(
       clearTimeout(timer)
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [modelFetchKey, settings?.activeProvider, modelsRefreshNonce])
+  }, [requestKey])
 
   // Keep the active provider's selected model sane relative to the latest list.
   useEffect(() => {

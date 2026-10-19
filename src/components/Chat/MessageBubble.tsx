@@ -234,14 +234,11 @@ export function MessageBubble({
 
   const showCollapsedAssistantMessage = canCollapseAssistantMessage && isCollapsed
 
-  useEffect(() => {
-    if (!canCollapseAssistantMessage && isCollapsed) {
-      setIsCollapsed(false)
-    }
-    if (!canCollapseAssistantMessage && isCollapseToggleHovered) {
-      setIsCollapseToggleHovered(false)
-    }
-  }, [canCollapseAssistantMessage, isCollapsed, isCollapseToggleHovered])
+  // A message that can no longer collapse (e.g. it is streaming again) drops its collapse state.
+  if (!canCollapseAssistantMessage && (isCollapsed || isCollapseToggleHovered)) {
+    setIsCollapsed(false)
+    setIsCollapseToggleHovered(false)
+  }
 
   // ─── Actions ───────────────────────────────────────────────────────────────
 

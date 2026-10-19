@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState, useTransition } from 'react'
 import { Check, Pencil, Plus, Trash2, X } from 'lucide-react'
 import { formatError } from '@/lib/errors'
 import { useContextProfileStore, useConversationStore, useUIStore } from '@/store'
@@ -27,8 +27,9 @@ export function ContextPanel() {
       ? s.draft?.profileId ?? null
       : s.conversations.find((c) => c.id === s.activeConversationId)?.profileId ?? null
   )
-  const [isLoadingProfiles, setIsLoadingProfiles] = useState(true)
+  const [isLoadingProfiles, setIsLoadingProfiles] = useState(() => Boolean(window.redLedger))
   const [isUpdatingProfile, setIsUpdatingProfile] = useState(false)
+  const [isSyncingChatProfile, startChatProfileSync] = useTransition()
   // The inline name form under the header, for a new profile or renaming the selected one.
   const [profileFormMode, setProfileFormMode] = useState<'create' | 'rename' | null>(null)
   const [profileNameDraft, setProfileNameDraft] = useState('')
@@ -36,14 +37,9 @@ export function ContextPanel() {
   const [headerWidth, setHeaderWidth] = useState<number | null>(null)
 
   useEffect(() => {
-    if (!window.redLedger) {
-      setIsLoadingProfiles(false)
-      return
-    }
+    if (!window.redLedger) return
 
     let cancelled = false
-    setIsLoadingProfiles(true)
-
     window.redLedger.listContextProfiles()
       .then((state) => {
         if (cancelled) return
@@ -79,18 +75,17 @@ export function ContextPanel() {
     if (!knownProfiles.some((profile) => profile.id === conversationProfileId)) return
 
     let cancelled = false
-    setIsUpdatingProfile(true)
-    window.redLedger.setActiveContextProfile(conversationProfileId)
-      .then((next) => {
+    startChatProfileSync(async () => {
+      try {
+        const next = await window.redLedger.setActiveContextProfile(conversationProfileId)
         if (!cancelled) applyProfileState(next)
-      })
-      .catch((err) => {
+      } catch (err) {
         useUIStore.getState().addToast({
           type: 'error',
           message: formatError(err)
         })
-      })
-      .finally(() => setIsUpdatingProfile(false))
+      }
+    })
 
     return () => {
       cancelled = true
@@ -128,9 +123,11 @@ export function ContextPanel() {
   }, [])
 
   // A rename is for the profile that was selected when it started.
-  useEffect(() => {
-    setProfileFormMode((mode) => (mode === 'rename' ? null : mode))
-  }, [activeProfileId])
+  const [formProfileId, setFormProfileId] = useState(activeProfileId)
+  if (formProfileId !== activeProfileId) {
+    setFormProfileId(activeProfileId)
+    if (profileFormMode === 'rename') setProfileFormMode(null)
+  }
 
   const handleSubmitProfileForm = useCallback(async () => {
     if (!window.redLedger || !profileFormMode) return
@@ -161,7 +158,7 @@ export function ContextPanel() {
     }
   }, [activeProfileId, applyProfileState, profileFormMode, profileNameDraft, resetProfileForm])
 
-  const profileControlsDisabled = isLoadingProfiles || isUpdatingProfile
+  const profileControlsDisabled = isLoadingProfiles || isUpdatingProfile || isSyncingChatProfile
   const activeProfile = profileState.profiles.find((profile) => profile.id === profileState.activeProfileId) || null
   const canDeleteActiveProfile = activeProfile?.id !== 'default'
   const showProfileLabel = headerWidth === null || headerWidth >= HIDE_PROFILE_LABEL_BREAKPOINT

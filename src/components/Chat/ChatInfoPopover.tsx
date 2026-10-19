@@ -101,9 +101,11 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
   }, [isOpen])
 
   // Close when switching chats.
-  useEffect(() => {
+  const [openedForId, setOpenedForId] = useState(conversation.id)
+  if (openedForId !== conversation.id) {
+    setOpenedForId(conversation.id)
     setIsOpen(false)
-  }, [conversation.id])
+  }
 
   const stats = useMemo(() => {
     if (!isOpen) return null
