@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { CircleHelp, RotateCw, X } from 'lucide-react'
-import type { McpServerConfig, McpServerStatus, McpTransport, Settings } from '@/types'
+import { RotateCw, X } from 'lucide-react'
+import type { McpServerConfig, McpServerStatus, McpTransport } from '@/types'
 import {
   formatKeyValueLines,
   joinCommandLine,
@@ -10,9 +10,8 @@ import {
 } from '@/lib/mcpConfig'
 import { notify } from '@/lib/notify'
 import { useSettingsStore } from '@/store'
+import { HelpIcon, LABEL_CLASS, SMALL_BUTTON_CLASS, type SettingsSectionProps } from './controls'
 
-const LABEL_CLASS = 'text-[11px] font-medium text-soft-charcoal/60 mb-1 block uppercase tracking-wide'
-const SMALL_BUTTON_CLASS = 'btn btn-ghost btn-xs h-6 min-h-0 px-2 text-[10px] uppercase tracking-wide'
 const TEXTAREA_CLASS = 'textarea textarea-bordered w-full bg-base-100 text-xs leading-snug min-h-0 px-3 py-1.5'
 
 function newServerId(): string {
@@ -42,18 +41,6 @@ function useMcpStatuses(): Record<string, McpServerStatus> {
   }, [])
 
   return statuses
-}
-
-function HelpIcon({ title, label }: { title: string; label: string }) {
-  return (
-    <span
-      className="text-soft-charcoal/40 hover:text-soft-charcoal/60 cursor-help"
-      title={title}
-      aria-label={label}
-    >
-      <CircleHelp size={12} />
-    </span>
-  )
 }
 
 // ─── Server form (add / edit) ───────────────────────────────────────────────
@@ -395,16 +382,11 @@ function ServerRow({ server, status, onToggle, onEdit, onRemove }: ServerRowProp
 
 type Mode = { kind: 'idle' } | { kind: 'add' } | { kind: 'paste' } | { kind: 'edit'; id: string }
 
-interface McpConnectionsSectionProps {
-  settings: Settings
-  saveSettings: (settings: Settings) => void
-}
-
 /**
  * Body of the "Connections" settings section: MCP servers whose tools the
  * assistant can call. The collapsible header lives in SettingsPanel.
  */
-export function McpConnectionsSection({ settings, saveSettings }: McpConnectionsSectionProps) {
+export function McpConnectionsSection({ settings, saveSettings }: SettingsSectionProps) {
   const statuses = useMcpStatuses()
   const [mode, setMode] = useState<Mode>({ kind: 'idle' })
   const servers = settings.mcpServers

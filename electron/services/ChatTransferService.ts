@@ -6,7 +6,7 @@ import type {
   ProviderName
 } from '../../src/types'
 import type { ConversationService } from './ConversationService'
-import { isProviderName } from '../../src/lib/providers'
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
 
 export type ChatExportFormat = 'markdown' | 'xml'
 
@@ -296,11 +296,11 @@ function parseChatXml(source: string): ParsedChat {
   }
 
   const title = textOf(findChild(conversationNode, 'title'))?.trim() || 'Imported Chat'
-  const model = textOf(findChild(conversationNode, 'model'))?.trim() || 'gpt-4'
-  const providerRaw = textOf(findChild(conversationNode, 'provider'))?.trim() || 'openai'
+  const model = textOf(findChild(conversationNode, 'model'))?.trim() || DEFAULT_MODEL
+  const providerRaw = textOf(findChild(conversationNode, 'provider'))?.trim() || DEFAULT_PROVIDER
   const provider: ProviderName = isProviderName(providerRaw)
     ? providerRaw
-    : 'openai'
+    : DEFAULT_PROVIDER
   const workspacePathRaw = textOf(findChild(conversationNode, 'workspacePath'))
   const workspacePath = workspacePathRaw && workspacePathRaw.trim().length > 0
     ? workspacePathRaw.trim()

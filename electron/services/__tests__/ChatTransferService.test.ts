@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import type { Conversation, Message } from '../../../src/types'
+import { DEFAULT_PROVIDER } from '../../../src/lib/providers'
 import { ChatTransferService } from '../ChatTransferService'
 import type { ConversationService } from '../ConversationService'
 
@@ -207,7 +208,7 @@ describe('ChatTransferService', () => {
 
     service.importFromXml(xml)
 
-    expect(state.newConversations[0]).toMatchObject({ provider: 'openai' })
+    expect(state.newConversations[0]).toMatchObject({ provider: DEFAULT_PROVIDER })
   })
 
   it('rejects XML missing the redLedgerChat root', () => {

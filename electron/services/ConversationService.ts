@@ -1,6 +1,6 @@
 import { v4 as uuidv4 } from 'uuid'
 import type Database from 'better-sqlite3'
-import { isProviderName } from '../../src/lib/providers'
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
 import type {
   Attachment,
   Conversation,
@@ -73,6 +73,7 @@ export class ConversationService {
   private db: Database.Database
   private statements: Map<string, Database.Statement> = new Map()
   private getDefaultProfileId: () => string | null
+  private messageSearchIndexed = false
 
   constructor(dbPath: string, options: ConversationServiceOptions = {}) {
     this.getDefaultProfileId = options.getDefaultProfileId ?? (() => null)
@@ -92,8 +93,8 @@ export class ConversationService {
       CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
         title TEXT NOT NULL DEFAULT 'New Chat',
-        model TEXT NOT NULL DEFAULT 'gpt-4',
-        provider TEXT NOT NULL DEFAULT 'openai',
+        model TEXT NOT NULL DEFAULT '${DEFAULT_MODEL}',
+        provider TEXT NOT NULL DEFAULT '${DEFAULT_PROVIDER}',
         is_pinned INTEGER NOT NULL DEFAULT 0,
         created_at INTEGER NOT NULL,
         updated_at INTEGER NOT NULL,
@@ -129,6 +130,55 @@ export class ConversationService {
        CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
        CREATE INDEX IF NOT EXISTS idx_conversations_pinned_updated ON conversations(is_pinned DESC, updated_at DESC);`
     )
+
+    this.messageSearchIndexed = this.ensureMessageSearchIndex()
+  }
+
+  /**
+   * Full-text index over message content, kept in sync by triggers. The
+   * trigram tokenizer matches any substring of 3+ characters, case-insensitively,
+   * so search behaves like the old LIKE '%query%' scan without reading every row.
+   * Returns false (search falls back to LIKE) if this SQLite build lacks FTS5 trigram.
+   */
+  private ensureMessageSearchIndex(): boolean {
+    const existing = this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'")
+      .get()
+
+    try {
+      this.db.transaction(() => {
+        this.db.exec(`
+          CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
+            content,
+            content='messages',
+            content_rowid='rowid',
+            tokenize='trigram'
+          );
+
+          CREATE TRIGGER IF NOT EXISTS messages_fts_insert AFTER INSERT ON messages BEGIN
+            INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS messages_fts_delete AFTER DELETE ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+          END;
+
+          CREATE TRIGGER IF NOT EXISTS messages_fts_update AFTER UPDATE OF content ON messages BEGIN
+            INSERT INTO messages_fts(messages_fts, rowid, content) VALUES ('delete', old.rowid, old.content);
+            INSERT INTO messages_fts(rowid, content) VALUES (new.rowid, new.content);
+          END;
+        `)
+
+        // First run on a database with existing history: index what is already there.
+        if (!existing) {
+          this.db.exec("INSERT INTO messages_fts(messages_fts) VALUES ('rebuild')")
+        }
+      })()
+      return true
+    } catch (err) {
+      console.warn('[ConversationService] Message search index unavailable, using LIKE search:', err)
+      return false
+    }
   }
 
   /**
@@ -173,8 +223,8 @@ export class ConversationService {
           CREATE TABLE conversations_new (
             id TEXT PRIMARY KEY,
             title TEXT NOT NULL DEFAULT 'New Chat',
-            model TEXT NOT NULL DEFAULT 'gpt-4',
-            provider TEXT NOT NULL DEFAULT 'openai',
+            model TEXT NOT NULL DEFAULT '${DEFAULT_MODEL}',
+            provider TEXT NOT NULL DEFAULT '${DEFAULT_PROVIDER}',
             is_pinned INTEGER NOT NULL DEFAULT 0,
             created_at INTEGER NOT NULL,
             updated_at INTEGER NOT NULL,
@@ -304,6 +354,27 @@ export class ConversationService {
     const escaped = trimmed.replace(/[\\%_]/g, (ch) => `\\${ch}`)
     const pattern = `%${escaped}%`
 
+    // Trigrams need at least 3 characters; shorter queries scan with LIKE.
+    if (this.messageSearchIndexed && [...trimmed].length >= 3) {
+      // A quoted FTS5 phrase is matched literally; quotes inside are doubled.
+      const phrase = `"${trimmed.replace(/"/g, '""')}"`
+      const rows = this.stmt(
+        'searchConversationsIndexed',
+        `SELECT c.*
+           FROM conversations c
+          WHERE c.title LIKE ? ESCAPE '\\'
+             OR c.id IN (
+               SELECT m.conversation_id
+                 FROM messages_fts
+                 JOIN messages m ON m.rowid = messages_fts.rowid
+                WHERE messages_fts MATCH ?
+             )
+          ORDER BY c.is_pinned DESC, c.updated_at DESC`
+      ).all(pattern, phrase) as Record<string, unknown>[]
+
+      return rows.map(r => this.toConversation(r))
+    }
+
     const rows = this.stmt(
       'searchConversations',
       `SELECT c.*
@@ -343,8 +414,8 @@ export class ConversationService {
     ).run(
       id,
       data.title || 'New Chat',
-      data.model || 'gpt-4',
-      data.provider || 'openai',
+      data.model || DEFAULT_MODEL,
+      data.provider || DEFAULT_PROVIDER,
       data.isPinned ? 1 : 0,
       now,
       now,

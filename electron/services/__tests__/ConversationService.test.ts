@@ -236,7 +236,7 @@ describe('ConversationService request metadata', () => {
   const requestInfo = {
     sentAt: '2026-01-01T00:00:00.000Z',
     provider: 'openrouter' as const,
-    model: 'moonshotai/kimi-k2.5',
+    model: 'moonshotai/kimi-k3',
     temperature: null,
     maxTokens: 4096,
     reasoningEnabled: true,
@@ -402,5 +402,47 @@ describe('ConversationService context profile', () => {
     const insert = runs.find((run) => run.key === 'createForkConversation')
     expect(insert?.args[9]).toBe('campaign-a')
     expect(fork.profileId).toBe('campaign-a')
+  })
+})
+
+describe('ConversationService search', () => {
+  type SearchHarness = DatabaseHarness & { messageSearchIndexed: boolean }
+
+  const searchConversations = ConversationService.prototype.searchConversations as (
+    this: SearchHarness,
+    query: string
+  ) => ReturnType<ConversationService['searchConversations']>
+
+  function searchHarness(indexed: boolean) {
+    const all = vi.fn((): Record<string, unknown>[] => [])
+    const stmt = vi.fn((_key: string, _sql: string) => ({ all }))
+    const service = Object.create(ConversationService.prototype) as SearchHarness
+    service.stmt = stmt
+    service.messageSearchIndexed = indexed
+    return { service, stmt, all }
+  }
+
+  it('matches message content through the FTS index as a quoted phrase', () => {
+    const { service, stmt, all } = searchHarness(true)
+    searchConversations.call(service, '  say "hello" 100%  ')
+
+    expect(stmt.mock.calls[0][0]).toBe('searchConversationsIndexed')
+    expect(stmt.mock.calls[0][1]).toContain('messages_fts MATCH ?')
+    expect(all).toHaveBeenCalledWith('%say "hello" 100\\%%', '"say ""hello"" 100%"')
+  })
+
+  it('falls back to LIKE for queries shorter than a trigram', () => {
+    const { service, stmt, all } = searchHarness(true)
+    searchConversations.call(service, 'ab')
+
+    expect(stmt.mock.calls[0][0]).toBe('searchConversations')
+    expect(all).toHaveBeenCalledWith('%ab%', '%ab%')
+  })
+
+  it('falls back to LIKE when the index is unavailable', () => {
+    const { service, stmt } = searchHarness(false)
+    searchConversations.call(service, 'organizing')
+
+    expect(stmt.mock.calls[0][0]).toBe('searchConversations')
   })
 })

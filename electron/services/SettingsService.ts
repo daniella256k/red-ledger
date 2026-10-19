@@ -11,12 +11,10 @@ import {
   sanitizeStringArray,
   sanitizeStringRecord
 } from '../../src/lib/mcpConfig'
-import { PROVIDER_NAMES, isProviderName } from '../../src/lib/providers'
-
-const DEFAULT_FALLBACK_MODEL = 'moonshotai/kimi-k2.5'
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROVIDER_NAMES, isProviderName } from '../../src/lib/providers'
 
 const DEFAULT_SETTINGS: Settings = {
-  activeProvider: 'openrouter',
+  activeProvider: DEFAULT_PROVIDER,
   providers: {
     openai: {
       apiKey: '',
@@ -27,7 +25,7 @@ const DEFAULT_SETTINGS: Settings = {
       apiKey: '',
       baseUrl: 'https://openrouter.ai/api/v1',
       models: [],
-      selectedModel: DEFAULT_FALLBACK_MODEL
+      selectedModel: DEFAULT_MODEL
     },
     ollama: {
       apiKey: '',
@@ -46,7 +44,7 @@ const DEFAULT_SETTINGS: Settings = {
       models: []
     }
   },
-  defaultModel: DEFAULT_FALLBACK_MODEL,
+  defaultModel: DEFAULT_MODEL,
   reasoningEnabled: true,
   temperatureEnabled: false,
   temperature: 1.0,

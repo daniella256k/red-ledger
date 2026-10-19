@@ -1,5 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect } from 'vitest'
+import { DEFAULT_MODEL } from '../../../src/lib/providers'
 import { sanitizeSettings } from '../SettingsService'
 
 describe('sanitizeSettings', () => {
@@ -15,8 +16,8 @@ describe('sanitizeSettings', () => {
     expect(result.darkMode).toBe(false)
     expect(result.orgSite).toBe('')
     expect(result.searchToolsEnabled).toBe(true)
-    expect(result.defaultModel).toBe('moonshotai/kimi-k2.5')
-    expect(result.providers.openrouter.selectedModel).toBe('moonshotai/kimi-k2.5')
+    expect(result.defaultModel).toBe(DEFAULT_MODEL)
+    expect(result.providers.openrouter.selectedModel).toBe(DEFAULT_MODEL)
     expect(result.providerSectionExpanded).toBe(true)
     expect(result.searchSectionExpanded).toBe(true)
     expect(result.advancedSectionExpanded).toBe(false)
@@ -33,7 +34,7 @@ describe('sanitizeSettings', () => {
     expect(result.providers.ollama.baseUrl).toBe('http://localhost:11434')
     expect(result.providers.lmstudio.baseUrl).toBe('http://localhost:1234')
     expect(result.providers.lmstudio.compatibility).toBe('openai')
-    expect(result.providers.openrouter.selectedModel).toBe('moonshotai/kimi-k2.5')
+    expect(result.providers.openrouter.selectedModel).toBe(DEFAULT_MODEL)
     expect(result.searchToolsEnabled).toBe(true)
     expect(result.providerSectionExpanded).toBe(true)
     expect(result.searchSectionExpanded).toBe(true)
