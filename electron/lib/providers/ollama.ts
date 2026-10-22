@@ -123,7 +123,8 @@ export class OllamaProvider extends BaseLLMProvider {
       messages: ollamaMessages,
       stream: true,
       options: {
-        temperature: temperature ?? 0.7,
+        // Left out unless set, so the model's own default applies.
+        ...(temperature !== undefined ? { temperature } : {}),
         // Ollama's name for the output token limit.
         ...(maxTokens ? { num_predict: maxTokens } : {})
       }

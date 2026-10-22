@@ -5,24 +5,7 @@ import { selectComposer } from '@/store/conversationStore'
 import type { useStreaming } from '@/hooks/useStreaming'
 import { ContextMeter } from './ContextMeter'
 import type { ImageAttachment, ImageAttachmentMimeType } from '@/types'
-
-const SUPPORTED_PASTED_IMAGE_MIME_TYPES = new Set<ImageAttachmentMimeType>([
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'image/gif'
-])
-
-const IMAGE_EXTENSION_BY_MIME_TYPE: Record<ImageAttachmentMimeType, string> = {
-  'image/png': 'png',
-  'image/jpeg': 'jpg',
-  'image/webp': 'webp',
-  'image/gif': 'gif'
-}
-
-function isSupportedPastedImageMimeType(value: string): value is ImageAttachmentMimeType {
-  return SUPPORTED_PASTED_IMAGE_MIME_TYPES.has(value as ImageAttachmentMimeType)
-}
+import { IMAGE_EXTENSION_BY_MIME_TYPE, isImageMimeType } from '@/lib/attachments'
 
 function getClipboardImageFiles(event: React.ClipboardEvent<HTMLTextAreaElement>): File[] {
   return Array
@@ -50,7 +33,7 @@ function blobToDataUrl(blob: Blob): Promise<string> {
 }
 
 async function normalizePastedImage(file: File): Promise<{ blob: Blob; mimeType: ImageAttachmentMimeType } | null> {
-  if (isSupportedPastedImageMimeType(file.type)) {
+  if (isImageMimeType(file.type)) {
     return {
       blob: file,
       mimeType: file.type

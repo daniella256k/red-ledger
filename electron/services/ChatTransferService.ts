@@ -1,22 +1,14 @@
 import type {
   Attachment,
   Conversation,
-  ImageAttachmentMimeType,
   Message,
   ProviderName
 } from '../../src/types'
 import type { ConversationService } from './ConversationService'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
+import { isImageMimeType } from '../../src/lib/attachments'
 
 export type ChatExportFormat = 'markdown' | 'xml'
-
-
-const SUPPORTED_IMAGE_MIME_TYPES: ReadonlySet<ImageAttachmentMimeType> = new Set([
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'image/gif'
-])
 
 export interface ImportedConversation {
   conversation: Conversation
@@ -385,15 +377,13 @@ function parseAttachmentNode(node: XmlNode): Attachment | null {
 
   if (kind === 'image') {
     const mimeRaw = node.attrs.mimeType
-    if (!mimeRaw || !SUPPORTED_IMAGE_MIME_TYPES.has(mimeRaw as ImageAttachmentMimeType)) {
-      return null
-    }
+    if (!isImageMimeType(mimeRaw)) return null
     const dataUrl = textOf(findChild(node, 'dataUrl'))
     if (!dataUrl) return null
     return {
       kind: 'image',
       name,
-      mimeType: mimeRaw as ImageAttachmentMimeType,
+      mimeType: mimeRaw,
       dataUrl
     }
   }

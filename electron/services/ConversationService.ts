@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
-import { BLOB_ID_PATTERN } from '../../src/lib/attachments'
+import { BLOB_ID_PATTERN, isImageMimeType } from '../../src/lib/attachments'
 import type {
   Attachment,
   ChatStorageInfo,
@@ -15,13 +15,6 @@ import type {
   SelectBranchOptions,
   StoredImageInfo
 } from '../../src/types'
-
-const SUPPORTED_IMAGE_MIME_TYPES = new Set<ImageAttachmentMimeType>([
-  'image/png',
-  'image/jpeg',
-  'image/webp',
-  'image/gif'
-])
 
 function parseRequestInfo(value: unknown): ConversationRequestInfo | null {
   if (typeof value !== 'string' || value.length === 0) return null
@@ -42,13 +35,11 @@ function parseAttachment(value: unknown): Attachment | null {
   if (typeof record.name !== 'string') return null
 
   if (record.kind === 'image') {
-    if (typeof record.mimeType !== 'string' || !SUPPORTED_IMAGE_MIME_TYPES.has(record.mimeType as ImageAttachmentMimeType)) {
-      return null
-    }
+    if (!isImageMimeType(record.mimeType)) return null
     const image: ImageAttachment = {
       kind: 'image',
       name: record.name,
-      mimeType: record.mimeType as ImageAttachmentMimeType,
+      mimeType: record.mimeType,
       ...(typeof record.size === 'number' ? { size: record.size } : {})
     }
     if (record.removed === true) return { ...image, removed: true }
@@ -1228,7 +1219,7 @@ export class ConversationService {
         image = {
           blobId: row.blob_id,
           name: typeof record.name === 'string' ? record.name : 'image',
-          mimeType: (typeof record.mimeType === 'string' ? record.mimeType : row.mime_type) as ImageAttachmentMimeType,
+          mimeType: isImageMimeType(record.mimeType) ? record.mimeType : row.mime_type as ImageAttachmentMimeType,
           bytes: row.size,
           firstSentAt: row.created_at,
           lastChatActivityAt: row.updated_at,

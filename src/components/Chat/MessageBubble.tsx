@@ -2,7 +2,7 @@ import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { ChevronDown, ChevronUp, Paperclip } from 'lucide-react'
-import type { Attachment, Message, ToolCall } from '@/types'
+import type { Attachment, ImageAttachment, Message, ToolCall } from '@/types'
 import { ToolCallCard } from './ToolCallCard'
 import { imageSrc } from '@/lib/attachments'
 import {
@@ -52,8 +52,23 @@ const ASSISTANT_COLLAPSE_MIN_CHARS = 500
 const ASSISTANT_COLLAPSE_PREVIEW_CHARS = 180
 const ASSISTANT_COLLAPSE_PREVIEW_MAX_BLOCKS = 3
 
-function isImageAttachment(attachment: Attachment): attachment is Extract<Attachment, { kind: 'image' }> {
+function isImageAttachment(attachment: Attachment): attachment is ImageAttachment {
   return attachment.kind === 'image'
+}
+
+/** An attached image, or a note in its place once it was removed to free space. */
+function AttachmentImage({ image }: { image: ImageAttachment }) {
+  const src = imageSrc(image)
+  if (!src) return <p className="m-0 text-xs text-soft-charcoal/50">Image removed to free space.</p>
+
+  return (
+    <img
+      src={src}
+      alt={image.name}
+      className="block max-w-full max-h-[260px] rounded-sm border border-weathered object-contain bg-base-100"
+      loading="lazy"
+    />
+  )
 }
 
 /**
@@ -389,16 +404,7 @@ export function MessageBubble({
                   </summary>
                   {isImageAttachment(a) ? (
                     <div className="mt-1 p-2 bg-base-200/60 rounded-sm max-w-[320px]">
-                      {imageSrc(a) ? (
-                        <img
-                          src={imageSrc(a)!}
-                          alt={a.name}
-                          className="block max-w-full max-h-[260px] rounded-sm border border-weathered object-contain bg-base-100"
-                          loading="lazy"
-                        />
-                      ) : (
-                        <p className="m-0 text-xs text-soft-charcoal/50">Image removed to free space.</p>
-                      )}
+                      <AttachmentImage image={a} />
                     </div>
                   ) : (
                     <pre className="whitespace-pre-wrap font-mono text-xs mt-1 p-2 bg-base-200/60 rounded-sm max-h-[200px] overflow-y-auto m-0">{a.content}</pre>
@@ -522,6 +528,13 @@ export function MessageBubble({
                     ? <span className="thinking-inline-indicator ml-0">thinking...</span>
                     : <span className="streaming-cursor" />}
                 </span>
+              </div>
+            )}
+
+            {/* A finished reply with only reasoning or tool calls; its saved text is empty. */}
+            {!isStreaming && !message.content.trim() && (
+              <div className="message-bubble assistant">
+                <span className="text-xs italic text-soft-charcoal/50">No text response</span>
               </div>
             )}
           </>

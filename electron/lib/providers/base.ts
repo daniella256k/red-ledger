@@ -31,7 +31,7 @@ export interface ToolDefinition {
  * Extends beyond the renderer's simple {role, content} to include
  * the tool_calls / tool_call_id fields needed for multi-round tool use.
  */
-export interface LLMMessage {
+export interface LLMMessage extends ReasoningEcho {
   role: 'user' | 'assistant' | 'system' | 'tool'
   content: LLMMessageContent | null
   tool_calls?: Array<{
@@ -44,6 +44,27 @@ export interface LLMMessage {
   }>
   tool_call_id?: string
 }
+
+/**
+ * A reasoning model's reasoning for one reply, in the fields the server sent
+ * it in. Within a turn it goes back, unchanged, on the assistant message that
+ * made the tool calls, so the model continues from its own reasoning after
+ * the results. Only fields the server itself sent are ever set.
+ */
+export interface ReasoningEcho {
+  /** OpenRouter: structured blocks, which may include signed or encrypted reasoning. */
+  reasoning_details?: unknown[]
+  /** DeepSeek, Moonshot (Kimi) and similar servers. */
+  reasoning_content?: string
+  /** vLLM and others that name the field `reasoning`. */
+  reasoning?: string
+}
+
+/**
+ * What a provider streams: the chunks the renderer sees, plus the reasoning
+ * echo, which stays in the main process.
+ */
+export type ProviderChunk = StreamChunk | { type: 'reasoning_echo'; reasoning: ReasoningEcho }
 
 export interface LLMTextContentPart {
   type: 'text'
@@ -69,7 +90,7 @@ export interface ProviderSendOptions {
   maxTokens?: number
   reasoningEnabled?: boolean
   extraBody?: Record<string, unknown>
-  onChunk: (chunk: StreamChunk) => void
+  onChunk: (chunk: ProviderChunk) => void
 }
 
 export interface AbortHandle {

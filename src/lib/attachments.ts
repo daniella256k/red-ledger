@@ -1,4 +1,16 @@
-import type { ImageAttachment } from '../types'
+import type { ImageAttachment, ImageAttachmentMimeType } from '../types'
+
+/** The image types attachments may have, with the file extension each is saved under. */
+export const IMAGE_EXTENSION_BY_MIME_TYPE: Readonly<Record<ImageAttachmentMimeType, string>> = {
+  'image/png': 'png',
+  'image/jpeg': 'jpg',
+  'image/webp': 'webp',
+  'image/gif': 'gif'
+}
+
+export function isImageMimeType(value: unknown): value is ImageAttachmentMimeType {
+  return typeof value === 'string' && Object.hasOwn(IMAGE_EXTENSION_BY_MIME_TYPE, value)
+}
 
 /**
  * Saved images are served to the page from the database by the main process,

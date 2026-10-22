@@ -164,8 +164,8 @@ export function useStreaming() {
     })
   }, [])
 
-  const buildStreamingMessageUpdate = useCallback((contentOverride?: string): Partial<Message> => ({
-    content: contentOverride ?? contentRef.current,
+  const buildStreamingMessageUpdate = useCallback((): Partial<Message> => ({
+    content: contentRef.current,
     thinking: thinkingRef.current || undefined,
     toolCalls: toolCallsRef.current.length > 0
       ? JSON.stringify(toolCallsRef.current)
@@ -220,9 +220,9 @@ export function useStreaming() {
         return
       }
 
-      const finalUpdate = buildStreamingMessageUpdate(
-        finalContent ? undefined : '_(No text response)_'
-      )
+      // A reply with only reasoning or tool calls is saved with empty text;
+      // the bubble shows a note instead, so nothing UI-only reaches the model.
+      const finalUpdate = buildStreamingMessageUpdate()
 
       useConversationStore.getState().updateMessage(tempId, finalUpdate)
       await window.redLedger.updateMessage(tempId, finalUpdate)

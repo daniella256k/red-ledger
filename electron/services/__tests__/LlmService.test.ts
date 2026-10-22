@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LlmService, MAX_TOOL_CALLS, buildPastReplyMessages, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext } from '../LlmService'
+import { LlmService, MAX_TOOL_CALLS, buildPastReplyMessages, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext, formatMessageTime } from '../LlmService'
 import { parseStoredToolCalls } from '../../../src/lib/storedToolCalls'
 import { sanitizeSettings } from '../SettingsService'
 import { BaseLLMProvider, readContextLength, reportedUsageChunk } from '../../lib/providers/base'
@@ -7,7 +7,7 @@ import type { LLMMessage, ProviderSendOptions } from '../../lib/providers/base'
 import { registerProvider } from '../../lib/providers/registry'
 import { registerTool } from '../../lib/tools/registry'
 import { detectFileType } from '../../lib/fileType'
-import type { Attachment, StreamChunk } from '../../../src/types'
+import type { Attachment, LLMRequest, StreamChunk } from '../../../src/types'
 
 function createService(): LlmService {
   return new LlmService({
@@ -25,9 +25,9 @@ function invokeBuildOrgSearchToolDescription(service: LlmService, orgSite: strin
 
 function invokeBuildTextAttachmentBlocks(service: LlmService, attachments: Attachment[]): string {
   const internal = service as unknown as {
-    buildTextAttachmentBlocks: (value: Attachment[]) => string
+    buildTextAttachmentBlocks: (value: Attachment[]) => string[]
   }
-  return internal.buildTextAttachmentBlocks(attachments)
+  return internal.buildTextAttachmentBlocks(attachments).join('\n\n')
 }
 
 describe('LlmService org_search tool description', () => {
@@ -303,7 +303,7 @@ describe('LlmService tool call history', () => {
     expect(toolRound).toMatchObject({ role: 'assistant', content: null, tool_calls: [{ id: 'call_1', function: { name: 'web_search' } }] })
     expect(toolResult).toEqual({ role: 'tool', content: '{"results":["paint.example"]}', tool_call_id: 'call_1' })
     expect(reply).toEqual({ role: 'assistant', content: 'It is a Paint options file.' })
-    expect(secondUser.content).toBe('[system: msg_timestamp=t3]\n\nwhat did the search find?')
+    expect(secondUser.content).toBe('what did the search find?')
   })
 })
 
@@ -350,8 +350,12 @@ describe('LlmService saved images', () => {
     expect(parts.filter((part) => part.type === 'image_url')).toEqual([
       { type: 'image_url', image_url: { url: `data:image/png;base64,${Buffer.from([1, 2, 3]).toString('base64')}` } }
     ])
-    expect(parts[0].text).toContain('**Attached image: kept.png**')
-    expect(parts[0].text).toContain('**Attached image: gone.png**\n[Image no longer available')
+    // Each image follows its label; the removed one is only named; the words come last.
+    expect(parts.map((part) => part.type === 'text' ? part.text : 'IMAGE')).toEqual([
+      'Image 1: kept.png',
+      'IMAGE',
+      'Image 2: gone.png [removed by the user to free space]\n\ncompare these'
+    ])
   })
 })
 
@@ -414,9 +418,9 @@ describe('LlmService system prompt', () => {
       )
     }
 
-    expect(seen.map((messages) => messages[0])).toEqual([
-      { role: 'system', content: 'Committee B prompt' },
-      { role: 'system', content: 'Campaign A prompt' }
+    expect(seen.map((messages) => (messages[0].content as string).split('\n\n')[0])).toEqual([
+      'Committee B prompt',
+      'Campaign A prompt'
     ])
   })
 })
@@ -546,5 +550,120 @@ describe('readContextLength', () => {
     expect(readContextLength({ key: 'm', max_context_length: 131072, loaded_instances: [{ config: { context_length: 4096 } }] })).toBe(4096)
     expect(readContextLength({ id: 'gpt-x' })).toBeNull()
     expect(readContextLength(undefined)).toBeNull()
+  })
+})
+
+describe('LlmService request format', () => {
+  /** Registers a provider that records each request; `reply` decides what each round streams back. */
+  function captureRequests(reply?: (options: ProviderSendOptions, round: number) => void) {
+    const seen: LLMMessage[][] = []
+    class CapturingProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        seen.push(options.messages.map((message) => ({ ...message })))
+        const round = seen.length
+        queueMicrotask(() => {
+          if (reply) reply(options, round)
+          else options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+    }
+    registerProvider({ name: 'openai', displayName: 'Capturing', defaultBaseUrl: '', factory: () => new CapturingProvider('', '') })
+    return seen
+  }
+
+  function chicagoService() {
+    return new LlmService({
+      getSettings: () => sanitizeSettings(undefined),
+      getSystemPrompt: () => 'system',
+      timeZone: 'America/Chicago'
+    })
+  }
+
+  async function run(service: LlmService, messages: LLMRequest['messages']) {
+    await service.orchestrateStream(
+      { conversationId: 'c1', model: 'test', provider: 'openai', messages },
+      'stream-format',
+      { send: () => {} },
+      async (tc) => ({ ...tc, result: { ok: true } })
+    )
+  }
+
+  it('formats message times in local time with weekday and UTC offset', () => {
+    expect(formatMessageTime('2026-10-22T14:41:05.000Z', 'America/Chicago')).toBe('Thursday, 2026-10-22 09:41 (UTC-05:00)')
+    expect(formatMessageTime('2026-01-01T00:05:00.000Z', 'UTC')).toBe('Thursday, 2026-01-01 00:05 (UTC+00:00)')
+    expect(formatMessageTime('not a time', 'UTC')).toBeNull()
+    expect(formatMessageTime(undefined, 'UTC')).toBeNull()
+  })
+
+  it('opens each user message with its send time and explains the tag once in the system prompt', async () => {
+    const seen = captureRequests()
+    await run(chicagoService(), [{ role: 'user', content: 'hello', timestamp: '2026-10-22T14:41:05.000Z' }])
+
+    const [system, user] = seen[0]
+    expect(system.content).toMatch(/^system\n\n/)
+    expect(system.content).toContain('<sent_at> tag')
+    expect(system.content).toContain('time zone America/Chicago')
+    expect(system.content).not.toContain('2026')
+    expect(user.content).toBe('<sent_at>Thursday, 2026-10-22 09:41 (UTC-05:00)</sent_at>\n\nhello')
+  })
+
+  it('puts attachments before the words, each image after its label', async () => {
+    const seen = captureRequests()
+    await run(chicagoService(), [{
+      role: 'user',
+      content: 'summarize these',
+      timestamp: '2026-10-22T14:41:05.000Z',
+      attachments: [
+        { kind: 'text', name: 'notes.md', content: 'buy paint' },
+        { kind: 'image', name: 'chart.png', mimeType: 'image/png', dataUrl: 'data:image/png;base64,AA==' }
+      ]
+    }])
+
+    const parts = seen[0][1].content as Array<{ type: string; text?: string }>
+    expect(parts.map((part) => part.type === 'text' ? part.text : 'IMAGE')).toEqual([
+      '<sent_at>Thursday, 2026-10-22 09:41 (UTC-05:00)</sent_at>\n\nImage 1: chart.png',
+      'IMAGE',
+      '<attached_file name="notes.md" type="markdown" lines="1" bytes="9">\nbuy paint\n</attached_file>\n\nsummarize these'
+    ])
+  })
+
+  it('never sends the UI placeholder, and skips replies with nothing to replay', async () => {
+    const seen = captureRequests()
+    await run(chicagoService(), [
+      { role: 'user', content: 'q1', timestamp: '' },
+      {
+        role: 'assistant',
+        content: '_(No text response)_',
+        timestamp: '',
+        toolCalls: [{ id: 'call_1', name: 'list_files', arguments: {}, result: { files: [] } }]
+      },
+      { role: 'user', content: 'q2', timestamp: '' },
+      { role: 'assistant', content: '', timestamp: '' },
+      { role: 'user', content: 'q3', timestamp: '' }
+    ])
+
+    const request = seen[0]
+    expect(request.map((message) => message.role)).toEqual(['system', 'user', 'assistant', 'tool', 'user', 'user'])
+    expect(request[2]).toMatchObject({ content: null, tool_calls: [{ id: 'call_1' }] })
+    expect(JSON.stringify(request)).not.toContain('No text response')
+  })
+
+  it('sends a round\'s reasoning back with the tool calls it led to', async () => {
+    const reasoning = { reasoning_details: [{ type: 'reasoning.text', text: 'Read the notes first.', index: 0 }] }
+    const seen = captureRequests((options, round) => {
+      if (round === 1) {
+        options.onChunk({ type: 'reasoning_echo', reasoning })
+        options.onChunk({ type: 'tool_call', toolCall: { id: 'call_1', name: 'read_file', arguments: { path: 'notes.md' } } })
+      }
+      options.onChunk({ type: 'done' })
+    })
+    await run(chicagoService(), [{ role: 'user', content: 'what do my notes say?', timestamp: '' }])
+
+    expect(seen).toHaveLength(2)
+    expect(seen[0].some((message) => 'reasoning_details' in message)).toBe(false)
+    const toolRound = seen[1].find((message) => message.role === 'assistant')!
+    expect(toolRound).toMatchObject({ tool_calls: [{ id: 'call_1' }], ...reasoning })
   })
 })

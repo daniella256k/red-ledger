@@ -5,7 +5,8 @@ import {
   readContextLength,
   reportedUsageChunk,
   type ProviderSendOptions,
-  type AbortHandle
+  type AbortHandle,
+  type ReasoningEcho
 } from './base'
 import { registerProvider } from './registry'
 import type { StreamChunk, ToolCall } from '../../../src/types'
@@ -53,6 +54,59 @@ function extractThinkingDelta(delta: unknown): string {
   }
   return ''
 }
+
+/**
+ * Collects a reply's reasoning as it streams, in the server's own fields, so
+ * it can go back with the reply's tool calls (see ReasoningEcho).
+ */
+export class ReasoningCollector {
+  private details: Array<Record<string, unknown>> = []
+  private content = ''
+  private text = ''
+
+  add(delta: unknown): void {
+    if (!delta || typeof delta !== 'object') return
+    const record = delta as Record<string, unknown>
+    if (Array.isArray(record.reasoning_details)) {
+      for (const item of record.reasoning_details) this.addDetail(item)
+    }
+    if (typeof record.reasoning_content === 'string') this.content += record.reasoning_content
+    if (typeof record.reasoning === 'string') this.text += record.reasoning
+  }
+
+  /**
+   * OpenRouter's structured blocks when it sent them (it also sends a plain
+   * `reasoning` copy, which isn't needed then), otherwise the plain field the
+   * server used. Null when the reply had no reasoning.
+   */
+  echo(): ReasoningEcho | null {
+    if (this.details.length > 0) return { reasoning_details: this.details }
+    if (this.content) return { reasoning_content: this.content }
+    if (this.text) return { reasoning: this.text }
+    return null
+  }
+
+  /** A streamed block arrives in pieces that share its index; their text is joined. */
+  private addDetail(item: unknown): void {
+    if (!item || typeof item !== 'object') return
+    const piece = item as Record<string, unknown>
+    const block = typeof piece.index === 'number'
+      ? this.details.find((detail) => detail.index === piece.index && detail.type === piece.type)
+      : undefined
+    if (!block) {
+      this.details.push({ ...piece })
+      return
+    }
+    for (const [key, value] of Object.entries(piece)) {
+      if (value === null || value === undefined) continue
+      const joinsText = TEXT_DETAIL_FIELDS.has(key) && typeof block[key] === 'string' && typeof value === 'string'
+      block[key] = joinsText ? `${block[key] as string}${value}` : value
+    }
+  }
+}
+
+/** Fields of a streamed reasoning block that arrive as text fragments. */
+const TEXT_DETAIL_FIELDS = new Set(['text', 'summary', 'data'])
 
 function getHeaderValue(headers: unknown, headerName: string): string | undefined {
   if (!headers || typeof headers !== 'object') return undefined
@@ -149,9 +203,21 @@ async function sleep(ms: number, signal: AbortSignal): Promise<void> {
  * Also handles incremental tool_call deltas where arguments arrive as partial
  * JSON strings across multiple chunks.
  */
+export interface OpenAIProviderOptions {
+  /**
+   * Request field for the output token limit. OpenAI's own API uses
+   * max_completion_tokens (its reasoning models reject max_tokens); most
+   * OpenAI-compatible servers, OpenRouter included, read max_tokens.
+   */
+  maxTokensField?: 'max_tokens' | 'max_completion_tokens'
+}
+
 export class OpenAIProvider extends BaseLLMProvider {
-  constructor(apiKey: string, baseUrl: string = 'https://api.openai.com/v1') {
+  private readonly maxTokensField: NonNullable<OpenAIProviderOptions['maxTokensField']>
+
+  constructor(apiKey: string, baseUrl: string = 'https://api.openai.com/v1', options: OpenAIProviderOptions = {}) {
     super(apiKey, baseUrl)
+    this.maxTokensField = options.maxTokensField ?? 'max_tokens'
   }
 
   protected getAuthHeaders(): Record<string, string> {
@@ -192,7 +258,8 @@ export class OpenAIProvider extends BaseLLMProvider {
       stream: true,
       // Final chunk reports token counts for the context meter.
       stream_options: { include_usage: true },
-      temperature: temperature ?? 0.7
+      // Left out unless set, so the model's own default applies.
+      ...(temperature !== undefined ? { temperature } : {})
     }
 
     const reasoningControls = this.buildReasoningControls(reasoningEnabled)
@@ -205,7 +272,7 @@ export class OpenAIProvider extends BaseLLMProvider {
     }
 
     if (maxTokens) {
-      body.max_tokens = maxTokens
+      body[this.maxTokensField] = maxTokens
     }
 
     // Only include tools if there are any defined
@@ -306,10 +373,13 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     let buffer = ''
     let truncated = false
+    const reasoning = new ReasoningCollector()
 
     const finish = () => {
       this._flushToolCalls(pendingToolCalls, onChunk)
       if (truncated) onChunk({ type: 'notice', content: TRUNCATED_REPLY_NOTICE })
+      const echo = reasoning.echo()
+      if (echo) onChunk({ type: 'reasoning_echo', reasoning: echo })
       onChunk({ type: 'done' })
     }
 
@@ -347,6 +417,7 @@ export class OpenAIProvider extends BaseLLMProvider {
           if (!choice) continue
 
           const delta = choice.delta
+          reasoning.add(delta)
 
           const thinking = extractThinkingDelta(delta)
           if (thinking) {
@@ -474,5 +545,5 @@ registerProvider({
   name: 'openai',
   displayName: 'OpenAI',
   defaultBaseUrl: 'https://api.openai.com/v1',
-  factory: (settings) => new OpenAIProvider(settings.apiKey, settings.baseUrl)
+  factory: (settings) => new OpenAIProvider(settings.apiKey, settings.baseUrl, { maxTokensField: 'max_completion_tokens' })
 })

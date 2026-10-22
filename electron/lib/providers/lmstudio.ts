@@ -6,6 +6,7 @@ import {
   reportedUsageChunk,
   type ProviderSendOptions,
   type AbortHandle,
+  type LLMMessage,
   type LLMMessageContent
 } from './base'
 import { OpenAIProvider } from './openai'
@@ -64,6 +65,49 @@ function toPlainTextContent(content: LLMMessageContent | null): string {
   }
 
   return textParts.join('\n\n')
+}
+
+interface NativeChatMessage {
+  role: 'system' | 'user' | 'assistant'
+  content: string
+}
+
+/**
+ * The native API has no tool messages (and this provider sends no tools), but
+ * a chat may carry tool rounds from another provider. Each round is folded
+ * into the assistant's text, call and result together, so the model keeps
+ * what the tools returned and the history stays plain user/assistant turns.
+ */
+export function toNativeChatMessages(messages: LLMMessage[]): NativeChatMessage[] {
+  const result: NativeChatMessage[] = []
+  const toolNames = new Map<string, string>()
+
+  const add = (role: NativeChatMessage['role'], content: string) => {
+    const previous = result[result.length - 1]
+    if (role === 'assistant' && previous?.role === 'assistant') {
+      previous.content = [previous.content, content].filter((text) => text.length > 0).join('\n\n')
+      return
+    }
+    result.push({ role, content })
+  }
+
+  for (const message of messages) {
+    const text = toPlainTextContent(message.content)
+    if (message.role === 'tool') {
+      const name = message.tool_call_id ? toolNames.get(message.tool_call_id) : undefined
+      add('assistant', `[Result of ${name ?? 'tool call'}]\n${text}`)
+    } else if (message.role === 'assistant' && message.tool_calls?.length) {
+      const calls = message.tool_calls.map((call) => {
+        toolNames.set(call.id, call.function.name)
+        return `[Called ${call.function.name} ${call.function.arguments}]`
+      })
+      add('assistant', [text, ...calls].filter((part) => part.length > 0).join('\n\n'))
+    } else {
+      add(message.role, text)
+    }
+  }
+
+  return result
 }
 
 class LMStudioNativeProvider extends BaseLLMProvider {
@@ -128,12 +172,10 @@ class LMStudioNativeProvider extends BaseLLMProvider {
 
     const body: Record<string, unknown> = {
       model,
-      messages: messages.map((m) => ({
-        role: m.role,
-        content: toPlainTextContent(m.content)
-      })),
+      messages: toNativeChatMessages(messages),
       stream: true,
-      temperature: temperature ?? 0.7
+      // Left out unless set, so the model's own default applies.
+      ...(temperature !== undefined ? { temperature } : {})
     }
 
     if (maxTokens) {

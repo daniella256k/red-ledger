@@ -20,6 +20,7 @@ async function stream(lines: unknown[], maxTokens?: number) {
       tools: [],
       maxTokens,
       onChunk: (chunk) => {
+        if (chunk.type === 'reasoning_echo') return
         chunks.push(chunk)
         if (chunk.type === 'done') resolve()
       }
@@ -34,6 +35,11 @@ afterEach(() => {
 })
 
 describe('OllamaProvider', () => {
+  it('leaves temperature to the model', async () => {
+    const { body } = await stream([{ done: true }])
+    expect(body.options).not.toHaveProperty('temperature')
+  })
+
   it('gives each tool call its own ID, even for the same tool', async () => {
     const { chunks } = await stream([
       {

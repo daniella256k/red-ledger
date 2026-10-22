@@ -1,4 +1,13 @@
-import type { LLMMessage, AbortHandle, LLMMessageContent, ToolDefinition } from '../lib/providers/base'
+import type {
+  LLMMessage,
+  AbortHandle,
+  LLMMessageContent,
+  LLMImageUrlContentPart,
+  LLMTextContentPart,
+  ProviderChunk,
+  ReasoningEcho,
+  ToolDefinition
+} from '../lib/providers/base'
 import { createProvider } from '../lib/providers/registry'
 import { getToolDefinitions } from '../lib/tools/registry'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
@@ -26,6 +35,42 @@ import '../lib/providers/custom'
 
 /** Hard ceiling on tool calls the assistant may run in a single turn. */
 export const MAX_TOOL_CALLS = 75
+
+/** Saved as a reply's text, before 1.8, when the model wrote no text; it is UI text, never sent. */
+const LEGACY_NO_TEXT_PLACEHOLDER = '_(No text response)_'
+
+/**
+ * When a message was sent, in the user's local time with its UTC offset and
+ * weekday, e.g. "Wednesday, 2026-10-22 09:41 (UTC-05:00)". Null for a
+ * timestamp that doesn't parse.
+ */
+export function formatMessageTime(isoTimestamp: string | undefined, timeZone: string): string | null {
+  const date = new Date(isoTimestamp ?? '')
+  if (Number.isNaN(date.getTime())) return null
+
+  const parts = Object.fromEntries(
+    new Intl.DateTimeFormat('en-US', {
+      timeZone,
+      weekday: 'long',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+      timeZoneName: 'longOffset'
+    }).formatToParts(date).map((part) => [part.type, part.value])
+  )
+  // "GMT-05:00", or plain "GMT" at offset zero.
+  const offset = parts.timeZoneName === 'GMT' ? 'UTC+00:00' : parts.timeZoneName.replace('GMT', 'UTC')
+  return `${parts.weekday}, ${parts.year}-${parts.month}-${parts.day} ${parts.hour}:${parts.minute} (${offset})`
+}
+
+/** System prompt note that explains the <sent_at> tag on user messages. */
+function sentAtNote(timeZone: string): string {
+  return `Each user message begins with a <sent_at> tag: the user's local date and time when they sent it (time zone ${timeZone}). `
+    + 'Use it for anything that depends on the current date or time. Don\'t repeat the tag in your replies.'
+}
 /** Whether a tool reaches the network: built-in web tools and tools from HTTP MCP servers. */
 function isNetworkTool(name: string, settings: Settings): boolean {
   if (NETWORK_TOOLS.has(name)) return true
@@ -249,6 +294,7 @@ export class LlmService {
   private getSettings: () => Settings
   private getSystemPrompt: (conversationId: string) => string
   private getAttachmentBlob: (blobId: string) => AttachmentBlob | null
+  private timeZone: string
   /**
    * In-flight turns by channel. `handle` is the provider request of the
    * current round (null while tools run); `cancelled` stops the tool loop
@@ -264,10 +310,13 @@ export class LlmService {
     getSystemPrompt: (conversationId: string) => string
     /** Bytes of a saved image, which messages refer to by id. */
     getAttachmentBlob?: (blobId: string) => AttachmentBlob | null
+    /** IANA time zone for message times; defaults to this computer's. */
+    timeZone?: string
   }) {
     this.getSettings = deps.getSettings
     this.getSystemPrompt = deps.getSystemPrompt
     this.getAttachmentBlob = deps.getAttachmentBlob ?? (() => null)
+    this.timeZone = deps.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
   }
 
   private supportsVisionParts(provider: ProviderName): boolean {
@@ -305,11 +354,10 @@ export class LlmService {
       .replace(/'/g, '&#39;')
   }
 
-  private buildTextAttachmentBlocks(attachments: Attachment[]): string {
-    const textAttachments = attachments.filter((attachment) => !this.isImageAttachment(attachment))
-    if (textAttachments.length === 0) return ''
-
-    return textAttachments
+  /** Each attached text file as a tagged block: name, detected type and size, then the content. */
+  private buildTextAttachmentBlocks(attachments: Attachment[]): string[] {
+    return attachments
+      .filter((attachment) => !this.isImageAttachment(attachment))
       .map((attachment) => {
         const name = this.escapeTagAttribute(attachment.name)
         const type = this.escapeTagAttribute(detectFileType(attachment.name))
@@ -320,53 +368,8 @@ export class LlmService {
           ? `${content}\n`
           : content
 
-        return `\n\n<attached_file name="${name}" type="${type}" lines="${lines}" bytes="${bytes}">\n${contentWithClosingNewline}</attached_file>`
+        return `<attached_file name="${name}" type="${type}" lines="${lines}" bytes="${bytes}">\n${contentWithClosingNewline}</attached_file>`
       })
-      .join('')
-  }
-
-  private buildImageFallbackBlocks(images: ImageAttachment[]): string {
-    if (images.length === 0) return ''
-
-    return images
-      .map((image) => `\n\n---\n**Attached image: ${image.name}**\n[Image omitted for this provider]`)
-      .join('')
-  }
-
-  private buildImageMetadataBlocks(images: ImageAttachment[]): string {
-    if (images.length === 0) return ''
-
-    return images
-      .map((image) => `\n\n---\n**Attached image: ${image.name}**`)
-      .join('')
-  }
-
-  private buildRemovedImageBlocks(images: ImageAttachment[]): string {
-    if (images.length === 0) return ''
-
-    return images
-      .map((image) => `\n\n---\n**Attached image: ${image.name}**\n[Image no longer available: the user removed it to free space]`)
-      .join('')
-  }
-
-  private withSystemTags(content: LLMMessageContent, tags: string[]): LLMMessageContent {
-    if (tags.length === 0) return content
-    const prefix = tags.map((tag) => `${tag}\n\n`).join('')
-
-    if (typeof content === 'string') {
-      return prefix + content
-    }
-
-    const parts = [...content]
-    if (parts.length > 0 && parts[0].type === 'text') {
-      parts[0] = {
-        type: 'text',
-        text: prefix + parts[0].text
-      }
-      return parts
-    }
-
-    return [{ type: 'text', text: prefix }, ...parts]
   }
 
   private withDynamicToolDescriptions(tools: ToolDefinition[], settings: Settings): ToolDefinition[] {
@@ -425,42 +428,46 @@ export class LlmService {
     }
   }
 
+  /**
+   * A user turn in the order models are trained to read: when it was sent,
+   * then the attachments (each image after a "Image N: name" label, then the
+   * text files), and the user's own words last. Plain text unless it carries
+   * images the model can see.
+   */
   private buildUserMessageContent(
     content: string,
     attachments: Attachment[] | undefined,
-    provider: ProviderName
+    provider: ProviderName,
+    sentAt: string | null
   ): LLMMessageContent {
-    if (!attachments || attachments.length === 0) {
-      return content
+    const parts: Array<LLMTextContentPart | LLMImageUrlContentPart> = []
+    let text: string[] = sentAt ? [`<sent_at>${sentAt}</sent_at>`] : []
+    const flushText = () => {
+      if (text.length > 0) parts.push({ type: 'text', text: text.join('\n\n') })
+      text = []
     }
 
-    const promptText = content.trim().length > 0 ? content : '(see attached files)'
-    const textWithFileBlocks = promptText + this.buildTextAttachmentBlocks(attachments)
-    const images: Array<{ image: ImageAttachment; url: string }> = []
-    const removedImages: ImageAttachment[] = []
-    for (const attachment of attachments) {
-      if (!this.isImageAttachment(attachment)) continue
-      const url = this.imageDataUrl(attachment)
-      if (url) images.push({ image: attachment, url })
-      else removedImages.push(attachment)
-    }
-    const textWithRemovedImages = textWithFileBlocks + this.buildRemovedImageBlocks(removedImages)
+    const images = (attachments ?? []).filter((attachment) => this.isImageAttachment(attachment))
+    images.forEach((image, index) => {
+      const label = `Image ${index + 1}: ${image.name}`
+      const url = this.imageDataUrl(image)
+      if (!url) {
+        text.push(`${label} [removed by the user to free space]`)
+      } else if (!this.supportsVisionParts(provider)) {
+        text.push(`${label} [not shown: this provider doesn't accept images]`)
+      } else {
+        text.push(label)
+        flushText()
+        parts.push({ type: 'image_url', image_url: { url } })
+      }
+    })
 
-    if (images.length === 0) {
-      return textWithRemovedImages
-    }
+    text.push(...this.buildTextAttachmentBlocks(attachments ?? []))
+    if (content.trim().length > 0) text.push(content)
+    flushText()
 
-    if (!this.supportsVisionParts(provider)) {
-      return textWithRemovedImages + this.buildImageFallbackBlocks(images.map(({ image }) => image))
-    }
-
-    return [
-      { type: 'text', text: textWithRemovedImages + this.buildImageMetadataBlocks(images.map(({ image }) => image)) },
-      ...images.map(({ url }) => ({
-        type: 'image_url' as const,
-        image_url: { url }
-      }))
-    ]
+    if (parts.length === 0) return content
+    return parts.length === 1 && parts[0].type === 'text' ? parts[0].text : parts
   }
 
   /**
@@ -482,24 +489,27 @@ export class LlmService {
     // Build the conversation history in LLMMessage format
     const messages: LLMMessage[] = []
 
-    // System message first
-    messages.push({ role: 'system', content: systemPrompt })
+    // System message first. The note explaining <sent_at> names no date, so
+    // the system prompt stays identical turn to turn (providers cache it).
+    messages.push({ role: 'system', content: `${systemPrompt}\n\n${sentAtNote(this.timeZone)}` })
 
-    // Append conversation messages from the request, injecting system timestamps
-    // into user messages so the LLM always has accurate real-time context.
-    // Earlier replies are replayed with their tool calls and full results, in
-    // the same shape as the live tool loop below.
+    // Each user message carries the local time it was sent. Earlier replies
+    // are replayed with their tool calls and full results, in the same shape
+    // as the live tool loop below.
     const replayedToolCallIds = new Set<string>()
     for (const msg of request.messages) {
       if (msg.role === 'user') {
-        const content = this.buildUserMessageContent(msg.content, msg.attachments, request.provider)
-        const tags = msg.timestamp ? [`[system: msg_timestamp=${msg.timestamp}]`] : []
-        messages.push({ role: msg.role, content: this.withSystemTags(content, tags) })
+        const sentAt = formatMessageTime(msg.timestamp, this.timeZone)
+        messages.push({ role: msg.role, content: this.buildUserMessageContent(msg.content, msg.attachments, request.provider, sentAt) })
         continue
       }
 
       if (msg.role === 'assistant') {
-        messages.push(...buildPastReplyMessages(msg.content, msg.toolCalls, replayedToolCallIds))
+        // Replies saved before 1.8 hold this UI text when the model wrote none.
+        const content = msg.content === LEGACY_NO_TEXT_PLACEHOLDER ? '' : msg.content
+        // Nothing to replay: no text and no tool calls (e.g. only reasoning).
+        if (!content.trim() && !msg.toolCalls?.length) continue
+        messages.push(...buildPastReplyMessages(content, msg.toolCalls, replayedToolCallIds))
         continue
       }
       messages.push({ role: msg.role, content: msg.content })
@@ -535,6 +545,7 @@ export class LlmService {
         const collectedToolCalls: ToolCall[] = []
         let textAccumulated = ''
         let reportedUsage: ContextUsage | null = null
+        let reasoningEcho: ReasoningEcho | null = null
 
         const streamDone = await new Promise<'done' | 'tool_calls' | 'error'>((resolve) => {
           stream.handle = provider.sendStreaming({
@@ -544,11 +555,16 @@ export class LlmService {
             temperature: request.temperature,
             maxTokens: request.maxTokens ?? (settings.maxTokensEnabled ? settings.maxTokens : undefined),
             reasoningEnabled: settings.reasoningEnabled,
-            onChunk: (chunk: StreamChunk) => {
+            onChunk: (chunk: ProviderChunk) => {
               switch (chunk.type) {
                 case 'thinking':
                 case 'notice':
                   sink.send(chunk)
+                  break
+
+                case 'reasoning_echo':
+                  // Kept for the tool-call message below; never shown.
+                  reasoningEcho = chunk.reasoning
                   break
 
                 case 'usage':
@@ -622,7 +638,8 @@ export class LlmService {
           })
         }
 
-        // Append the assistant's response (with tool_calls) to the conversation
+        // Append the assistant's response (with tool_calls) to the conversation,
+        // with its reasoning, so the model picks up where it left off.
         const assistantMessage: LLMMessage = {
           role: 'assistant',
           content: textAccumulated || null,
@@ -633,7 +650,8 @@ export class LlmService {
               name: tc.name,
               arguments: JSON.stringify(tc.arguments)
             }
-          }))
+          })),
+          ...(reasoningEcho ?? {})
         }
         messages.push(assistantMessage)
 
