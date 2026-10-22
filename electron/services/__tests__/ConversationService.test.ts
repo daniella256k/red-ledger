@@ -265,6 +265,7 @@ describe('ConversationService message ordering and recency', () => {
     const get = vi.fn(() => ({ rowid: 7 }))
     const deleteRun = vi.fn()
     const touchRun = vi.fn()
+    const pruneRun = vi.fn()
     const transaction = vi.fn((fn: () => void) => fn)
     const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(4_000)
     const service = Object.create(ConversationService.prototype) as MutationHarness
@@ -286,10 +287,16 @@ describe('ConversationService message ordering and recency', () => {
         return { run: touchRun }
       }
 
+      if (key === 'pruneUnusedBlobs') {
+        expect(sql).toContain('DELETE FROM attachment_blobs')
+        return { run: pruneRun }
+      }
+
       throw new Error(`Unexpected statement key: ${key}`)
     })
 
     deleteMessagesFrom.call(service, 'conv-1', 'message-1')
+    expect(pruneRun).toHaveBeenCalledTimes(1)
 
     expect(transaction).toHaveBeenCalledTimes(1)
     expect(get).toHaveBeenCalledWith('message-1', 'conv-1')

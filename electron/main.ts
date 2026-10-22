@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, protocol, shell } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
 import { dirname, join } from 'path'
 import { readFileSync } from 'fs'
@@ -18,8 +18,23 @@ import { registerLlmHandlers } from './ipc/llm'
 import { registerSearchHandlers } from './ipc/search'
 import { registerMcpHandlers, getMcpService } from './ipc/mcp'
 import { registerTransferHandlers } from './ipc/transfer'
+import { registerStorageHandlers } from './ipc/storage'
 import { handleIpc } from './ipc/typedIpc'
 import { assertObject } from './ipc/validate'
+import { ATTACHMENT_URL_SCHEME } from '../src/lib/attachments'
+
+// Development runs (electron-vite dev/preview) keep their own profile, so they
+// never open the real chat database or fill its caches with dev-server files.
+// An explicit --user-data-dir still wins.
+if (!app.isPackaged && !app.commandLine.hasSwitch('user-data-dir')) {
+  app.setPath('userData', join(app.getPath('appData'), 'red-ledger-dev'))
+}
+
+// Saved images are served from the database at rl-blob://<sha256>. Must be
+// declared before the app is ready.
+protocol.registerSchemesAsPrivileged([
+  { scheme: ATTACHMENT_URL_SCHEME, privileges: { standard: true, secure: true } }
+])
 
 type RendererMenuAction = 'exportChat' | 'importChat'
 
@@ -377,11 +392,19 @@ function registerIpcHandlers(): void {
     getSettings: getCurrentSettings,
     getSystemPrompt: (conversationId) => getContextService().assembleSystemPrompt(
       getConversationService().getConversation(conversationId)?.profileId
-    )
+    ),
+    getAttachmentBlob: (blobId) => getConversationService().getAttachmentBlob(blobId)
   })
 
   // 8. Chat import/export
   registerTransferHandlers(getConversationService())
+
+  // 8b. Storage panel
+  registerStorageHandlers({
+    conversations: getConversationService(),
+    dbPath,
+    profilePath: app.getPath('userData')
+  })
 
   // 9. Dialog handlers (remain inline — they're simple and window-dependent)
   handleIpc('dialog:confirm', async (_event, options) => {
@@ -468,8 +491,24 @@ function registerIpcHandlers(): void {
 
 // ─── App Lifecycle ───────────────────────────────────────────────────────────
 
+/**
+ * Serves saved images to the page. Ids are content hashes, and responses are
+ * never cached, so Chromium keeps no second copy of an image on disk and a
+ * removed image is gone at once.
+ */
+function registerAttachmentProtocol(): void {
+  protocol.handle(ATTACHMENT_URL_SCHEME, (request) => {
+    const blob = getConversationService().getAttachmentBlob(new URL(request.url).hostname)
+    if (!blob) return new Response('Not found', { status: 404 })
+    return new Response(new Uint8Array(blob.data), {
+      headers: { 'Content-Type': blob.mimeType, 'Cache-Control': 'no-store' }
+    })
+  })
+}
+
 app.whenReady().then(() => {
   registerIpcHandlers()
+  registerAttachmentProtocol()
 
   createWindow()
   setApplicationMenu()

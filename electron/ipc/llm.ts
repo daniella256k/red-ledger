@@ -1,5 +1,6 @@
 import { ipcMain, BrowserWindow } from 'electron'
 import { LlmService, type StreamSink } from '../services/LlmService'
+import type { AttachmentBlob } from '../services/ConversationService'
 import { executeTool } from '../lib/tools/executor'
 import { getWorkspaceService } from './fs'
 import { assertString, assertObject, assertOptionalNumber } from './validate'
@@ -19,6 +20,7 @@ let service: LlmService
 export function registerLlmHandlers(deps: {
   getSettings: () => Settings
   getSystemPrompt: (conversationId: string) => string
+  getAttachmentBlob: (blobId: string) => AttachmentBlob | null
 }): void {
   service = new LlmService(deps)
 

@@ -4,6 +4,7 @@ import DOMPurify from 'dompurify'
 import { ChevronDown, ChevronUp, Paperclip } from 'lucide-react'
 import type { Attachment, Message, ToolCall } from '@/types'
 import { ToolCallCard } from './ToolCallCard'
+import { imageSrc } from '@/lib/attachments'
 import {
   MessageActionsBar,
   useCopyAction,
@@ -379,12 +380,16 @@ export function MessageBubble({
                   </summary>
                   {isImageAttachment(a) ? (
                     <div className="mt-1 p-2 bg-base-200/60 rounded-sm max-w-[320px]">
-                      <img
-                        src={a.dataUrl}
-                        alt={a.name}
-                        className="block max-w-full max-h-[260px] rounded-sm border border-weathered object-contain bg-base-100"
-                        loading="lazy"
-                      />
+                      {imageSrc(a) ? (
+                        <img
+                          src={imageSrc(a)!}
+                          alt={a.name}
+                          className="block max-w-full max-h-[260px] rounded-sm border border-weathered object-contain bg-base-100"
+                          loading="lazy"
+                        />
+                      ) : (
+                        <p className="m-0 text-xs text-soft-charcoal/50">Image removed to free space.</p>
+                      )}
                     </div>
                   ) : (
                     <pre className="whitespace-pre-wrap font-mono text-xs mt-1 p-2 bg-base-200/60 rounded-sm max-h-[200px] overflow-y-auto m-0">{a.content}</pre>

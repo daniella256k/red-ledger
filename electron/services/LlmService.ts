@@ -4,6 +4,7 @@ import { getToolDefinitions } from '../lib/tools/registry'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
 import { findMcpServerByPrefix, parseMcpToolName } from '../../src/lib/mcpConfig'
 import { detectFileType } from '../lib/fileType'
+import type { AttachmentBlob } from './ConversationService'
 import type {
   LLMRequest,
   StreamChunk,
@@ -13,7 +14,6 @@ import type {
   Attachment,
   ImageAttachment,
   TitleGenerationRequest,
-  ToolCallRecord,
   ContextUsage
 } from '../../src/types'
 
@@ -83,35 +83,107 @@ export function buildToolCallBudgetNotice(previousTotal: number, nextTotal: numb
     + `Only continue if more tool calls are clearly needed. At ${MAX_TOOL_CALLS} tool calls, tools stop running and you must answer with what you have.`
 }
 
-const MAX_LOGGED_TOOL_CALLS = 40
-const MAX_LOGGED_ARGS_CHARS = 200
-const MAX_LOGGED_ERROR_CHARS = 120
+/** What a past tool call that never returned is replayed with. */
+const UNFINISHED_TOOL_RESULT = { error: 'This tool call did not finish: the reply was stopped while it ran.' }
+/** Share of a known context window a request may fill before the oldest tool results are shortened. */
+const CONTEXT_FILL_LIMIT = 0.85
+/** How much of a shortened tool result is kept. */
+const SHORTENED_RESULT_PREVIEW_CHARS = 2_000
+const SHORTENED_RESULT_NOTE =
+  'This earlier tool result was shortened to fit the context window. Call the tool again if you need all of it.'
 
-function clip(value: string, maxChars: number): string {
-  const singleLine = value.replace(/\s+/g, ' ').trim()
-  return singleLine.length > maxChars ? `${singleLine.slice(0, maxChars - 1)}…` : singleLine
+/** A tool call id unique within the request: stored ids can be missing, or repeat across turns. */
+function uniqueToolCallId(id: string, usedIds: Set<string>): string {
+  let candidate = id
+  for (let n = 1; !candidate || usedIds.has(candidate); n++) {
+    candidate = `call_replay_${usedIds.size + n}`
+  }
+  usedIds.add(candidate)
+  return candidate
 }
 
 /**
- * Compact log of the tool calls behind an earlier assistant reply. Without it
- * the model only sees its old reply text in later turns and has no idea it
- * searched, fetched or read anything. Results are left out to save tokens.
+ * An earlier assistant reply as the exchange the model actually had: each
+ * round's text with its tool calls, the full tool results, then the closing
+ * text. Rounds are recovered from where each call happened in the reply text
+ * (contentOffset); calls stored without one ran before any text.
  */
-export function buildToolCallLogTag(records: ToolCallRecord[] | undefined): string | null {
-  if (!records || records.length === 0) return null
+export function buildPastReplyMessages(
+  content: string,
+  toolCalls: ToolCall[] | undefined,
+  usedIds: Set<string> = new Set()
+): LLMMessage[] {
+  if (!toolCalls || toolCalls.length === 0) return [{ role: 'assistant', content }]
 
-  const lines = records.slice(0, MAX_LOGGED_TOOL_CALLS).map((record, index) => {
-    const outcome = record.status === 'error'
-      ? `error: ${clip(record.error || 'unknown error', MAX_LOGGED_ERROR_CHARS)}`
-      : record.status
-    return `${index + 1}. ${record.name} ${clip(JSON.stringify(record.arguments ?? {}), MAX_LOGGED_ARGS_CHARS)} -> ${outcome}`
-  })
-  const hidden = records.length - lines.length
-  if (hidden > 0) lines.push(`(+${hidden} more)`)
+  const offsetOf = (tc: ToolCall) => Math.min(Math.max(tc.contentOffset ?? 0, 0), content.length)
+  // Array sort is stable, so the calls of one round keep their order.
+  const ordered = [...toolCalls].sort((a, b) => offsetOf(a) - offsetOf(b))
+  const messages: LLMMessage[] = []
+  let cursor = 0
 
-  return `[system: previous_reply_tool_calls count=${records.length} `
-    + `(your previous reply made these tool calls; results are omitted here, call a tool again if you need the details)\n`
-    + `${lines.join('\n')}\n]`
+  for (let i = 0; i < ordered.length;) {
+    const offset = offsetOf(ordered[i])
+    const round: ToolCall[] = []
+    while (i < ordered.length && offsetOf(ordered[i]) === offset) round.push(ordered[i++])
+
+    const ids = round.map((tc) => uniqueToolCallId(tc.id, usedIds))
+    messages.push({
+      role: 'assistant',
+      content: content.slice(cursor, offset) || null,
+      tool_calls: round.map((tc, k) => ({
+        id: ids[k],
+        type: 'function' as const,
+        function: { name: tc.name, arguments: JSON.stringify(tc.arguments ?? {}) }
+      }))
+    })
+    round.forEach((tc, k) => {
+      messages.push({
+        role: 'tool',
+        content: JSON.stringify(tc.result === undefined ? UNFINISHED_TOOL_RESULT : tc.result) ?? 'null',
+        tool_call_id: ids[k]
+      })
+    })
+    cursor = offset
+  }
+
+  const closingText = content.slice(cursor)
+  if (closingText.trim().length > 0) messages.push({ role: 'assistant', content: closingText })
+  return messages
+}
+
+/**
+ * Safety net for very long chats: shortens the oldest tool results, in place,
+ * until the request is estimated to fit the model's context window. Only runs
+ * when the window is known; otherwise every result is sent in full.
+ * Returns how many results were shortened.
+ */
+export function fitToolResultsToContext(
+  messages: LLMMessage[],
+  tools: ToolDefinition[],
+  contextLength: number | null
+): number {
+  if (!contextLength) return 0
+
+  const limit = contextLength * CONTEXT_FILL_LIMIT
+  let estimate = estimateUsage(messages, tools, '').promptTokens
+  let shortened = 0
+
+  for (const message of messages) {
+    if (estimate <= limit) break
+    if (message.role !== 'tool' || typeof message.content !== 'string') continue
+    if (message.content.length <= SHORTENED_RESULT_PREVIEW_CHARS * 2) continue
+
+    const replacement = JSON.stringify({
+      shortened: true,
+      note: SHORTENED_RESULT_NOTE,
+      preview: message.content.slice(0, SHORTENED_RESULT_PREVIEW_CHARS)
+    })
+    estimate -= Math.ceil((message.content.length - replacement.length) / ESTIMATED_CHARS_PER_TOKEN)
+    message.content = replacement
+    shortened += 1
+  }
+
+  return shortened
 }
 
 /** Rough tokens-per-character ratio for text when the provider reports no usage. */
@@ -176,6 +248,7 @@ export interface StreamSink {
 export class LlmService {
   private getSettings: () => Settings
   private getSystemPrompt: (conversationId: string) => string
+  private getAttachmentBlob: (blobId: string) => AttachmentBlob | null
   /**
    * In-flight turns by channel. `handle` is the provider request of the
    * current round (null while tools run); `cancelled` stops the tool loop
@@ -189,9 +262,12 @@ export class LlmService {
     getSettings: () => Settings
     /** Builds the system prompt from the conversation's own context profile. */
     getSystemPrompt: (conversationId: string) => string
+    /** Bytes of a saved image, which messages refer to by id. */
+    getAttachmentBlob?: (blobId: string) => AttachmentBlob | null
   }) {
     this.getSettings = deps.getSettings
     this.getSystemPrompt = deps.getSystemPrompt
+    this.getAttachmentBlob = deps.getAttachmentBlob ?? (() => null)
   }
 
   private supportsVisionParts(provider: ProviderName): boolean {
@@ -199,10 +275,16 @@ export class LlmService {
   }
 
   private isImageAttachment(attachment: Attachment): attachment is ImageAttachment {
-    if (attachment.kind !== 'image') return false
-    if (typeof attachment.mimeType !== 'string' || attachment.mimeType.length === 0) return false
-    if (typeof attachment.dataUrl !== 'string' || attachment.dataUrl.length === 0) return false
-    return true
+    return attachment.kind === 'image'
+  }
+
+  /** The image as a data: URL for the provider, or null if it was removed or is missing. */
+  private imageDataUrl(image: ImageAttachment): string | null {
+    if (image.removed) return null
+    if (typeof image.dataUrl === 'string' && image.dataUrl.length > 0) return image.dataUrl
+    if (!image.blobId) return null
+    const blob = this.getAttachmentBlob(image.blobId)
+    return blob ? `data:${blob.mimeType};base64,${blob.data.toString('base64')}` : null
   }
 
   private countLines(content: string): number {
@@ -256,6 +338,14 @@ export class LlmService {
 
     return images
       .map((image) => `\n\n---\n**Attached image: ${image.name}**`)
+      .join('')
+  }
+
+  private buildRemovedImageBlocks(images: ImageAttachment[]): string {
+    if (images.length === 0) return ''
+
+    return images
+      .map((image) => `\n\n---\n**Attached image: ${image.name}**\n[Image no longer available: the user removed it to free space]`)
       .join('')
   }
 
@@ -346,25 +436,29 @@ export class LlmService {
 
     const promptText = content.trim().length > 0 ? content : '(see attached files)'
     const textWithFileBlocks = promptText + this.buildTextAttachmentBlocks(attachments)
-    const images = attachments.filter((attachment): attachment is ImageAttachment =>
-      this.isImageAttachment(attachment)
-    )
+    const images: Array<{ image: ImageAttachment; url: string }> = []
+    const removedImages: ImageAttachment[] = []
+    for (const attachment of attachments) {
+      if (!this.isImageAttachment(attachment)) continue
+      const url = this.imageDataUrl(attachment)
+      if (url) images.push({ image: attachment, url })
+      else removedImages.push(attachment)
+    }
+    const textWithRemovedImages = textWithFileBlocks + this.buildRemovedImageBlocks(removedImages)
 
     if (images.length === 0) {
-      return textWithFileBlocks
+      return textWithRemovedImages
     }
 
     if (!this.supportsVisionParts(provider)) {
-      return textWithFileBlocks + this.buildImageFallbackBlocks(images)
+      return textWithRemovedImages + this.buildImageFallbackBlocks(images.map(({ image }) => image))
     }
 
     return [
-      { type: 'text', text: textWithFileBlocks + this.buildImageMetadataBlocks(images) },
-      ...images.map((image) => ({
+      { type: 'text', text: textWithRemovedImages + this.buildImageMetadataBlocks(images.map(({ image }) => image)) },
+      ...images.map(({ url }) => ({
         type: 'image_url' as const,
-        image_url: {
-          url: image.dataUrl
-        }
+        image_url: { url }
       }))
     ]
   }
@@ -393,23 +487,20 @@ export class LlmService {
 
     // Append conversation messages from the request, injecting system timestamps
     // into user messages so the LLM always has accurate real-time context.
-    // Tool calls behind an assistant reply ride on the next user message (not
-    // the reply itself, so the model doesn't learn to write such tags itself).
-    let pendingToolCallLog: string | null = null
+    // Earlier replies are replayed with their tool calls and full results, in
+    // the same shape as the live tool loop below.
+    const replayedToolCallIds = new Set<string>()
     for (const msg of request.messages) {
       if (msg.role === 'user') {
         const content = this.buildUserMessageContent(msg.content, msg.attachments, request.provider)
-        const tags = [
-          ...(msg.timestamp ? [`[system: msg_timestamp=${msg.timestamp}]`] : []),
-          ...(pendingToolCallLog ? [pendingToolCallLog] : [])
-        ]
-        pendingToolCallLog = null
+        const tags = msg.timestamp ? [`[system: msg_timestamp=${msg.timestamp}]`] : []
         messages.push({ role: msg.role, content: this.withSystemTags(content, tags) })
         continue
       }
 
       if (msg.role === 'assistant') {
-        pendingToolCallLog = buildToolCallLogTag(msg.toolCalls)
+        messages.push(...buildPastReplyMessages(msg.content, msg.toolCalls, replayedToolCallIds))
+        continue
       }
       messages.push({ role: msg.role, content: msg.content })
     }
@@ -418,6 +509,17 @@ export class LlmService {
       (settings.searchToolsEnabled || !SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name))
       && !(settings.offlineMode && isNetworkTool(tool.function.name, settings))
     )
+    const shortenedResults = fitToolResultsToContext(
+      messages,
+      tools,
+      this.cachedContextLength(request.provider, request.model)
+    )
+    if (shortenedResults > 0) {
+      sink.send({
+        type: 'notice',
+        content: `Shortened ${shortenedResults} older tool result${shortenedResults === 1 ? '' : 's'} so this chat fits the model's context window.`
+      })
+    }
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
     let totalToolCalls = 0
     let roundsAfterToolLimit = 0
@@ -598,10 +700,20 @@ export class LlmService {
     stream.handle?.abort()
   }
 
+  private contextLengthKey(providerName: ProviderName, model: string): string {
+    const config = this.getSettings().providers?.[providerName]
+    return `${providerName}|${config?.baseUrl ?? ''}|${config?.compatibility ?? ''}|${model}`
+  }
+
+  /** The model's context window if an earlier turn already looked it up, without waiting on a lookup. */
+  private cachedContextLength(providerName: ProviderName, model: string): number | null {
+    const cached = this.contextLengthCache.get(this.contextLengthKey(providerName, model))
+    return cached && cached.expiresAt > Date.now() ? cached.value : null
+  }
+
   /** The model's context window for the meter; null when unknown, slow or failing. */
   private lookupContextLength(providerName: ProviderName, model: string): Promise<number | null> {
-    const config = this.getSettings().providers?.[providerName]
-    const key = `${providerName}|${config?.baseUrl ?? ''}|${config?.compatibility ?? ''}|${model}`
+    const key = this.contextLengthKey(providerName, model)
     const cached = this.contextLengthCache.get(key)
     if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value)
 

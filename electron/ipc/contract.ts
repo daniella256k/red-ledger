@@ -8,7 +8,8 @@
 import type {
   Conversation, Message, Settings, FileNode, SearchResult,
   Attachment, AttachmentParseResult, LLMRequest, StreamChunk, ContextProfile, TitleGenerationRequest,
-  McpServerStatus, McpSignInResult
+  McpServerStatus, McpSignInResult,
+  StorageOverview, ChatStorageInfo, StoredImageInfo, RemoveImageResult, CompactResult
 } from '../../src/types'
 
 export type ChatExportFormat = 'markdown' | 'xml'
@@ -98,6 +99,16 @@ export interface IpcContract {
   'dialog:openTextFile':        { params: [];                                          result: string | null }
   'dialog:openAttachmentFiles': { params: [];                                          result: Attachment[] }
   'attachment:parseFiles':      { params: [filePaths: string[]];                       result: AttachmentParseResult }
+
+  // Storage
+  'storage:getOverview':        { params: [];                                          result: StorageOverview }
+  'storage:listChats':          { params: [];                                          result: ChatStorageInfo[] }
+  'storage:listImages':         { params: [];                                          result: StoredImageInfo[] }
+  'storage:removeImage':        { params: [blobId: string];                            result: RemoveImageResult }
+  'storage:compact':            { params: [];                                          result: CompactResult }
+  'storage:clearCaches':        { params: [];                                          result: void }
+  'storage:showBackup':         { params: [name: string];                              result: void }
+  'storage:deleteBackup':       { params: [name: string];                              result: void }
 
   // Chat import/export
   'chat:export':                { params: [conversationId: string, format: ChatExportFormat]; result: ChatExportResult }

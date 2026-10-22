@@ -188,16 +188,8 @@ export interface LLMRequestMessage {
   content: string
   timestamp: string
   attachments?: Attachment[]
-  /** Tool calls made while producing an earlier assistant reply (results left out). */
-  toolCalls?: ToolCallRecord[]
-}
-
-/** Slim record of a past tool call, sent back so the model knows what it already did. */
-export interface ToolCallRecord {
-  name: string
-  arguments: Record<string, unknown>
-  status: 'ok' | 'error' | 'incomplete'
-  error?: string
+  /** Tool calls made while producing an earlier assistant reply, results included. */
+  toolCalls?: ToolCall[]
 }
 
 // ─── Stream Chunks ───────────────────────────────────────────────────────────
@@ -249,7 +241,14 @@ export interface ImageAttachment {
   kind: 'image'
   name: string
   mimeType: ImageAttachmentMimeType
-  dataUrl: string
+  /** The image as a data: URL, while it is being composed. Saved messages carry blobId instead. */
+  dataUrl?: string
+  /** SHA-256 of the image bytes in the database's attachment store. */
+  blobId?: string
+  /** Size of the stored image in bytes. */
+  size?: number
+  /** The user removed this image to free space: only its name is left. */
+  removed?: boolean
 }
 
 export type Attachment = TextAttachment | ImageAttachment
@@ -257,6 +256,65 @@ export type Attachment = TextAttachment | ImageAttachment
 export interface AttachmentParseResult {
   attachments: Attachment[]
   failed: string[]
+}
+
+// ─── Storage ─────────────────────────────────────────────────────────────────
+
+export interface StorageBackup {
+  /** File name, next to the database. */
+  name: string
+  bytes: number
+  modifiedAt: number
+}
+
+export interface StorageOverview {
+  /** The database file and its write-ahead log on disk. */
+  databaseBytes: number
+  /** Free space inside the database file that Compact gives back to the disk. */
+  reclaimableBytes: number
+  /** Stored image attachments, each counted once. */
+  imageBytes: number
+  /** Chromium's caches in the app profile: safe to clear, rebuilt as needed. */
+  cacheBytes: number
+  /** Copies of the database made before migrations. */
+  backups: StorageBackup[]
+}
+
+export interface ChatStorageInfo {
+  conversationId: string
+  title: string
+  isPinned: boolean
+  updatedAt: number
+  messageCount: number
+  imageCount: number
+  /** Message text, reasoning, tool calls and text attachments. */
+  textBytes: number
+  /** Images in this chat; an image shared with a fork counts in both. */
+  imageBytes: number
+  totalBytes: number
+}
+
+export interface StoredImageInfo {
+  blobId: string
+  name: string
+  mimeType: ImageAttachmentMimeType
+  bytes: number
+  /** When the image was first sent. */
+  firstSentAt: number
+  /** Most recent activity among the chats that use it. */
+  lastChatActivityAt: number
+  /** Every chat that uses the image (forks share it). */
+  chats: Array<{ conversationId: string; title: string }>
+}
+
+export interface RemoveImageResult {
+  freedBytes: number
+  conversationIds: string[]
+}
+
+export interface CompactResult {
+  beforeBytes: number
+  afterBytes: number
 }
 
 // --- Context Profiles ---
@@ -367,6 +425,17 @@ export interface RedLedgerAPI {
   openTextFile(): Promise<string | null>
   openAttachmentFiles(): Promise<Attachment[]>
   parseAttachmentFiles(files: File[]): Promise<AttachmentParseResult>
+
+  // Storage
+  getStorageOverview(): Promise<StorageOverview>
+  listChatStorage(): Promise<ChatStorageInfo[]>
+  listStoredImages(): Promise<StoredImageInfo[]>
+  /** Removes an image from every message that uses it and deletes its bytes. */
+  removeStoredImage(blobId: string): Promise<RemoveImageResult>
+  compactDatabase(): Promise<CompactResult>
+  clearCaches(): Promise<void>
+  showStorageBackup(name: string): Promise<void>
+  deleteStorageBackup(name: string): Promise<void>
 
   // Chat Export / Import
   exportChat(conversationId: string, format: ChatExportFormat): Promise<ChatExportResult>

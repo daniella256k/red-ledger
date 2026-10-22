@@ -5,6 +5,7 @@ import { ProviderSection } from './settings/ProviderSection'
 import { SearchSection } from './settings/SearchSection'
 import { McpConnectionsSection } from './settings/McpConnectionsSection'
 import { AdvancedSection } from './settings/AdvancedSection'
+import { StorageSection } from './settings/StorageSection'
 import { DarkModeCard } from './settings/DarkModeCard'
 
 export function SettingsPanel() {
@@ -55,6 +56,7 @@ export function SettingsPanel() {
         )}
 
         <AdvancedSection settings={settings} saveSettings={saveSettings} />
+        <StorageSection />
       </div>
 
       <div className="mt-auto border-t border-weathered/80 bg-base-200/35 p-3">

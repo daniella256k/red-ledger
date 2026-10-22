@@ -219,6 +219,32 @@ const api: RedLedgerAPI = {
     }
   },
 
+  // ─── Storage ─────────────────────────────────────────────────────────────
+
+  getStorageOverview: () =>
+    ipcRenderer.invoke('storage:getOverview'),
+
+  listChatStorage: () =>
+    ipcRenderer.invoke('storage:listChats'),
+
+  listStoredImages: () =>
+    ipcRenderer.invoke('storage:listImages'),
+
+  removeStoredImage: (blobId: string) =>
+    ipcRenderer.invoke('storage:removeImage', blobId),
+
+  compactDatabase: () =>
+    ipcRenderer.invoke('storage:compact'),
+
+  clearCaches: () =>
+    ipcRenderer.invoke('storage:clearCaches'),
+
+  showStorageBackup: (name: string) =>
+    ipcRenderer.invoke('storage:showBackup', name),
+
+  deleteStorageBackup: (name: string) =>
+    ipcRenderer.invoke('storage:deleteBackup', name),
+
   // ─── Chat Export / Import ────────────────────────────────────────────────
 
   exportChat: (conversationId, format) =>

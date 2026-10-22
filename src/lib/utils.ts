@@ -34,6 +34,19 @@ export function formatTimestamp(ts: number): string {
   return monthDayYearFormat.format(date)
 }
 
+/** Size on disk for people: 0 B, 840 KB, 12.4 MB, 1.2 GB. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  const units = ['KB', 'MB', 'GB']
+  let value = bytes / 1024
+  let unit = 0
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024
+    unit += 1
+  }
+  return `${value >= 100 || unit === 0 ? Math.round(value) : value.toFixed(1)} ${units[unit]}`
+}
+
 export function truncate(str: string, maxLen: number): string {
   if (str.length <= maxLen) return str
   return str.slice(0, maxLen - 1) + '…'

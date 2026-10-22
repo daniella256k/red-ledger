@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { LlmService, MAX_TOOL_CALLS, buildToolCallBudgetNotice, buildToolCallLogTag, estimateUsage } from '../LlmService'
-import { toToolCallRecords } from '../../../src/lib/toolCallRecords'
+import { LlmService, MAX_TOOL_CALLS, buildPastReplyMessages, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext } from '../LlmService'
+import { parseStoredToolCalls } from '../../../src/lib/storedToolCalls'
 import { sanitizeSettings } from '../SettingsService'
 import { BaseLLMProvider, readContextLength, reportedUsageChunk } from '../../lib/providers/base'
 import type { LLMMessage, ProviderSendOptions } from '../../lib/providers/base'
@@ -190,38 +190,81 @@ describe('LlmService tool call budget', () => {
 })
 
 describe('LlmService tool call history', () => {
-  it('records past tool calls without results', () => {
-    const records = toToolCallRecords(JSON.stringify([
-      { id: '1', name: 'web_search', arguments: { query: 'archipelago paint' }, result: { results: ['big payload'] } },
-      { id: '2', name: 'fetch_url', arguments: { url: 'https://example.com' }, result: { error: 'Timed out', code: 'NETWORK_ERROR' } },
-      { id: '3', name: 'read_file', arguments: { path: 'a.txt' } }
+  it('keeps past tool results, ids and offsets when parsing stored calls', () => {
+    const toolCalls = parseStoredToolCalls(JSON.stringify([
+      { id: '1', name: 'web_search', arguments: { query: 'archipelago paint' }, result: { results: ['big payload'] }, contentOffset: 4 },
+      { id: '2', name: 'read_file', arguments: { path: 'a.txt' } },
+      { name: 42 }
     ]))
 
-    expect(records).toEqual([
-      { name: 'web_search', arguments: { query: 'archipelago paint' }, status: 'ok' },
-      { name: 'fetch_url', arguments: { url: 'https://example.com' }, status: 'error', error: 'Timed out' },
-      { name: 'read_file', arguments: { path: 'a.txt' }, status: 'incomplete' }
+    expect(toolCalls).toEqual([
+      { id: '1', name: 'web_search', arguments: { query: 'archipelago paint' }, result: { results: ['big payload'] }, contentOffset: 4 },
+      { id: '2', name: 'read_file', arguments: { path: 'a.txt' } }
     ])
-    expect(toToolCallRecords(undefined)).toBeUndefined()
-    expect(toToolCallRecords('not json')).toBeUndefined()
+    expect(parseStoredToolCalls(undefined)).toBeUndefined()
+    expect(parseStoredToolCalls('not json')).toBeUndefined()
   })
 
-  it('formats a compact, clipped log', () => {
-    expect(buildToolCallLogTag(undefined)).toBeNull()
-    expect(buildToolCallLogTag([])).toBeNull()
+  it('rebuilds each round of an earlier reply with its full results', () => {
+    const content = 'Searching. Reading the page. It is blue.'
+    const messages = buildPastReplyMessages(content, [
+      { id: 'tool_0', name: 'web_search', arguments: { query: 'sky' }, result: { results: ['sky.example'] }, contentOffset: 11 },
+      { id: 'tool_0', name: 'fetch_url', arguments: { url: 'https://sky.example' }, result: { text: 'The sky is blue.' }, contentOffset: 29 },
+      { id: 'tool_1', name: 'read_file', arguments: { path: 'notes.md' }, contentOffset: 29 }
+    ])
 
-    const tag = buildToolCallLogTag([
-      { name: 'web_search', arguments: { query: 'paint' }, status: 'ok' },
-      { name: 'fetch_url', arguments: { url: 'x'.repeat(500) }, status: 'error', error: 'Timed out' }
-    ])!
-    expect(tag).toContain('previous_reply_tool_calls count=2')
-    expect(tag).toContain('1. web_search {"query":"paint"} -> ok')
-    expect(tag).toContain('2. fetch_url')
-    expect(tag).toContain('-> error: Timed out')
-    expect(tag).not.toContain('x'.repeat(300))
+    expect(messages.map((m) => m.role)).toEqual(['assistant', 'tool', 'assistant', 'tool', 'tool', 'assistant'])
+    expect(messages[0]).toMatchObject({ content: 'Searching. ', tool_calls: [{ id: 'tool_0', function: { name: 'web_search' } }] })
+    expect(messages[1]).toEqual({ role: 'tool', content: '{"results":["sky.example"]}', tool_call_id: 'tool_0' })
+
+    // A repeated id is made unique, and each result still answers its own call.
+    const secondRound = messages[2].tool_calls!
+    expect(messages[2].content).toBe('Reading the page. ')
+    expect(secondRound.map((tc) => tc.function.name)).toEqual(['fetch_url', 'read_file'])
+    expect(secondRound[0].id).not.toBe('tool_0')
+    expect(messages[3]).toMatchObject({ content: '{"text":"The sky is blue."}', tool_call_id: secondRound[0].id })
+    expect(messages[4].tool_call_id).toBe('tool_1')
+    expect(messages[4].content).toContain('did not finish')
+
+    expect(messages[5]).toEqual({ role: 'assistant', content: 'It is blue.' })
   })
 
-  it('puts the log on the user message that follows the reply', async () => {
+  it('puts calls stored without an offset before the reply text', () => {
+    const messages = buildPastReplyMessages('Done.', [
+      { id: 'a', name: 'list_files', arguments: {}, result: { files: [] } }
+    ])
+
+    expect(messages).toEqual([
+      { role: 'assistant', content: null, tool_calls: [{ id: 'a', type: 'function', function: { name: 'list_files', arguments: '{}' } }] },
+      { role: 'tool', content: '{"files":[]}', tool_call_id: 'a' },
+      { role: 'assistant', content: 'Done.' }
+    ])
+  })
+
+  it('shortens only the oldest results, and only when a known context window would overflow', () => {
+    const build = (): LLMMessage[] => [
+      { role: 'system', content: 'system' },
+      ...buildPastReplyMessages('Old answer.', [{ id: 'old', name: 'fetch_url', arguments: {}, result: 'x'.repeat(40_000) }]),
+      ...buildPastReplyMessages('New answer.', [{ id: 'new', name: 'fetch_url', arguments: {}, result: 'y'.repeat(40_000) }])
+    ]
+
+    const unknownWindow = build()
+    expect(fitToolResultsToContext(unknownWindow, [], null)).toBe(0)
+    expect(unknownWindow.filter((m) => m.role === 'tool').every((m) => (m.content as string).length > 40_000)).toBe(true)
+
+    const roomy = build()
+    expect(fitToolResultsToContext(roomy, [], 200_000)).toBe(0)
+
+    // ~20k tokens of results against a 16k window: the older one gives way.
+    const tight = build()
+    expect(fitToolResultsToContext(tight, [], 16_000)).toBe(1)
+    const [oldResult, newResult] = tight.filter((m) => m.role === 'tool').map((m) => m.content as string)
+    expect(oldResult).toContain('"shortened":true')
+    expect(oldResult.length).toBeLessThan(3_000)
+    expect(newResult.length).toBeGreaterThan(40_000)
+  })
+
+  it('replays earlier tool calls and results in the request', async () => {
     const seen: LLMMessage[][] = []
     class OneShotProvider extends BaseLLMProvider {
       sendStreaming(options: ProviderSendOptions) {
@@ -245,9 +288,9 @@ describe('LlmService tool call history', () => {
             role: 'assistant',
             content: 'It is a Paint options file.',
             timestamp: 't2',
-            toolCalls: [{ name: 'web_search', arguments: { query: 'paint' }, status: 'ok' }]
+            toolCalls: [{ id: 'call_1', name: 'web_search', arguments: { query: 'paint' }, result: { results: ['paint.example'] } }]
           },
-          { role: 'user', content: 'how many tool calls did you make?', timestamp: 't3' }
+          { role: 'user', content: 'what did the search find?', timestamp: 't3' }
         ]
       },
       'stream-2',
@@ -255,12 +298,60 @@ describe('LlmService tool call history', () => {
       async (tc) => tc
     )
 
-    const [, firstUser, assistant, secondUser] = seen[0]
-    expect(firstUser.content).not.toContain('previous_reply_tool_calls')
-    expect(assistant.content).toBe('It is a Paint options file.')
-    expect(secondUser.content).toContain('[system: msg_timestamp=t3]')
-    expect(secondUser.content).toContain('1. web_search {"query":"paint"} -> ok')
-    expect(secondUser.content).toMatch(/how many tool calls did you make\?$/)
+    const [, firstUser, toolRound, toolResult, reply, secondUser] = seen[0]
+    expect(firstUser.content).toContain('what is this file?')
+    expect(toolRound).toMatchObject({ role: 'assistant', content: null, tool_calls: [{ id: 'call_1', function: { name: 'web_search' } }] })
+    expect(toolResult).toEqual({ role: 'tool', content: '{"results":["paint.example"]}', tool_call_id: 'call_1' })
+    expect(reply).toEqual({ role: 'assistant', content: 'It is a Paint options file.' })
+    expect(secondUser.content).toBe('[system: msg_timestamp=t3]\n\nwhat did the search find?')
+  })
+})
+
+describe('LlmService saved images', () => {
+  it('sends stored images by their bytes and notes removed ones', async () => {
+    const seen: LLMMessage[][] = []
+    class OneShotProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        seen.push(options.messages)
+        queueMicrotask(() => options.onChunk({ type: 'done' }))
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+    }
+    registerProvider({ name: 'openai', displayName: 'One shot', defaultBaseUrl: '', factory: () => new OneShotProvider('', '') })
+
+    const blobId = 'a'.repeat(64)
+    const service = new LlmService({
+      getSettings: () => sanitizeSettings(undefined),
+      getSystemPrompt: () => 'system',
+      getAttachmentBlob: (id) => id === blobId ? { mimeType: 'image/png', data: Buffer.from([1, 2, 3]) } : null
+    })
+    await service.orchestrateStream(
+      {
+        conversationId: 'c1',
+        model: 'test',
+        provider: 'openai',
+        messages: [{
+          role: 'user',
+          content: 'compare these',
+          timestamp: 't1',
+          attachments: [
+            { kind: 'image', name: 'kept.png', mimeType: 'image/png', blobId },
+            { kind: 'image', name: 'gone.png', mimeType: 'image/png', removed: true }
+          ]
+        }]
+      },
+      'stream-images',
+      { send: () => {} },
+      async (tc) => tc
+    )
+
+    const parts = seen[0][1].content as Array<{ type: string; text?: string; image_url?: { url: string } }>
+    expect(parts.filter((part) => part.type === 'image_url')).toEqual([
+      { type: 'image_url', image_url: { url: `data:image/png;base64,${Buffer.from([1, 2, 3]).toString('base64')}` } }
+    ])
+    expect(parts[0].text).toContain('**Attached image: kept.png**')
+    expect(parts[0].text).toContain('**Attached image: gone.png**\n[Image no longer available')
   })
 })
 

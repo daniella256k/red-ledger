@@ -16,6 +16,8 @@ function createFakeConversationService(state: FakeServiceState): ConversationSer
   return {
     getConversation: (id: string) => state.conversations.get(id) ?? null,
     listMessages: (id: string) => state.messages.get(id) ?? [],
+    // The fake keeps images inline, so they are already export-ready.
+    listMessagesWithImageData: (id: string) => state.messages.get(id) ?? [],
     createConversation: (data: Partial<Conversation>): Conversation => {
       const id = `imported-${nextId++}`
       const now = Date.now()

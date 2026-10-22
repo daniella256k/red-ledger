@@ -38,11 +38,10 @@ export class ChatTransferService {
     if (!conversation) {
       throw new Error(`Conversation not found: ${conversationId}`)
     }
-    const messages = this.conversations.listMessages(conversationId)
-
+    // XML carries the image bytes so it re-imports whole; Markdown only names them.
     return format === 'xml'
-      ? serializeXml(conversation, messages)
-      : serializeMarkdown(conversation, messages)
+      ? serializeXml(conversation, this.conversations.listMessagesWithImageData(conversationId))
+      : serializeMarkdown(conversation, this.conversations.listMessages(conversationId))
   }
 
   /**
@@ -142,7 +141,7 @@ function serializeMarkdown(conversation: Conversation, messages: Message[]): str
       lines.push('')
       for (const attachment of message.attachments) {
         if (attachment.kind === 'image') {
-          lines.push(`- **Image:** ${attachment.name} (${attachment.mimeType})`)
+          lines.push(`- **Image:** ${attachment.name} (${attachment.mimeType})${attachment.removed ? ' — removed to free space' : ''}`)
         } else {
           const content = attachment.content ?? ''
           lines.push(`- **File:** ${attachment.name}`)
@@ -226,6 +225,8 @@ function serializeXml(conversation: Conversation, messages: Message[]): string {
       lines.push('      <attachments>')
       for (const attachment of message.attachments) {
         if (attachment.kind === 'image') {
+          // A removed image has no bytes left to export.
+          if (!attachment.dataUrl) continue
           lines.push(`        <attachment kind="image" name="${escapeAttr(attachment.name)}" mimeType="${escapeAttr(attachment.mimeType)}">`)
           lines.push(`          <dataUrl>${cdata(attachment.dataUrl)}</dataUrl>`)
           lines.push('        </attachment>')

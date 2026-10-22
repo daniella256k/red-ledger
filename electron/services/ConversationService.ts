@@ -1,13 +1,18 @@
 import { existsSync } from 'fs'
-import { randomUUID } from 'crypto'
+import { createHash, randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
+import { BLOB_ID_PATTERN } from '../../src/lib/attachments'
 import type {
   Attachment,
+  ChatStorageInfo,
   Conversation,
   ConversationRequestInfo,
+  ImageAttachment,
   Message,
-  ImageAttachmentMimeType
+  ImageAttachmentMimeType,
+  RemoveImageResult,
+  StoredImageInfo
 } from '../../src/types'
 
 const SUPPORTED_IMAGE_MIME_TYPES = new Set<ImageAttachmentMimeType>([
@@ -39,16 +44,21 @@ function parseAttachment(value: unknown): Attachment | null {
     if (typeof record.mimeType !== 'string' || !SUPPORTED_IMAGE_MIME_TYPES.has(record.mimeType as ImageAttachmentMimeType)) {
       return null
     }
-    if (typeof record.dataUrl !== 'string' || record.dataUrl.length === 0) {
-      return null
-    }
-    const mimeType = record.mimeType as ImageAttachmentMimeType
-    return {
+    const image: ImageAttachment = {
       kind: 'image',
       name: record.name,
-      mimeType,
-      dataUrl: record.dataUrl
+      mimeType: record.mimeType as ImageAttachmentMimeType,
+      ...(typeof record.size === 'number' ? { size: record.size } : {})
     }
+    if (record.removed === true) return { ...image, removed: true }
+    if (typeof record.blobId === 'string' && BLOB_ID_PATTERN.test(record.blobId)) {
+      return { ...image, blobId: record.blobId }
+    }
+    // Left inline only if the move to the attachment store couldn't read it.
+    if (typeof record.dataUrl === 'string' && record.dataUrl.length > 0) {
+      return { ...image, dataUrl: record.dataUrl }
+    }
+    return null
   }
 
   if (typeof record.content !== 'string') return null
@@ -58,6 +68,52 @@ function parseAttachment(value: unknown): Attachment | null {
     name: record.name,
     content: record.content
   }
+}
+
+/** The bytes of a base64 data: URL, or null if it isn't one. */
+function decodeDataUrl(dataUrl: string): Buffer | null {
+  const comma = dataUrl.indexOf(',')
+  if (!dataUrl.startsWith('data:') || comma === -1) return null
+  if (!dataUrl.slice(0, comma).endsWith(';base64')) return null
+  const data = Buffer.from(dataUrl.slice(comma + 1), 'base64')
+  return data.length > 0 ? data : null
+}
+
+function hashBytes(data: Buffer): string {
+  return createHash('sha256').update(data).digest('hex')
+}
+
+function parseAttachmentList(json: unknown): unknown[] {
+  if (typeof json !== 'string' || json.length === 0) return []
+  try {
+    const parsed = JSON.parse(json) as unknown
+    return Array.isArray(parsed) ? parsed : []
+  } catch {
+    return []
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object'
+}
+
+/** Messages' attachments as stored, with images moved to the attachment store. */
+interface PreparedAttachments {
+  json: string | null
+  blobIds: string[]
+}
+
+/** A stored image's bytes. */
+export interface AttachmentBlob {
+  mimeType: string
+  data: Buffer
+}
+
+/** Page counts behind the database's size on disk. */
+export interface DatabasePageStats {
+  pageSize: number
+  pageCount: number
+  freePages: number
 }
 
 /**
@@ -116,6 +172,23 @@ export class ConversationService {
         created_at INTEGER NOT NULL,
         FOREIGN KEY (conversation_id) REFERENCES conversations(id) ON DELETE CASCADE
       );
+
+      -- Image bytes, stored once per distinct image (keyed by SHA-256), so
+      -- forks and re-sent images share one copy instead of inline base64.
+      CREATE TABLE IF NOT EXISTS attachment_blobs (
+        id TEXT PRIMARY KEY,
+        mime_type TEXT NOT NULL,
+        size INTEGER NOT NULL,
+        data BLOB NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+
+      -- Which messages use which images; an image no message uses is deleted.
+      CREATE TABLE IF NOT EXISTS message_blobs (
+        message_id TEXT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+        blob_id TEXT NOT NULL REFERENCES attachment_blobs(id),
+        PRIMARY KEY (message_id, blob_id)
+      );
     `)
 
     // Migration path for existing databases created before pinning support.
@@ -131,10 +204,74 @@ export class ConversationService {
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
        CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
-       CREATE INDEX IF NOT EXISTS idx_conversations_pinned_updated ON conversations(is_pinned DESC, updated_at DESC);`
+       CREATE INDEX IF NOT EXISTS idx_conversations_pinned_updated ON conversations(is_pinned DESC, updated_at DESC);
+       CREATE INDEX IF NOT EXISTS idx_message_blobs_blob ON message_blobs(blob_id);`
     )
 
     this.messageSearchIndexed = this.ensureMessageSearchIndex()
+
+    this.moveInlineImagesToAttachmentStore()
+  }
+
+  /**
+   * Images used to be saved inside the attachments JSON as base64 data URLs.
+   * Moves them, byte for byte, into attachment_blobs (base64 text is a third
+   * larger than the bytes, and forks copied it). Backs the database up first,
+   * then compacts it once so the file actually shrinks. Unreadable entries are
+   * left as they were.
+   */
+  private moveInlineImagesToAttachmentStore(): void {
+    const candidates = this.db
+      .prepare(`SELECT id FROM messages WHERE attachments LIKE '%"dataUrl"%'`)
+      .all() as Array<{ id: string }>
+    if (candidates.length === 0) return
+
+    const getAttachments = this.db.prepare('SELECT attachments FROM messages WHERE id = ?')
+    const setAttachments = this.db.prepare('UPDATE messages SET attachments = ? WHERE id = ?')
+    let backedUp = false
+    let moved = 0
+
+    const moveOne = this.db.transaction((messageId: string) => {
+      const row = getAttachments.get(messageId) as { attachments: string | null } | undefined
+      const list = parseAttachmentList(row?.attachments)
+      const blobIds: string[] = []
+
+      const next = list.map((item) => {
+        if (!isRecord(item) || item.kind !== 'image' || typeof item.dataUrl !== 'string') return item
+        const data = decodeDataUrl(item.dataUrl)
+        if (!data || typeof item.mimeType !== 'string') return item
+        const blobId = this.putBlob(data, item.mimeType)
+        blobIds.push(blobId)
+        return { kind: 'image', name: item.name, mimeType: item.mimeType, blobId, size: data.length }
+      })
+      if (blobIds.length === 0) return
+
+      setAttachments.run(JSON.stringify(next), messageId)
+      this.linkBlobs(messageId, blobIds)
+      moved += 1
+    })
+
+    // One message per transaction, so a large history is never all in memory at once.
+    for (const { id } of candidates) {
+      const row = getAttachments.get(id) as { attachments: string | null } | undefined
+      const hasInlineImage = parseAttachmentList(row?.attachments).some((item) =>
+        isRecord(item) && item.kind === 'image' && typeof item.dataUrl === 'string'
+      )
+      if (!hasInlineImage) continue
+      if (!backedUp) {
+        this.backupBeforeMigration('attachment-store')
+        backedUp = true
+      }
+      moveOne(id)
+    }
+
+    if (moved > 0) {
+      try {
+        this.compact()
+      } catch (err) {
+        console.warn('[ConversationService] Could not compact the database after moving images:', err)
+      }
+    }
   }
 
   /**
@@ -522,6 +659,8 @@ export class ConversationService {
         'deleteConversation',
         'DELETE FROM conversations WHERE id = ?'
       ).run(convId)
+
+      this.pruneUnusedBlobs()
     })
 
     deleteInTransaction(id)
@@ -548,11 +687,12 @@ export class ConversationService {
 
     const sourceMessages = this.stmt(
       'listMessagesForFork',
-      `SELECT role, content, attachments, thinking, tool_calls, timestamp, created_at
+      `SELECT id, role, content, attachments, thinking, tool_calls, timestamp, created_at
        FROM messages
        WHERE conversation_id = ? AND rowid <= ?
        ORDER BY rowid ASC`
     ).all(conversationId, cutoff.rowid) as Array<{
+      id: string
       role: Message['role']
       content: string
       attachments: string | null
@@ -590,9 +730,17 @@ export class ConversationService {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
 
+      // The fork's messages share the source's stored images rather than copying them.
+      const shareForkMessageBlobs = this.stmt(
+        'shareForkMessageBlobs',
+        `INSERT OR IGNORE INTO message_blobs (message_id, blob_id)
+         SELECT ?, blob_id FROM message_blobs WHERE message_id = ?`
+      )
+
       for (const message of sourceMessages) {
+        const forkMessageId = randomUUID()
         insertForkMessage.run(
-          randomUUID(),
+          forkMessageId,
           forkConversationId,
           message.role,
           message.content,
@@ -602,6 +750,7 @@ export class ConversationService {
           message.timestamp,
           message.created_at
         )
+        shareForkMessageBlobs.run(forkMessageId, message.id)
       }
     })
 
@@ -630,6 +779,8 @@ export class ConversationService {
     const timestamp = new Date().toISOString()
 
     const createInTransaction = this.db.transaction(() => {
+      const attachments = this.prepareAttachments(data.attachments)
+
       this.stmt(
         'createMessage',
         `INSERT INTO messages (id, conversation_id, role, content, attachments, thinking, tool_calls, timestamp, created_at)
@@ -639,12 +790,13 @@ export class ConversationService {
         data.conversationId,
         data.role,
         data.content,
-        data.attachments && data.attachments.length > 0 ? JSON.stringify(data.attachments) : null,
+        attachments.json,
         data.thinking ?? null,
         data.toolCalls || null,
         timestamp,
         now
       )
+      this.linkBlobs(id, attachments.blobIds)
 
       // Bump parent conversation's updatedAt
       this.touchConversation(data.conversationId, now)
@@ -710,9 +862,287 @@ export class ConversationService {
       ).run(conversationId, row.rowid)
 
       this.touchConversation(conversationId, now)
+      this.pruneUnusedBlobs()
     })
 
     deleteInTransaction()
+  }
+
+  // ─── Attachment Store ─────────────────────────────────────────────────────
+
+  /**
+   * Attachments as saved: images go to the attachment store and are kept as a
+   * reference. Images that are already stored (a resent message) are reused.
+   */
+  private prepareAttachments(attachments: Attachment[] | undefined): PreparedAttachments {
+    if (!attachments || attachments.length === 0) return { json: null, blobIds: [] }
+
+    const blobIds: string[] = []
+    const stored = attachments.map((attachment): Attachment => {
+      if (attachment.kind !== 'image') return attachment
+
+      const image: ImageAttachment = { kind: 'image', name: attachment.name, mimeType: attachment.mimeType }
+      if (attachment.removed) {
+        return { ...image, removed: true, ...(attachment.size !== undefined ? { size: attachment.size } : {}) }
+      }
+      if (attachment.dataUrl) {
+        const data = decodeDataUrl(attachment.dataUrl)
+        if (!data) throw new Error(`Image "${attachment.name}" could not be read`)
+        const blobId = this.putBlob(data, attachment.mimeType)
+        blobIds.push(blobId)
+        return { ...image, blobId, size: data.length }
+      }
+
+      const size = attachment.blobId ? this.getBlobSize(attachment.blobId) : null
+      if (!attachment.blobId || size === null) throw new Error(`Image "${attachment.name}" is no longer stored`)
+      blobIds.push(attachment.blobId)
+      return { ...image, blobId: attachment.blobId, size }
+    })
+
+    return { json: JSON.stringify(stored), blobIds }
+  }
+
+  /** Stores image bytes once, keyed by their hash, and returns that id. */
+  private putBlob(data: Buffer, mimeType: string): string {
+    const blobId = hashBytes(data)
+    this.stmt(
+      'putBlob',
+      `INSERT OR IGNORE INTO attachment_blobs (id, mime_type, size, data, created_at)
+       VALUES (?, ?, ?, ?, ?)`
+    ).run(blobId, mimeType, data.length, data, Date.now())
+    return blobId
+  }
+
+  private linkBlobs(messageId: string, blobIds: string[]): void {
+    const link = this.stmt(
+      'linkBlob',
+      'INSERT OR IGNORE INTO message_blobs (message_id, blob_id) VALUES (?, ?)'
+    )
+    for (const blobId of blobIds) link.run(messageId, blobId)
+  }
+
+  private getBlobSize(blobId: string): number | null {
+    const row = this.stmt(
+      'getBlobSize',
+      'SELECT size FROM attachment_blobs WHERE id = ?'
+    ).get(blobId) as { size: number } | undefined
+    return row ? row.size : null
+  }
+
+  /** Deletes stored images that no message uses any more. */
+  private pruneUnusedBlobs(): void {
+    this.stmt(
+      'pruneUnusedBlobs',
+      `DELETE FROM attachment_blobs
+       WHERE NOT EXISTS (SELECT 1 FROM message_blobs mb WHERE mb.blob_id = attachment_blobs.id)`
+    ).run()
+  }
+
+  getAttachmentBlob(blobId: string): AttachmentBlob | null {
+    if (!BLOB_ID_PATTERN.test(blobId)) return null
+    const row = this.stmt(
+      'getAttachmentBlob',
+      'SELECT mime_type, data FROM attachment_blobs WHERE id = ?'
+    ).get(blobId) as { mime_type: string; data: Buffer } | undefined
+    return row ? { mimeType: row.mime_type, data: row.data } : null
+  }
+
+  /** Messages with each stored image inlined as a data URL, for export files. */
+  listMessagesWithImageData(conversationId: string): Message[] {
+    return this.listMessages(conversationId).map((message) => {
+      if (!message.attachments?.some((attachment) => attachment.kind === 'image' && attachment.blobId)) {
+        return message
+      }
+      return {
+        ...message,
+        attachments: message.attachments.map((attachment): Attachment => {
+          if (attachment.kind !== 'image' || !attachment.blobId) return attachment
+          const blob = this.getAttachmentBlob(attachment.blobId)
+          const image: ImageAttachment = { kind: 'image', name: attachment.name, mimeType: attachment.mimeType }
+          return blob
+            ? { ...image, dataUrl: `data:${blob.mimeType};base64,${blob.data.toString('base64')}` }
+            : { ...image, removed: true }
+        })
+      }
+    })
+  }
+
+  // ─── Storage ──────────────────────────────────────────────────────────────
+
+  getPageStats(): DatabasePageStats {
+    return {
+      pageSize: this.db.pragma('page_size', { simple: true }) as number,
+      pageCount: this.db.pragma('page_count', { simple: true }) as number,
+      freePages: this.db.pragma('freelist_count', { simple: true }) as number
+    }
+  }
+
+  getStoredImageBytes(): number {
+    const row = this.stmt(
+      'getStoredImageBytes',
+      'SELECT COALESCE(SUM(size), 0) AS bytes FROM attachment_blobs'
+    ).get() as { bytes: number }
+    return row.bytes
+  }
+
+  /** Every chat with how much space it takes, largest first. */
+  listChatStorage(): ChatStorageInfo[] {
+    const rows = this.stmt(
+      'listChatStorage',
+      `WITH text_sizes AS (
+         SELECT conversation_id,
+                COUNT(*) AS message_count,
+                SUM(length(CAST(content AS BLOB))
+                  + COALESCE(length(CAST(thinking AS BLOB)), 0)
+                  + COALESCE(length(CAST(tool_calls AS BLOB)), 0)
+                  + COALESCE(length(CAST(attachments AS BLOB)), 0)) AS text_bytes
+           FROM messages
+          GROUP BY conversation_id
+       ),
+       chat_images AS (
+         SELECT DISTINCT m.conversation_id, mb.blob_id
+           FROM message_blobs mb
+           JOIN messages m ON m.id = mb.message_id
+       ),
+       image_sizes AS (
+         SELECT ci.conversation_id, COUNT(*) AS image_count, SUM(b.size) AS image_bytes
+           FROM chat_images ci
+           JOIN attachment_blobs b ON b.id = ci.blob_id
+          GROUP BY ci.conversation_id
+       )
+       SELECT c.id, c.title, c.is_pinned, c.updated_at,
+              COALESCE(t.message_count, 0) AS message_count,
+              COALESCE(t.text_bytes, 0) AS text_bytes,
+              COALESCE(i.image_count, 0) AS image_count,
+              COALESCE(i.image_bytes, 0) AS image_bytes
+         FROM conversations c
+         LEFT JOIN text_sizes t ON t.conversation_id = c.id
+         LEFT JOIN image_sizes i ON i.conversation_id = c.id
+        ORDER BY COALESCE(t.text_bytes, 0) + COALESCE(i.image_bytes, 0) DESC, c.updated_at DESC`
+    ).all() as Array<{
+      id: string
+      title: string
+      is_pinned: number
+      updated_at: number
+      message_count: number
+      text_bytes: number
+      image_count: number
+      image_bytes: number
+    }>
+
+    return rows.map((row) => ({
+      conversationId: row.id,
+      title: row.title,
+      isPinned: Boolean(row.is_pinned),
+      updatedAt: row.updated_at,
+      messageCount: row.message_count,
+      imageCount: row.image_count,
+      textBytes: row.text_bytes,
+      imageBytes: row.image_bytes,
+      totalBytes: row.text_bytes + row.image_bytes
+    }))
+  }
+
+  /** Every stored image with the chats that use it, largest first. */
+  listStoredImages(): StoredImageInfo[] {
+    const rows = this.stmt(
+      'listStoredImages',
+      `SELECT b.id AS blob_id, b.mime_type, b.size, m.created_at, m.attachments,
+              c.id AS conversation_id, c.title, c.updated_at
+         FROM attachment_blobs b
+         JOIN message_blobs mb ON mb.blob_id = b.id
+         JOIN messages m ON m.id = mb.message_id
+         JOIN conversations c ON c.id = m.conversation_id
+        ORDER BY b.size DESC, b.id, m.created_at ASC`
+    ).all() as Array<{
+      blob_id: string
+      mime_type: string
+      size: number
+      created_at: number
+      attachments: string | null
+      conversation_id: string
+      title: string
+      updated_at: number
+    }>
+
+    const images = new Map<string, StoredImageInfo>()
+    for (const row of rows) {
+      let image = images.get(row.blob_id)
+      if (!image) {
+        const entry = parseAttachmentList(row.attachments)
+          .find((item) => isRecord(item) && item.blobId === row.blob_id)
+        const record = isRecord(entry) ? entry : {}
+        image = {
+          blobId: row.blob_id,
+          name: typeof record.name === 'string' ? record.name : 'image',
+          mimeType: (typeof record.mimeType === 'string' ? record.mimeType : row.mime_type) as ImageAttachmentMimeType,
+          bytes: row.size,
+          firstSentAt: row.created_at,
+          lastChatActivityAt: row.updated_at,
+          chats: []
+        }
+        images.set(row.blob_id, image)
+      }
+      image.firstSentAt = Math.min(image.firstSentAt, row.created_at)
+      image.lastChatActivityAt = Math.max(image.lastChatActivityAt, row.updated_at)
+      if (!image.chats.some((chat) => chat.conversationId === row.conversation_id)) {
+        image.chats.push({ conversationId: row.conversation_id, title: row.title })
+      }
+    }
+
+    return [...images.values()]
+  }
+
+  /**
+   * Removes an image from every message that uses it and deletes its bytes.
+   * The messages keep the image's name, marked as removed, and their text.
+   */
+  removeStoredImage(blobId: string): RemoveImageResult {
+    if (!BLOB_ID_PATTERN.test(blobId)) throw new Error('Invalid image id')
+
+    const remove = this.db.transaction((): RemoveImageResult => {
+      const size = this.getBlobSize(blobId)
+      if (size === null) return { freedBytes: 0, conversationIds: [] }
+
+      const rows = this.stmt(
+        'listMessagesUsingBlob',
+        `SELECT m.id, m.conversation_id, m.attachments
+           FROM message_blobs mb
+           JOIN messages m ON m.id = mb.message_id
+          WHERE mb.blob_id = ?`
+      ).all(blobId) as Array<{ id: string; conversation_id: string; attachments: string | null }>
+
+      const setAttachments = this.stmt('setMessageAttachments', 'UPDATE messages SET attachments = ? WHERE id = ?')
+      for (const row of rows) {
+        const next = parseAttachmentList(row.attachments).map((item) =>
+          isRecord(item) && item.kind === 'image' && item.blobId === blobId
+            ? { kind: 'image', name: item.name, mimeType: item.mimeType, size, removed: true }
+            : item
+        )
+        setAttachments.run(JSON.stringify(next), row.id)
+      }
+
+      this.stmt('unlinkBlob', 'DELETE FROM message_blobs WHERE blob_id = ?').run(blobId)
+      this.stmt('deleteBlob', 'DELETE FROM attachment_blobs WHERE id = ?').run(blobId)
+
+      return {
+        freedBytes: size,
+        conversationIds: [...new Set(rows.map((row) => row.conversation_id))]
+      }
+    })
+
+    return remove()
+  }
+
+  /**
+   * Rewrites the database file without its free space. Deleting rows only
+   * marks their pages free, so this is what makes the file smaller, and what
+   * clears deleted chats and images out of it for good.
+   */
+  compact(): void {
+    this.db.pragma('wal_checkpoint(TRUNCATE)')
+    this.db.exec('VACUUM')
+    this.db.pragma('wal_checkpoint(TRUNCATE)')
   }
 
   // ─── Lifecycle ────────────────────────────────────────────────────────────

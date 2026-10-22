@@ -52,6 +52,15 @@ function toPlainTextContent(content: LLMMessageContent | null): string {
   return textParts.join('\n\n')
 }
 
+function parseToolArguments(json: string): Record<string, unknown> {
+  try {
+    const parsed = JSON.parse(json) as unknown
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed as Record<string, unknown> : {}
+  } catch {
+    return {}
+  }
+}
+
 /**
  * Ollama provider - local LLM server.
  * Uses NDJSON streaming (one JSON object per line) instead of SSE.
@@ -95,6 +104,16 @@ export class OllamaProvider extends BaseLLMProvider {
       if (m.role === 'tool') {
         // Ollama wants tool responses as role: 'tool' with content
         return { role: 'tool' as const, content: toPlainTextContent(m.content) }
+      }
+      if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
+        // Ollama takes tool call arguments as an object, not a JSON string.
+        return {
+          role: m.role,
+          content: toPlainTextContent(m.content),
+          tool_calls: m.tool_calls.map((tc) => ({
+            function: { name: tc.function.name, arguments: parseToolArguments(tc.function.arguments) }
+          }))
+        }
       }
       return { role: m.role, content: toPlainTextContent(m.content) }
     })

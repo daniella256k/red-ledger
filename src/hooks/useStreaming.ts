@@ -3,7 +3,7 @@ import { resolveConversationProfile, useConversationStore, useSettingsStore, use
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
 import { DEFAULT_CHAT_TITLE, sanitizeGeneratedChatTitle } from '@/lib/chatTitle'
-import { toToolCallRecords } from '@/lib/toolCallRecords'
+import { parseStoredToolCalls } from '@/lib/storedToolCalls'
 import type {
   StreamChunk,
   ToolCall,
@@ -386,7 +386,7 @@ export function useStreaming() {
           ? { attachments: m.attachments }
           : {}),
         ...(m.role === 'assistant' && m.toolCalls
-          ? { toolCalls: toToolCallRecords(m.toolCalls) }
+          ? { toolCalls: parseStoredToolCalls(m.toolCalls) }
           : {})
       }))
 
