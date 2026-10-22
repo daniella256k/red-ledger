@@ -1,14 +1,14 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import { createPortal } from 'react-dom'
-import { FolderOpen, MessageSquare, Pin, Trash2, X } from 'lucide-react'
-import type { ChatStorageInfo, StorageBackup, StorageOverview, StoredImageInfo } from '@/types'
+import { MessageSquare, Pin, Trash2, X } from 'lucide-react'
+import type { ChatStorageInfo, StorageOverview, StoredImageInfo } from '@/types'
 import { useConversationStore } from '@/store'
 import { ATTACHMENT_URL_SCHEME } from '@/lib/attachments'
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
 import { cn, formatBytes, formatTimestamp } from '@/lib/utils'
 
-type StorageTab = 'chats' | 'images' | 'backups'
+type StorageTab = 'chats' | 'images'
 type ChatSort = 'size' | 'recent' | 'title'
 
 const DAY_MS = 86_400_000
@@ -164,22 +164,10 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
     notify({ type: 'success', message: 'Browser caches cleared.' })
   })
 
-  const handleDeleteBackup = async (backup: StorageBackup) => {
-    const confirmed = await confirmAction(
-      'Delete Backup',
-      `Delete ${backup.name} (${formatBytes(backup.bytes)})?`,
-      'This is a copy of the database made before an upgrade. Your chats are not affected. This action cannot be undone.'
-    )
-    if (!confirmed) return
-    await run('Deleting backup…', () => window.redLedger.deleteStorageBackup(backup.name))
-  }
-
   const isBusy = busyLabel !== null
-  const backups = overview?.backups ?? []
   const tabs: Array<{ value: StorageTab; label: string }> = [
     { value: 'chats', label: `Chats (${chats.length})` },
-    { value: 'images', label: `Images (${images.length})` },
-    ...(backups.length > 0 ? [{ value: 'backups' as const, label: `Backups (${backups.length})` }] : [])
+    { value: 'images', label: `Images (${images.length})` }
   ]
 
   return createPortal(
@@ -359,39 +347,6 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
                 ))}
               </ul>
             )
-          )}
-
-          {tab === 'backups' && (
-            <ul className="divide-y divide-weathered/60">
-              {backups.map((backup) => (
-                <li key={backup.name} className="flex items-center gap-3 px-4 py-2">
-                  <div className="flex-1 min-w-0">
-                    <div className="truncate text-sm text-soft-charcoal font-mono" title={backup.name}>{backup.name}</div>
-                    <div className="text-[11px] text-soft-charcoal/50">
-                      Made before an upgrade · {formatTimestamp(backup.modifiedAt)}
-                    </div>
-                  </div>
-                  <span className="text-xs font-medium text-soft-charcoal tabular-nums">{formatBytes(backup.bytes)}</span>
-                  <button
-                    type="button"
-                    onClick={() => void window.redLedger.showStorageBackup(backup.name)}
-                    className={`${ROW_BUTTON_CLASS} hover:bg-base-300 hover:text-soft-charcoal`}
-                    title="Show in folder"
-                  >
-                    <FolderOpen size={13} />
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleDeleteBackup(backup)}
-                    disabled={isBusy}
-                    className={`${ROW_BUTTON_CLASS} hover:bg-error/10 hover:text-error`}
-                    title="Delete backup"
-                  >
-                    <Trash2 size={13} />
-                  </button>
-                </li>
-              ))}
-            </ul>
           )}
         </div>
       </div>

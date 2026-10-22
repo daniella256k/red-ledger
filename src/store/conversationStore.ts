@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Attachment, Conversation, Message } from '@/types'
+import type { Attachment, Conversation, CreateMessageInput, Message, SelectBranchOptions } from '@/types'
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
 import { useContextProfileStore } from './contextProfileStore'
@@ -50,10 +50,13 @@ interface ConversationState {
   setConversationProfile: (id: string, profileId: string) => Promise<void>
   setActiveConversation: (id: string | null) => Promise<void>
   loadMessages: (conversationId: string) => Promise<void>
-  addMessage: (data: Omit<Message, 'id' | 'createdAt' | 'timestamp'>) => Promise<Message>
+  addMessage: (data: CreateMessageInput) => Promise<Message>
   touchConversation: (id: string, updatedAt?: number) => void
   updateMessage: (id: string, data: Partial<Message>) => void
-  deleteMessagesFrom: (messageId: string) => Promise<void>
+  /** Shows another version of a message (see RedLedgerAPI.selectBranch). */
+  selectBranch: (messageId: string, options?: SelectBranchOptions) => Promise<void>
+  /** Deletes a version of a message and everything after it. */
+  deleteMessageBranch: (messageId: string) => Promise<void>
 
   openDraft: () => Promise<void>
   discardDraft: () => void
@@ -281,10 +284,15 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     try {
       const message = await window.redLedger.createMessage(data)
       const updatedAt = message.createdAt
+      // A message placed under a chosen parent (an edit) starts a new branch,
+      // so the branch on screen is reloaded rather than appended to.
+      const branch = data.parentId !== undefined && get().activeConversationId === data.conversationId
+        ? await window.redLedger.listMessages(data.conversationId)
+        : null
       set((state) => ({
-        messages: state.activeConversationId === data.conversationId
-          ? [...state.messages, message]
-          : state.messages,
+        messages: state.activeConversationId !== data.conversationId
+          ? state.messages
+          : branch ?? [...state.messages, message],
         conversations: sortConversationsByPriority(
           state.conversations.map((c) =>
             c.id === data.conversationId ? { ...c, updatedAt } : c
@@ -318,19 +326,28 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     }))
   },
 
-  deleteMessagesFrom: async (messageId) => {
+  selectBranch: async (messageId, options) => {
     if (!window.redLedger) return
-    const { activeConversationId, messages } = get()
-    if (!activeConversationId) return
-
-    const msgIndex = messages.findIndex((m) => m.id === messageId)
-    if (msgIndex === -1) return
+    const conversationId = get().activeConversationId
+    if (!conversationId) return
 
     try {
-      await window.redLedger.deleteMessagesFrom(activeConversationId, messageId)
-      set((state) => ({
-        messages: state.messages.slice(0, msgIndex)
-      }))
+      const messages = await window.redLedger.selectBranch(conversationId, messageId, options)
+      if (get().activeConversationId === conversationId) set({ messages })
+    } catch (err) {
+      notify({ type: 'error', message: formatError(err) })
+      throw err
+    }
+  },
+
+  deleteMessageBranch: async (messageId) => {
+    if (!window.redLedger) return
+    const conversationId = get().activeConversationId
+    if (!conversationId) return
+
+    try {
+      const messages = await window.redLedger.deleteMessageBranch(conversationId, messageId)
+      if (get().activeConversationId === conversationId) set({ messages })
     } catch (err) {
       notify({ type: 'error', message: formatError(err) })
     }

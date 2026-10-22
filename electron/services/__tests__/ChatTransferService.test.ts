@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import type { Conversation, Message } from '../../../src/types'
+import type { Conversation, CreateMessageInput, Message } from '../../../src/types'
 import { DEFAULT_PROVIDER } from '../../../src/lib/providers'
 import { ChatTransferService } from '../ChatTransferService'
 import type { ConversationService } from '../ConversationService'
@@ -7,7 +7,7 @@ import type { ConversationService } from '../ConversationService'
 interface FakeServiceState {
   conversations: Map<string, Conversation>
   messages: Map<string, Message[]>
-  created: Array<{ conversationId: string; message: Omit<Message, 'id' | 'createdAt' | 'timestamp'> }>
+  created: Array<{ conversationId: string; message: CreateMessageInput }>
   newConversations: Array<Partial<Conversation>>
 }
 
@@ -16,8 +16,12 @@ function createFakeConversationService(state: FakeServiceState): ConversationSer
   return {
     getConversation: (id: string) => state.conversations.get(id) ?? null,
     listMessages: (id: string) => state.messages.get(id) ?? [],
-    // The fake keeps images inline, so they are already export-ready.
-    listMessagesWithImageData: (id: string) => state.messages.get(id) ?? [],
+    // The fake keeps images inline and one branch, so its list is export-ready.
+    exportMessages: (id: string) => {
+      const messages = state.messages.get(id) ?? []
+      return { messages, activeMessageId: messages[messages.length - 1]?.id ?? null }
+    },
+    selectBranch: (id: string) => state.messages.get(id) ?? [],
     createConversation: (data: Partial<Conversation>): Conversation => {
       const id = `imported-${nextId++}`
       const now = Date.now()
@@ -37,10 +41,11 @@ function createFakeConversationService(state: FakeServiceState): ConversationSer
       state.newConversations.push(data)
       return conversation
     },
-    createMessage: (data: Omit<Message, 'id' | 'createdAt' | 'timestamp'>): Message => {
+    createMessage: (data: CreateMessageInput): Message => {
       state.created.push({ conversationId: data.conversationId, message: data })
       const message: Message = {
         ...data,
+        parentId: data.parentId ?? null,
         id: `msg-${state.created.length}`,
         createdAt: Date.now(),
         timestamp: new Date().toISOString()
@@ -69,6 +74,7 @@ const sampleMessages: Message[] = [
   {
     id: 'm1',
     conversationId: 'conv-1',
+    parentId: null,
     role: 'user',
     content: 'Hello, world!\n  Indented line.\n\nWith blank line.',
     timestamp: '2024-01-01T00:00:00.000Z',
@@ -80,6 +86,7 @@ const sampleMessages: Message[] = [
   {
     id: 'm2',
     conversationId: 'conv-1',
+    parentId: 'm1',
     role: 'assistant',
     content: 'Reply with <special> chars & ]]> sequence.',
     thinking: 'Considering options',
@@ -132,7 +139,8 @@ describe('ChatTransferService', () => {
 
     const xml = service.exportConversation('conv-1', 'xml')
     expect(xml.startsWith('<?xml')).toBe(true)
-    expect(xml).toContain('<redLedgerChat version="1">')
+    expect(xml).toContain('<redLedgerChat version="2">')
+    expect(xml).toContain('<message id="m2" parentId="m1" role="assistant"')
 
     const result = service.importFromXml(xml)
 
@@ -147,6 +155,10 @@ describe('ChatTransferService', () => {
     expect(state.created).toHaveLength(2)
 
     const [first, second] = state.created.map((c) => c.message)
+
+    // Version 2 keeps the tree: the reply hangs under the imported prompt.
+    expect(first.parentId).toBeNull()
+    expect(second.parentId).toBe('msg-1')
 
     expect(first.role).toBe('user')
     expect(first.content).toBe(sampleMessages[0].content)
@@ -163,6 +175,7 @@ describe('ChatTransferService', () => {
     const tricky: Message = {
       id: 'm1',
       conversationId: 'conv-1',
+      parentId: null,
       role: 'user',
       content: 'before ]]> after',
       timestamp: '2024-01-01T00:00:00.000Z',

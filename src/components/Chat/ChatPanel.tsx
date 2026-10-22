@@ -144,7 +144,7 @@ export function ChatPanel() {
               isReceivingThinking={streaming.isReceivingThinking}
               streamingMessageId={streaming.streamingMessageId}
               onRetry={streaming.retry}
-              onEdit={streaming.editLastUserMessage}
+              onEdit={streaming.editMessage}
             />
           </div>
 

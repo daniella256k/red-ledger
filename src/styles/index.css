@@ -466,10 +466,21 @@
   height: 24px;          /* Reserve space so layout doesn't jump */
 }
 
-.message-row:hover > .message-actions,
+.message-row:hover .message-actions,
 .message-actions:focus-within {
   opacity: 1;
   pointer-events: auto;
+}
+
+/* Version switcher ("‹ 2/3 ›"): always visible, unlike the hover toolbar. */
+.message-branch-pager {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  height: 24px;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: rgb(var(--color-message-action) / 0.55);
 }
 
 .message-action-btn {
@@ -484,9 +495,14 @@
   transition: color 150ms ease, background-color 150ms ease;
 }
 
-.message-action-btn:hover {
+.message-action-btn:hover:not(:disabled) {
   color: rgb(var(--color-message-action) / 0.7);
   background-color: rgb(var(--color-message-action) / 0.08);
+}
+
+.message-action-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
 }
 
 .message-collapse-toggle {

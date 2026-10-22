@@ -8,9 +8,11 @@ import { imageSrc } from '@/lib/attachments'
 import {
   MessageActionsBar,
   useCopyAction,
+  deleteVersionAction,
   editAction,
   forkAction,
   retryAction,
+  type BranchPagerProps,
   type MessageAction
 } from './MessageActions'
 
@@ -26,10 +28,14 @@ interface MessageBubbleProps {
   isReceivingThinking?: boolean
   /** If provided, a retry button is shown in the action bar. */
   onRetry?: () => void
-  /** If provided on latest user message, shows an edit button. */
+  /** If provided on a user message, shows an edit button. */
   onEdit?: (content: string) => Promise<void> | void
   /** If provided on assistant messages, shows a fork button. */
   onFork?: () => void
+  /** If provided, the message has other versions: shows the version switcher. */
+  branch?: BranchPagerProps
+  /** If provided, shows a button that deletes this version. */
+  onDeleteVersion?: () => void
 }
 
 /** A renderable segment: either a block of text or a tool call. */
@@ -144,7 +150,9 @@ export function MessageBubble({
   isReceivingThinking,
   onRetry,
   onEdit,
-  onFork
+  onFork,
+  branch,
+  onDeleteVersion
 }: MessageBubbleProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [editingText, setEditingText] = useState('')
@@ -317,8 +325,9 @@ export function MessageBubble({
     if (message.role === 'user' && onEdit) list.push(editAction(openEditMode))
     if (message.role === 'assistant' && onFork) list.push(forkAction(onFork))
     list.push(copyAction)
+    if (onDeleteVersion) list.push(deleteVersionAction(onDeleteVersion))
     return list
-  }, [copyAction, onRetry, onEdit, onFork, isStreaming, isEditing, message.role, openEditMode])
+  }, [copyAction, onRetry, onEdit, onFork, onDeleteVersion, isStreaming, isEditing, message.role, openEditMode])
 
   // ─── Assistant Message ─────────────────────────────────────────────────────
 
@@ -399,7 +408,7 @@ export function MessageBubble({
             </div>
           )}
         </div>
-        <MessageActionsBar actions={actions} align={align} />
+        <MessageActionsBar actions={actions} align={align} branch={isEditing ? undefined : branch} />
       </div>
     )
   }
@@ -547,7 +556,7 @@ export function MessageBubble({
         )}
       </div>
 
-      <MessageActionsBar actions={actions} align={align} />
+      <MessageActionsBar actions={actions} align={align} branch={isEditing ? undefined : branch} />
     </div>
   )
 }

@@ -75,9 +75,15 @@ export function registerDbHandlers(dbPath: string, options: ConversationServiceO
     return service.updateMessage(id, data)
   })
 
-  handleIpc('db:deleteMessagesFrom', (_e, conversationId, messageId) => {
+  handleIpc('db:selectBranch', (_e, conversationId, messageId, options) => {
     assertString(conversationId, 'conversationId')
     assertString(messageId, 'messageId')
-    return service.deleteMessagesFrom(conversationId, messageId)
+    return service.selectBranch(conversationId, messageId, { exact: options?.exact === true })
+  })
+
+  handleIpc('db:deleteMessageBranch', (_e, conversationId, messageId) => {
+    assertString(conversationId, 'conversationId')
+    assertString(messageId, 'messageId')
+    return service.deleteMessageBranch(conversationId, messageId)
   })
 }

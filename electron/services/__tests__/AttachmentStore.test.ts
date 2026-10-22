@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, rmSync } from 'fs'
+import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createHash } from 'crypto'
@@ -107,7 +107,7 @@ describe('attachment store', () => {
     const keep = service.createMessage({ conversationId: chat.id, role: 'user', content: 'keep', attachments: [image('a.png', PNG_DATA_URL)] })
     const drop = service.createMessage({ conversationId: chat.id, role: 'user', content: 'drop', attachments: [image('b.jpg', OTHER_DATA_URL)] })
 
-    service.deleteMessagesFrom(chat.id, drop.id)
+    service.deleteMessageBranch(chat.id, drop.id)
 
     expect(blobCount(service)).toBe(1)
     expect(service.listMessages(chat.id).map((m) => m.id)).toEqual([keep.id])
@@ -140,13 +140,13 @@ describe('attachment store', () => {
     const chat = service.createConversation({})
     service.createMessage({ conversationId: chat.id, role: 'user', content: 'q', attachments: [image('a.png', PNG_DATA_URL)] })
 
-    const [message] = service.listMessagesWithImageData(chat.id)
+    const [message] = service.exportMessages(chat.id).messages
     expect(message.attachments).toEqual([{ kind: 'image', name: 'a.png', mimeType: 'image/png', dataUrl: PNG_DATA_URL }])
   })
 })
 
 describe('moving inline images into the attachment store', () => {
-  it('moves base64 images byte for byte, after backing the database up', () => {
+  it('moves base64 images byte for byte, without writing a copy of the database', () => {
     const dir = tempDir()
     const dbPath = join(dir, 'conversations.db')
     const legacy = open(dbPath)
@@ -163,7 +163,7 @@ describe('moving inline images into the attachment store', () => {
 
     const upgraded = open(dbPath)
 
-    expect(existsSync(join(dir, 'conversations.pre-attachment-store.db'))).toBe(true)
+    expect(readdirSync(dir).filter((name) => name.endsWith('.db'))).toEqual(['conversations.db'])
     expect(upgraded.listMessages(chat.id)[0].attachments).toEqual([
       { kind: 'image', name: 'a.png', mimeType: 'image/png', blobId: PNG_ID, size: PNG_BYTES.length },
       { kind: 'image', name: 'broken.png', mimeType: 'image/png', dataUrl: 'not a data url' },
@@ -172,17 +172,17 @@ describe('moving inline images into the attachment store', () => {
     expect(Buffer.compare(upgraded.getAttachmentBlob(PNG_ID)!.data, PNG_BYTES)).toBe(0)
   })
 
-  it('does nothing, and makes no backup, when there is nothing to move', () => {
+  it('leaves text that merely mentions "dataUrl" alone', () => {
     const dir = tempDir()
     const dbPath = join(dir, 'conversations.db')
     const service = open(dbPath)
     const chat = service.createConversation({})
-    service.createMessage({ conversationId: chat.id, role: 'user', content: 'x', attachments: [{ kind: 'text', name: 'a', content: '"dataUrl"' }] })
+    const attachments = [{ kind: 'text' as const, name: 'a', content: '"dataUrl"' }]
+    service.createMessage({ conversationId: chat.id, role: 'user', content: 'x', attachments })
     service.close()
     services.splice(services.indexOf(service), 1)
 
-    open(dbPath)
-    expect(existsSync(join(dir, 'conversations.pre-attachment-store.db'))).toBe(false)
+    expect(open(dbPath).listMessages(chat.id)[0].attachments).toEqual(attachments)
   })
 })
 
@@ -209,14 +209,15 @@ describe('storage listings', () => {
     expect(service.getStoredImageBytes()).toBe(PNG_BYTES.length + OTHER_BYTES.length)
   })
 
-  it('compacts the file and only touches backups it lists', async () => {
+  it('measures the file and caches, compacts, and clears caches', async () => {
     const dir = tempDir()
     const dbPath = join(dir, 'conversations.db')
     const conversations = open(dbPath)
     const chat = conversations.createConversation({})
     conversations.createMessage({ conversationId: chat.id, role: 'user', content: 'x'.repeat(200_000) })
     conversations.deleteConversation(chat.id)
-    rawDb(conversations).prepare('VACUUM INTO ?').run(join(dir, 'conversations.pre-test.db'))
+    mkdirSync(join(dir, 'Code Cache'))
+    writeFileSync(join(dir, 'Code Cache', 'entry'), Buffer.alloc(1_000))
 
     let cleared = 0
     const storage = new StorageService({
@@ -226,16 +227,11 @@ describe('storage listings', () => {
       cacheCleaner: { clear: async () => { cleared += 1 } }
     })
 
+    expect(storage.getOverview()).toMatchObject({ cacheBytes: 1_000, imageBytes: 0 })
     expect(storage.getOverview().reclaimableBytes).toBeGreaterThan(100_000)
     const result = storage.compact()
     expect(result.afterBytes).toBeLessThan(result.beforeBytes)
     expect(storage.getOverview().reclaimableBytes).toBe(0)
-
-    expect(storage.listBackups().map((backup) => backup.name)).toEqual(['conversations.pre-test.db'])
-    expect(() => storage.deleteBackup('conversations.db')).toThrow(/Backup not found/)
-    expect(() => storage.deleteBackup('../conversations.pre-test.db')).toThrow(/Backup not found/)
-    storage.deleteBackup('conversations.pre-test.db')
-    expect(storage.listBackups()).toEqual([])
 
     await storage.clearCaches()
     expect(cleared).toBe(1)

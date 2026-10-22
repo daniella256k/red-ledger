@@ -142,9 +142,21 @@ export interface ContextUsage {
 
 // ─── Messages ────────────────────────────────────────────────────────────────
 
+/**
+ * A chat is a tree of messages: a retry adds a sibling reply and an edit adds
+ * a sibling prompt. The chat shows one branch at a time, from its first
+ * message down to its active message.
+ */
 export interface Message {
   id: string
   conversationId: string
+  /** The message this one answers or follows; null for a chat's first message. */
+  parentId: string | null
+  /**
+   * This message and its alternatives (same parent), oldest first. Only set
+   * when there is more than one, which is when the version switcher shows.
+   */
+  siblingIds?: string[]
   role: 'user' | 'assistant' | 'system'
   content: string
   attachments?: Attachment[]
@@ -152,6 +164,29 @@ export interface Message {
   toolCalls?: string     // JSON-serialized ToolCall[]
   timestamp: string      // ISO 8601 system timestamp captured when message was created
   createdAt: number
+}
+
+export interface CreateMessageInput {
+  conversationId: string
+  role: Message['role']
+  content: string
+  attachments?: Attachment[]
+  thinking?: string
+  toolCalls?: string
+  /**
+   * Where the message goes in the tree. Left out, it continues the branch on
+   * screen; null starts a new first message; an id adds it under that message
+   * (beside any existing replies, which is how edits branch).
+   */
+  parentId?: string | null
+}
+
+export interface SelectBranchOptions {
+  /**
+   * Stop at this message instead of continuing to its newest reply. A retry
+   * uses it, so the new reply goes next to the old ones.
+   */
+  exact?: boolean
 }
 
 // ─── Tool Calls ──────────────────────────────────────────────────────────────
@@ -260,13 +295,6 @@ export interface AttachmentParseResult {
 
 // ─── Storage ─────────────────────────────────────────────────────────────────
 
-export interface StorageBackup {
-  /** File name, next to the database. */
-  name: string
-  bytes: number
-  modifiedAt: number
-}
-
 export interface StorageOverview {
   /** The database file and its write-ahead log on disk. */
   databaseBytes: number
@@ -276,8 +304,6 @@ export interface StorageOverview {
   imageBytes: number
   /** Chromium's caches in the app profile: safe to clear, rebuilt as needed. */
   cacheBytes: number
-  /** Copies of the database made before migrations. */
-  backups: StorageBackup[]
 }
 
 export interface ChatStorageInfo {
@@ -393,11 +419,14 @@ export interface RedLedgerAPI {
   deleteConversation(id: string): Promise<void>
   forkConversation(conversationId: string, messageId: string): Promise<Conversation>
 
-  // Messages
+  // Messages (listMessages returns the branch on screen, first message first)
   listMessages(conversationId: string): Promise<Message[]>
-  createMessage(data: Omit<Message, 'id' | 'createdAt' | 'timestamp'>): Promise<Message>
+  createMessage(data: CreateMessageInput): Promise<Message>
   updateMessage(id: string, data: Partial<Message>): Promise<void>
-  deleteMessagesFrom(conversationId: string, messageId: string): Promise<void>
+  /** Shows the branch through this message: its newest reply chain, or exactly up to it. */
+  selectBranch(conversationId: string, messageId: string, options?: SelectBranchOptions): Promise<Message[]>
+  /** Deletes a message and everything after it on any branch; returns the branch now on screen. */
+  deleteMessageBranch(conversationId: string, messageId: string): Promise<Message[]>
 
   // LLM Streaming
   sendMessage(request: LLMRequest, onStream: (chunk: StreamChunk) => void): () => void
@@ -434,8 +463,6 @@ export interface RedLedgerAPI {
   removeStoredImage(blobId: string): Promise<RemoveImageResult>
   compactDatabase(): Promise<CompactResult>
   clearCaches(): Promise<void>
-  showStorageBackup(name: string): Promise<void>
-  deleteStorageBackup(name: string): Promise<void>
 
   // Chat Export / Import
   exportChat(conversationId: string, format: ChatExportFormat): Promise<ChatExportResult>

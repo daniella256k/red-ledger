@@ -15,7 +15,8 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 - Text file attachments of any kind: plain text, code, config, and markup (`.py`, `.yaml`, `.json`, `.xml`, `.css`, `Dockerfile`, ...) are detected by content, no renaming needed. PDF and Word (`.doc`, `.docx`) text extraction included.
 - Spreadsheet attachments: Excel (`.xlsx`, `.xlsm`, `.xlsb`, `.xls`), OpenDocument (`.ods`), Apple Numbers and older formats are converted to CSV per sheet, with cell ranges, hyperlinks (as Markdown links), formulas and named ranges. `.csv` and `.tsv` attach as-is.
 - Image file attachments from `.png`, `.jpeg/.jpg`, `.webp`, and `.gif` for vision capable models.
-- Local SQLite conversation history with retry/copy message actions.
+- Local SQLite conversation history with branching: Retry and Edit keep every version of a message, and a `‹ 1/2 ›` switcher moves between them in the same chat. Fork copies the branch on screen into a new chat.
+- Storage panel (Settings → Storage): database size, chats sorted by size on disk, the largest images, and manual Remove / Compact / Clear caches. Nothing is deleted automatically.
 - Favorite models: star models in Settings for one-click switching.
 - Per-chat info popover (model, request settings, counts) from the chat header.
 - Context meter under the message box: how much of the model's context window the chat's last reply used. See [Context Meter](#context-meter).
@@ -57,6 +58,8 @@ npm run build
 | `npm run test` | Run tests once |
 | `npm run test:watch` | Run tests in watch mode |
 
+Unpackaged runs (`npm run dev`, `npm run preview`) use their own profile folder, `red-ledger-dev`, next to the installed app's, so development never opens your real chats. Pass `-- --user-data-dir=<folder>` to choose another.
+
 ## Provider Notes
 
 - OpenAI and OpenRouter use OpenAI-style APIs.
@@ -80,8 +83,13 @@ After each reply, the bottom right of the chat shows the tokens the reply's fina
 
 - Settings: `settings.json`
 - Conversations/messages: `conversations.db` (SQLite, WAL)
-- Message attachments are stored as structured data (`Attachment[]`) in the DB.
-- Messages are listed in chronological order (`created_at ASC`).
+- Messages form a tree: each one records the message it follows, so a retry or edit adds a sibling instead of replacing anything. A chat shows one branch at a time and remembers which.
+- Images are stored once each, as raw bytes keyed by their SHA-256, and shared by every message (and fork) that uses them. Text attachments stay inside their message.
+- Deleting chats or images leaves free space inside the file; Settings → Storage → Compact database gives it back to the disk and clears the deleted data from the file for good.
+
+### Upgrading from 1.7
+
+The first launch of 1.8 converts the database in place, once (a few seconds for a large history): images move out of the message text into the image store, and every existing chat becomes a single branch. This is one-way: 1.7 can't read the converted database. If you might want to go back, copy `conversations.db` somewhere safe (with the app closed) before upgrading.
 
 ## Tool System
 
@@ -112,6 +120,8 @@ Overwrites and edits keep the previous version next to the file as `<name>.bak`.
 
 Tools self-register via the tool registry. Strict mode shows a native confirmation dialog before each operation. Tool errors are caught and returned in the result so the LLM can self-correct without crashing the stream. Pressing Stop ends the whole turn: no further tool calls or model requests run, even if it is pressed while a tool is working.
 
+Later turns send the model its earlier tool calls with their full results, in the standard tool-message format, so it can rely on what it already fetched or read. Only if a chat would overflow a model's known context window are the oldest results shortened (with a note to the model and a notice in the chat).
+
 ## Project Map
 
 ```text
@@ -124,7 +134,7 @@ red-ledger/
 |   |   |-- AttachmentService.ts     # Attachment parsing (text, images, documents)
 |   |   |-- ChatTransferService.ts   # Chat import/export (Markdown, XML)
 |   |   |-- ContextService.ts        # Context profiles + system prompt assembly
-|   |   |-- ConversationService.ts   # SQLite chats/messages + full-text search
+|   |   |-- ConversationService.ts   # SQLite chats, message tree, image store, full-text search
 |   |   |-- DocumentTextService.ts   # PDF/Word/spreadsheet text extraction dispatch
 |   |   |-- LlmService.ts            # Streaming, tool loop, context usage
 |   |   |-- McpService.ts            # MCP connections; registers <server>__<tool> tools
@@ -133,6 +143,7 @@ red-ledger/
 |   |   |-- SearchService.ts         # Web/wiki search + fetch_url
 |   |   |-- SettingsService.ts
 |   |   |-- SpreadsheetAttachmentService.ts
+|   |   |-- StorageService.ts        # Database/cache sizes, compact, clear caches
 |   |   |-- WordAttachmentService.ts
 |   |   |-- WorkspaceService.ts      # Jailed file operations
 |   |   |-- pathJail.ts

@@ -1,6 +1,8 @@
 import { useRef, useEffect, useCallback } from 'react'
 import { useConversationStore } from '@/store'
+import type { Message } from '@/types'
 import { MessageBubble } from './MessageBubble'
+import type { BranchPagerProps } from './MessageActions'
 
 /**
  * Adaptive near-bottom threshold:
@@ -15,8 +17,10 @@ interface MessageListProps {
   isStreaming: boolean
   isReceivingThinking: boolean
   streamingMessageId: string | null
-  onRetry: () => void
-  onEdit: (content: string) => Promise<void>
+  /** New reply to a user message, kept beside the earlier replies. */
+  onRetry: (userMessageId: string) => void
+  /** New version of a user message, kept beside the original. */
+  onEdit: (userMessageId: string, content: string) => Promise<void>
 }
 
 export function MessageList({
@@ -29,8 +33,10 @@ export function MessageList({
   const messages = useConversationStore((s) => s.messages)
   const isLoadingMessages = useConversationStore((s) => s.isLoadingMessages)
   const forkConversationFromMessage = useConversationStore((s) => s.forkConversationFromMessage)
+  const selectBranch = useConversationStore((s) => s.selectBranch)
+  const deleteMessageBranch = useConversationStore((s) => s.deleteMessageBranch)
   const scrollContainerRef = useRef<HTMLDivElement>(null)
-  const prevMessageCountRef = useRef(0)
+  const prevMessageIdsRef = useRef<string[]>([])
 
   const getNearBottomThresholdPx = useCallback((el: HTMLDivElement) => {
     const scrollableHeight = Math.max(0, el.scrollHeight - el.clientHeight)
@@ -51,12 +57,37 @@ export function MessageList({
     await forkConversationFromMessage(messageId)
   }, [forkConversationFromMessage])
 
-  // Auto-scroll: only when a new message is added, or when the user is already near the bottom.
-  useEffect(() => {
-    const messageCountChanged = messages.length !== prevMessageCountRef.current
-    prevMessageCountRef.current = messages.length
+  const handleSelectVersion = useCallback((message: Message, offset: -1 | 1) => {
+    const siblingIds = message.siblingIds ?? []
+    const targetId = siblingIds[siblingIds.indexOf(message.id) + offset]
+    if (!targetId) return
+    void selectBranch(targetId).catch(() => {})
+  }, [selectBranch])
 
-    if (messageCountChanged || isNearBottom()) {
+  const handleDeleteVersion = useCallback(async (message: Message) => {
+    if (!window.redLedger) return
+    const confirmed = await window.redLedger.showConfirmDialog({
+      title: 'Delete Version',
+      message: message.role === 'user'
+        ? 'Delete this version of your message?'
+        : 'Delete this version of the reply?',
+      detail: 'Everything that follows it in this version is deleted too. The other versions stay. This action cannot be undone.'
+    })
+    if (!confirmed) return
+    await deleteMessageBranch(message.id)
+  }, [deleteMessageBranch])
+
+  // Auto-scroll: when a chat opens, when a message is added to the end, or when
+  // the user is already near the bottom. Switching versions replaces messages
+  // instead of adding one, so the reader stays where they are.
+  useEffect(() => {
+    const previousIds = prevMessageIdsRef.current
+    prevMessageIdsRef.current = messages.map((message) => message.id)
+    const opened = previousIds.length === 0
+    const appended = messages.length > previousIds.length
+      && previousIds.every((id, index) => messages[index]?.id === id)
+
+    if (opened || appended || isNearBottom()) {
       const scrollContainer = scrollContainerRef.current
       if (scrollContainer) {
         scrollContainer.scrollTop = scrollContainer.scrollHeight
@@ -82,39 +113,39 @@ export function MessageList({
     )
   }
 
-  // Find the last user message index - retry attaches there
-  let lastUserIdx = -1
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') {
-      lastUserIdx = i
-      break
-    }
-  }
-
-  // Show retry when idle and the latest message is persisted.
-  // This includes failed turns where the last message is still the user message.
-  const lastMessage = messages[messages.length - 1]
-  const canRetry = !isStreaming
-    && !!lastMessage
-    && (lastMessage.role === 'assistant' || lastMessage.role === 'user')
-
   return (
     <div
       ref={scrollContainerRef}
       className="h-full overflow-y-auto px-4 py-4 space-y-4"
     >
-      {messages.map((message, idx) => {
+      {messages.map((message) => {
         const messageIsStreaming = isStreaming && message.id === streamingMessageId
+        const siblingIds = message.siblingIds ?? []
+        const branch: BranchPagerProps | undefined = siblingIds.length > 1
+          ? {
+            index: siblingIds.indexOf(message.id),
+            count: siblingIds.length,
+            onSelect: (offset) => handleSelectVersion(message, offset),
+            disabled: isStreaming
+          }
+          : undefined
+        // Nothing is overwritten any more, so any of your messages can be retried or edited.
+        const canBranch = !isStreaming && message.role === 'user'
+
         return (
           <MessageBubble
             key={message.id}
             message={message}
             isStreaming={messageIsStreaming}
             isReceivingThinking={isReceivingThinking && messageIsStreaming}
-            onRetry={canRetry && idx === lastUserIdx ? onRetry : undefined}
-            onEdit={canRetry && idx === lastUserIdx ? onEdit : undefined}
+            onRetry={canBranch ? () => onRetry(message.id) : undefined}
+            onEdit={canBranch ? (content) => onEdit(message.id, content) : undefined}
             onFork={message.role === 'assistant' && !isStreaming
               ? () => { void handleFork(message.id).catch(() => {}) }
+              : undefined}
+            branch={branch}
+            onDeleteVersion={branch && !isStreaming
+              ? () => { void handleDeleteVersion(message) }
               : undefined}
           />
         )

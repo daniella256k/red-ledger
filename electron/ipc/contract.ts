@@ -9,7 +9,8 @@ import type {
   Conversation, Message, Settings, FileNode, SearchResult,
   Attachment, AttachmentParseResult, LLMRequest, StreamChunk, ContextProfile, TitleGenerationRequest,
   McpServerStatus, McpSignInResult,
-  StorageOverview, ChatStorageInfo, StoredImageInfo, RemoveImageResult, CompactResult
+  StorageOverview, ChatStorageInfo, StoredImageInfo, RemoveImageResult, CompactResult,
+  CreateMessageInput, SelectBranchOptions
 } from '../../src/types'
 
 export type ChatExportFormat = 'markdown' | 'xml'
@@ -32,7 +33,7 @@ export interface ContextProfileState {
   activeProfileId: string
 }
 
-export type CreateMessageData = Omit<Message, 'id' | 'createdAt' | 'timestamp'>
+export type CreateMessageData = CreateMessageInput
 
 export interface ConfirmDialogOptions {
   title: string
@@ -56,7 +57,8 @@ export interface IpcContract {
   'db:listMessages':            { params: [conversationId: string];                    result: Message[] }
   'db:createMessage':           { params: [data: CreateMessageData];                   result: Message }
   'db:updateMessage':           { params: [id: string, data: Partial<Message>];        result: void }
-  'db:deleteMessagesFrom':      { params: [conversationId: string, messageId: string]; result: void }
+  'db:selectBranch':            { params: [conversationId: string, messageId: string, options?: SelectBranchOptions]; result: Message[] }
+  'db:deleteMessageBranch':     { params: [conversationId: string, messageId: string]; result: Message[] }
 
   // Workspace & Files
   'fs:selectWorkspace':         { params: [];                                          result: string | null }
@@ -107,8 +109,6 @@ export interface IpcContract {
   'storage:removeImage':        { params: [blobId: string];                            result: RemoveImageResult }
   'storage:compact':            { params: [];                                          result: CompactResult }
   'storage:clearCaches':        { params: [];                                          result: void }
-  'storage:showBackup':         { params: [name: string];                              result: void }
-  'storage:deleteBackup':       { params: [name: string];                              result: void }
 
   // Chat import/export
   'chat:export':                { params: [conversationId: string, format: ChatExportFormat]; result: ChatExportResult }

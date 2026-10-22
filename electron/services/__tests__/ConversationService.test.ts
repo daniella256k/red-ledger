@@ -1,7 +1,4 @@
 import { describe, expect, it, vi } from 'vitest'
-import { mkdtempSync, rmSync, writeFileSync } from 'fs'
-import { join } from 'path'
-import { tmpdir } from 'os'
 import { ConversationService } from '../ConversationService'
 
 type MigrationHarness = {
@@ -30,21 +27,10 @@ type MutationHarness = DatabaseHarness & {
   }
 }
 
-const listMessages = ConversationService.prototype.listMessages as (
-  this: DatabaseHarness,
-  conversationId: string
-) => ReturnType<ConversationService['listMessages']>
-
 const updateMessage = ConversationService.prototype.updateMessage as (
   this: MutationHarness,
   id: string,
   data: Parameters<ConversationService['updateMessage']>[1]
-) => void
-
-const deleteMessagesFrom = ConversationService.prototype.deleteMessagesFrom as (
-  this: MutationHarness,
-  conversationId: string,
-  messageId: string
 ) => void
 
 describe('ConversationService schema migrations', () => {
@@ -115,70 +101,6 @@ describe('ConversationService schema migrations', () => {
     expect(transaction).not.toHaveBeenCalled()
   })
 
-  describe('backup before the provider migration', () => {
-    const LEGACY_TABLE = `CREATE TABLE conversations (
-      provider TEXT NOT NULL DEFAULT 'openai' CHECK(provider IN ('openai', 'openrouter'))
-    )`
-
-    function backupHarness(dbPath: string) {
-      const order: string[] = []
-      const run = vi.fn((path: string) => order.push(`backup ${path}`))
-      const exec = vi.fn((sql: string) => order.push(sql))
-      const prepare = vi.fn((sql: string) => ({
-        get: () => (sql.includes('sqlite_master') ? { sql: LEGACY_TABLE } : undefined),
-        all: () => (sql.includes('table_info') ? BASE_COLUMNS.map((name) => ({ name })) : []),
-        run
-      }))
-      const service = Object.create(ConversationService.prototype) as unknown as MigrationHarness & { dbPath: string }
-      service.db = { exec, prepare, transaction: (fn: () => void) => fn }
-      service.dbPath = dbPath
-      return { service, run, order, prepare }
-    }
-
-    it('snapshots the database next to it before rebuilding', () => {
-      const dir = mkdtempSync(join(tmpdir(), 'rl-backup-'))
-      try {
-        const { service, run, order, prepare } = backupHarness(join(dir, 'conversations.db'))
-        service.migrateConversationProviderConstraintIfNeeded()
-
-        expect(prepare).toHaveBeenCalledWith('VACUUM INTO ?')
-        expect(run).toHaveBeenCalledWith(join(dir, 'conversations.pre-1.6.0.db'))
-        expect(order.indexOf(`backup ${join(dir, 'conversations.pre-1.6.0.db')}`))
-          .toBeLessThan(order.indexOf('PRAGMA foreign_keys = OFF'))
-      } finally {
-        rmSync(dir, { recursive: true, force: true })
-      }
-    })
-
-    it('keeps an existing backup and still migrates', () => {
-      const dir = mkdtempSync(join(tmpdir(), 'rl-backup-'))
-      try {
-        writeFileSync(join(dir, 'conversations.pre-1.6.0.db'), 'earlier backup')
-        const { service, run, order } = backupHarness(join(dir, 'conversations.db'))
-        service.migrateConversationProviderConstraintIfNeeded()
-
-        expect(run).not.toHaveBeenCalled()
-        expect(order).toContain('PRAGMA foreign_keys = OFF')
-      } finally {
-        rmSync(dir, { recursive: true, force: true })
-      }
-    })
-
-    it('still migrates when the backup fails', () => {
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
-      try {
-        const { service, run, order } = backupHarness(join(tmpdir(), 'rl-missing-dir', 'conversations.db'))
-        run.mockImplementation(() => { throw new Error('unable to open database') })
-        service.migrateConversationProviderConstraintIfNeeded()
-
-        expect(warn).toHaveBeenCalled()
-        expect(order).toContain('PRAGMA foreign_keys = OFF')
-      } finally {
-        warn.mockRestore()
-      }
-    })
-  })
-
   it('rejects unknown providers in app code', () => {
     const service = Object.create(ConversationService.prototype) as ConversationService
     expect(() => service.createConversation({ provider: 'bogus' as never })).toThrow(/Unknown provider/)
@@ -187,50 +109,6 @@ describe('ConversationService schema migrations', () => {
 })
 
 describe('ConversationService message ordering and recency', () => {
-  it('lists messages in insertion order even when created_at values are out of order', () => {
-    const service = Object.create(ConversationService.prototype) as DatabaseHarness
-    const rows = [
-      {
-        id: 'first-message',
-        conversation_id: 'conv-1',
-        role: 'user',
-        content: 'first inserted',
-        attachments: null,
-        thinking: null,
-        tool_calls: null,
-        timestamp: '2026-03-03T12:00:00.000Z',
-        created_at: 2_000
-      },
-      {
-        id: 'second-message',
-        conversation_id: 'conv-1',
-        role: 'assistant',
-        content: 'second inserted',
-        attachments: null,
-        thinking: null,
-        tool_calls: null,
-        timestamp: '2026-03-03T12:00:01.000Z',
-        created_at: 1_000
-      }
-    ]
-    const all = vi.fn(() => rows)
-    const stmt = vi.fn((key: string, sql: string) => {
-      expect(key).toBe('listMessages')
-      expect(sql).toContain('ORDER BY rowid ASC')
-      return { all }
-    })
-
-    service.stmt = stmt
-
-    const messages = listMessages.call(service, 'conv-1')
-
-    expect(messages.map((message) => message.id)).toEqual([
-      'first-message',
-      'second-message'
-    ])
-    expect(all).toHaveBeenCalledWith('conv-1')
-  })
-
   it('bumps conversation updated_at when a message is edited', () => {
     const updateRun = vi.fn(() => ({ changes: 1 }))
     const touchRun = vi.fn()
@@ -258,50 +136,6 @@ describe('ConversationService message ordering and recency', () => {
     expect(transaction).toHaveBeenCalledTimes(1)
     expect(updateRun).toHaveBeenCalledWith('after', null, null, 'message-1')
     expect(touchRun).toHaveBeenCalledWith(3_000, 'message-1')
-    nowSpy.mockRestore()
-  })
-
-  it('bumps conversation updated_at when deleting messages from a cutoff', () => {
-    const get = vi.fn(() => ({ rowid: 7 }))
-    const deleteRun = vi.fn()
-    const touchRun = vi.fn()
-    const pruneRun = vi.fn()
-    const transaction = vi.fn((fn: () => void) => fn)
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValue(4_000)
-    const service = Object.create(ConversationService.prototype) as MutationHarness
-
-    service.db = { transaction }
-    service.stmt = vi.fn((key: string, sql: string) => {
-      if (key === 'getConversationMessage') {
-        expect(sql).toContain('SELECT rowid FROM messages')
-        return { get }
-      }
-
-      if (key === 'deleteMessagesFrom') {
-        expect(sql).toContain('DELETE FROM messages')
-        return { run: deleteRun }
-      }
-
-      if (key === 'touchConversation') {
-        expect(sql).toContain('UPDATE conversations SET updated_at = ? WHERE id = ?')
-        return { run: touchRun }
-      }
-
-      if (key === 'pruneUnusedBlobs') {
-        expect(sql).toContain('DELETE FROM attachment_blobs')
-        return { run: pruneRun }
-      }
-
-      throw new Error(`Unexpected statement key: ${key}`)
-    })
-
-    deleteMessagesFrom.call(service, 'conv-1', 'message-1')
-    expect(pruneRun).toHaveBeenCalledTimes(1)
-
-    expect(transaction).toHaveBeenCalledTimes(1)
-    expect(get).toHaveBeenCalledWith('message-1', 'conv-1')
-    expect(deleteRun).toHaveBeenCalledWith('conv-1', 7)
-    expect(touchRun).toHaveBeenCalledWith(4_000, 'conv-1')
     nowSpy.mockRestore()
   })
 })
@@ -363,6 +197,12 @@ describe('ConversationService context profile', () => {
     created_at: 1, updated_at: 1, workspace_path: null, last_request: null
   }
 
+  /** The branch a fork copies: one message. */
+  const FORK_PATH_ROW = {
+    id: 'm1', role: 'user', content: 'hi', attachments: null, thinking: null,
+    tool_calls: null, timestamp: 't', created_at: 1
+  }
+
   function createHarness(rowProfileId: string | null, defaultProfileId: string | null = rowProfileId) {
     const runs: Array<{ key: string; args: unknown[] }> = []
     const service = Object.create(ConversationService.prototype) as ProfileHarness
@@ -374,8 +214,8 @@ describe('ConversationService context profile', () => {
     } as unknown as ProfileHarness['db']
     service.stmt = vi.fn((key: string) => ({
       run: (...args: unknown[]) => { runs.push({ key, args }) },
-      get: () => (key === 'getForkCutoff' ? { rowid: 1 } : { ...BASE_ROW, profile_id: rowProfileId }),
-      all: () => []
+      get: () => ({ ...BASE_ROW, profile_id: rowProfileId }),
+      all: () => (key === 'pathRows' ? [FORK_PATH_ROW] : [])
     }))
     return { service, runs }
   }

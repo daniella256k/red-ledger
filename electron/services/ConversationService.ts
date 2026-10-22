@@ -1,4 +1,3 @@
-import { existsSync } from 'fs'
 import { createHash, randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
@@ -8,10 +7,12 @@ import type {
   ChatStorageInfo,
   Conversation,
   ConversationRequestInfo,
+  CreateMessageInput,
   ImageAttachment,
   Message,
   ImageAttachmentMimeType,
   RemoveImageResult,
+  SelectBranchOptions,
   StoredImageInfo
 } from '../../src/types'
 
@@ -69,6 +70,19 @@ function parseAttachment(value: unknown): Attachment | null {
     content: record.content
   }
 }
+
+/** Guards the tree walks against a damaged tree with a loop; real chats are far shallower. */
+const MAX_BRANCH_DEPTH = 100_000
+
+/** A message and every message below it, on all branches. Bind the message id. */
+const SUBTREE_CTE = `WITH RECURSIVE subtree(id, depth) AS (
+  SELECT ?, 0
+  UNION ALL
+  SELECT m.id, subtree.depth + 1
+    FROM messages m
+    JOIN subtree ON m.parent_id = subtree.id
+   WHERE subtree.depth < ${MAX_BRANCH_DEPTH}
+)`
 
 /** The bytes of a base64 data: URL, or null if it isn't one. */
 function decodeDataUrl(dataUrl: string): Buffer | null {
@@ -128,14 +142,12 @@ export interface ConversationServiceOptions {
 
 export class ConversationService {
   private db: Database.Database
-  private dbPath: string
   private statements: Map<string, Database.Statement> = new Map()
   private getDefaultProfileId: () => string | null
   private messageSearchIndexed = false
 
   constructor(dbPath: string, options: ConversationServiceOptions = {}) {
     this.getDefaultProfileId = options.getDefaultProfileId ?? (() => null)
-    this.dbPath = dbPath
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const BetterSqlite3 = require('better-sqlite3')
     this.db = new BetterSqlite3(dbPath) as Database.Database
@@ -211,14 +223,15 @@ export class ConversationService {
     this.messageSearchIndexed = this.ensureMessageSearchIndex()
 
     this.moveInlineImagesToAttachmentStore()
+
+    this.addMessageTree()
   }
 
   /**
    * Images used to be saved inside the attachments JSON as base64 data URLs.
    * Moves them, byte for byte, into attachment_blobs (base64 text is a third
-   * larger than the bytes, and forks copied it). Backs the database up first,
-   * then compacts it once so the file actually shrinks. Unreadable entries are
-   * left as they were.
+   * larger than the bytes, and forks copied it), then compacts the database
+   * once so the file actually shrinks. Unreadable entries are left as they were.
    */
   private moveInlineImagesToAttachmentStore(): void {
     const candidates = this.db
@@ -228,7 +241,6 @@ export class ConversationService {
 
     const getAttachments = this.db.prepare('SELECT attachments FROM messages WHERE id = ?')
     const setAttachments = this.db.prepare('UPDATE messages SET attachments = ? WHERE id = ?')
-    let backedUp = false
     let moved = 0
 
     const moveOne = this.db.transaction((messageId: string) => {
@@ -252,18 +264,7 @@ export class ConversationService {
     })
 
     // One message per transaction, so a large history is never all in memory at once.
-    for (const { id } of candidates) {
-      const row = getAttachments.get(id) as { attachments: string | null } | undefined
-      const hasInlineImage = parseAttachmentList(row?.attachments).some((item) =>
-        isRecord(item) && item.kind === 'image' && typeof item.dataUrl === 'string'
-      )
-      if (!hasInlineImage) continue
-      if (!backedUp) {
-        this.backupBeforeMigration('attachment-store')
-        backedUp = true
-      }
-      moveOne(id)
-    }
+    for (const { id } of candidates) moveOne(id)
 
     if (moved > 0) {
       try {
@@ -337,6 +338,43 @@ export class ConversationService {
   }
 
   /**
+   * Branching: each message points at the one before it (parent_id), and each
+   * chat remembers the last message of the branch on screen (active_leaf_id).
+   * Chats from before this are a single branch, so each message's parent is
+   * simply the message saved before it. Additive, in one transaction.
+   */
+  private addMessageTree(): void {
+    const messageColumns = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+    const conversationColumns = this.db.prepare('PRAGMA table_info(conversations)').all() as Array<{ name: string }>
+    const needsParents = !messageColumns.some((column) => column.name === 'parent_id')
+    const needsLeaves = !conversationColumns.some((column) => column.name === 'active_leaf_id')
+
+    this.db.transaction(() => {
+      if (needsParents) {
+        this.db.exec('ALTER TABLE messages ADD COLUMN parent_id TEXT')
+        this.db.exec(`
+          UPDATE messages SET parent_id = (
+            SELECT p.id FROM messages p
+             WHERE p.conversation_id = messages.conversation_id AND p.rowid < messages.rowid
+             ORDER BY p.rowid DESC LIMIT 1
+          )
+        `)
+      }
+      if (needsLeaves) {
+        this.db.exec('ALTER TABLE conversations ADD COLUMN active_leaf_id TEXT')
+        this.db.exec(`
+          UPDATE conversations SET active_leaf_id = (
+            SELECT m.id FROM messages m
+             WHERE m.conversation_id = conversations.id
+             ORDER BY m.rowid DESC LIMIT 1
+          )
+        `)
+      }
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id)')
+    })()
+  }
+
+  /**
    * Databases from before 1.6.0 restrict `provider` with a CHECK constraint,
    * so every new provider needed a table rebuild. Rebuild once without it;
    * providers are validated in app code (src/lib/providers.ts) instead.
@@ -354,7 +392,6 @@ export class ConversationService {
     // 1.5.x databases already have it alongside the CHECK constraint.
     const lastRequest = columns.some((column) => column.name === 'last_request') ? ', last_request' : ''
 
-    this.backupBeforeMigration('1.6.0')
     this.db.exec('PRAGMA foreign_keys = OFF')
     try {
       const migrate = this.db.transaction(() => {
@@ -395,25 +432,6 @@ export class ConversationService {
     }
   }
 
-  /**
-   * Copies the database to `<name>.pre-<version>.db` next to it before a table
-   * rebuild, once. The rebuild runs in a transaction, but people may upgrade
-   * rarely, and their chat history shouldn't depend on it going right.
-   * Best-effort: a failed backup is logged and the migration still runs.
-   */
-  private backupBeforeMigration(version: string): void {
-    if (!this.dbPath || this.dbPath === ':memory:') return
-    const backupPath = `${this.dbPath.replace(/\.db$/i, '')}.pre-${version}.db`
-    if (existsSync(backupPath)) return
-
-    try {
-      // A consistent snapshot, including anything still in the WAL file.
-      this.db.prepare('VACUUM INTO ?').run(backupPath)
-    } catch (err) {
-      console.warn('[ConversationService] Could not back up the database before migrating:', err)
-    }
-  }
-
   // ─── Column Mapping ───────────────────────────────────────────────────────
 
   private toConversation(row: Record<string, unknown>): Conversation {
@@ -449,6 +467,7 @@ export class ConversationService {
     return {
       id: row.id as string,
       conversationId: row.conversation_id as string,
+      parentId: typeof row.parent_id === 'string' ? row.parent_id : null,
       role: row.role as Message['role'],
       content: row.content as string,
       attachments,
@@ -676,22 +695,8 @@ export class ConversationService {
       throw new Error(`Conversation not found: ${conversationId}`)
     }
 
-    const cutoff = this.stmt(
-      'getForkCutoff',
-      'SELECT rowid FROM messages WHERE id = ? AND conversation_id = ?'
-    ).get(messageId, conversationId) as { rowid: number } | undefined
-
-    if (!cutoff) {
-      throw new Error(`Message not found in conversation: ${messageId}`)
-    }
-
-    const sourceMessages = this.stmt(
-      'listMessagesForFork',
-      `SELECT id, role, content, attachments, thinking, tool_calls, timestamp, created_at
-       FROM messages
-       WHERE conversation_id = ? AND rowid <= ?
-       ORDER BY rowid ASC`
-    ).all(conversationId, cutoff.rowid) as Array<{
+    // A fork is the branch leading to this message, without the other versions.
+    const sourceMessages = this.pathRows(conversationId, messageId) as Array<{
       id: string
       role: Message['role']
       content: string
@@ -701,6 +706,10 @@ export class ConversationService {
       timestamp: string
       created_at: number
     }>
+
+    if (sourceMessages.length === 0) {
+      throw new Error(`Message not found in conversation: ${messageId}`)
+    }
 
     const forkConversationId = randomUUID()
     const now = Date.now()
@@ -726,8 +735,8 @@ export class ConversationService {
 
       const insertForkMessage = this.stmt(
         'insertForkMessage',
-        `INSERT INTO messages (id, conversation_id, role, content, attachments, thinking, tool_calls, timestamp, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO messages (id, conversation_id, parent_id, role, content, attachments, thinking, tool_calls, timestamp, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       )
 
       // The fork's messages share the source's stored images rather than copying them.
@@ -737,11 +746,13 @@ export class ConversationService {
          SELECT ?, blob_id FROM message_blobs WHERE message_id = ?`
       )
 
+      let forkParentId: string | null = null
       for (const message of sourceMessages) {
         const forkMessageId = randomUUID()
         insertForkMessage.run(
           forkMessageId,
           forkConversationId,
+          forkParentId,
           message.role,
           message.content,
           message.attachments,
@@ -751,7 +762,9 @@ export class ConversationService {
           message.created_at
         )
         shareForkMessageBlobs.run(forkMessageId, message.id)
+        forkParentId = forkMessageId
       }
+      this.setActiveLeaf(forkConversationId, forkParentId)
     })
 
     forkInTransaction()
@@ -764,30 +777,39 @@ export class ConversationService {
 
   // ─── Message CRUD ─────────────────────────────────────────────────────────
 
+  /** The branch on screen, first message first, with each message's alternatives. */
   listMessages(conversationId: string): Message[] {
-    const rows = this.stmt(
-      'listMessages',
-      'SELECT * FROM messages WHERE conversation_id = ? ORDER BY rowid ASC'
-    ).all(conversationId) as Record<string, unknown>[]
+    const leafId = this.activeLeafId(conversationId)
+    if (!leafId) return []
 
-    return rows.map(r => this.toMessage(r))
+    const path = this.pathRows(conversationId, leafId).map((row) => this.toMessage(row))
+    return this.withSiblings(path, this.childrenByParent(conversationId))
   }
 
-  createMessage(data: Omit<Message, 'id' | 'createdAt' | 'timestamp'>): Message {
+  /** Saves a message and makes it the end of the branch on screen. */
+  createMessage(data: CreateMessageInput): Message {
     const id = randomUUID()
     const now = Date.now()
     const timestamp = new Date().toISOString()
 
     const createInTransaction = this.db.transaction(() => {
+      const parentId = data.parentId === undefined
+        ? this.activeLeafId(data.conversationId)
+        : data.parentId
+      if (parentId !== null && !this.isMessageInConversation(parentId, data.conversationId)) {
+        throw new Error(`Message not found in conversation: ${parentId}`)
+      }
+
       const attachments = this.prepareAttachments(data.attachments)
 
       this.stmt(
         'createMessage',
-        `INSERT INTO messages (id, conversation_id, role, content, attachments, thinking, tool_calls, timestamp, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        `INSERT INTO messages (id, conversation_id, parent_id, role, content, attachments, thinking, tool_calls, timestamp, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       ).run(
         id,
         data.conversationId,
+        parentId,
         data.role,
         data.content,
         attachments.json,
@@ -797,6 +819,7 @@ export class ConversationService {
         now
       )
       this.linkBlobs(id, attachments.blobIds)
+      this.setActiveLeaf(data.conversationId, id)
 
       // Bump parent conversation's updatedAt
       this.touchConversation(data.conversationId, now)
@@ -804,12 +827,13 @@ export class ConversationService {
 
     createInTransaction()
 
-    return this.toMessage(
+    const message = this.toMessage(
       this.stmt(
         'getMessage',
         'SELECT * FROM messages WHERE id = ?'
       ).get(id) as Record<string, unknown>
     )
+    return this.withSiblings([message], this.childrenByParent(data.conversationId))[0]
   }
 
   updateMessage(id: string, data: Partial<Message>): void {
@@ -845,27 +869,145 @@ export class ConversationService {
     updateInTransaction()
   }
 
-  deleteMessagesFrom(conversationId: string, messageId: string): void {
+  // ─── Branches ─────────────────────────────────────────────────────────────
+
+  /**
+   * Shows the branch through a message: by default down to its newest reply
+   * chain, or with `exact`, ending at the message itself (a retry then adds
+   * its new reply beside the old ones). Returns the branch now on screen.
+   */
+  selectBranch(conversationId: string, messageId: string, options: SelectBranchOptions = {}): Message[] {
+    if (!this.isMessageInConversation(messageId, conversationId)) {
+      throw new Error(`Message not found in conversation: ${messageId}`)
+    }
+    this.setActiveLeaf(conversationId, options.exact ? messageId : this.newestInSubtree(messageId))
+    return this.listMessages(conversationId)
+  }
+
+  /**
+   * Deletes a message and everything after it, on every branch below it. If
+   * the branch on screen was among them, the chat moves to the newest
+   * remaining branch under the same parent. Returns the branch now on screen.
+   */
+  deleteMessageBranch(conversationId: string, messageId: string): Message[] {
     const now = Date.now()
 
     const deleteInTransaction = this.db.transaction(() => {
       const row = this.stmt(
-        'getConversationMessage',
-        'SELECT rowid FROM messages WHERE id = ? AND conversation_id = ?'
-      ).get(messageId, conversationId) as { rowid: number } | undefined
-
+        'getMessageParent',
+        'SELECT parent_id FROM messages WHERE id = ? AND conversation_id = ?'
+      ).get(messageId, conversationId) as { parent_id: string | null } | undefined
       if (!row) return
 
+      const leafId = this.activeLeafId(conversationId)
+      const removedIds = (this.stmt(
+        'listSubtree',
+        `${SUBTREE_CTE} SELECT id FROM subtree`
+      ).all(messageId) as Array<{ id: string }>).map((entry) => entry.id)
+
       this.stmt(
-        'deleteMessagesFrom',
-        'DELETE FROM messages WHERE conversation_id = ? AND rowid >= ?'
-      ).run(conversationId, row.rowid)
+        'deleteSubtree',
+        `${SUBTREE_CTE} DELETE FROM messages WHERE id IN (SELECT id FROM subtree)`
+      ).run(messageId)
+
+      if (!leafId || removedIds.includes(leafId)) {
+        // No parent left means the chat's newest message takes over (see activeLeafId).
+        this.setActiveLeaf(conversationId, row.parent_id ? this.newestInSubtree(row.parent_id) : null)
+      }
 
       this.touchConversation(conversationId, now)
       this.pruneUnusedBlobs()
     })
 
     deleteInTransaction()
+    return this.listMessages(conversationId)
+  }
+
+  /** Rows from the chat's first message down to this one, first message first. */
+  private pathRows(conversationId: string, leafId: string): Record<string, unknown>[] {
+    return this.stmt(
+      'pathRows',
+      `WITH RECURSIVE path(id, depth) AS (
+         SELECT id, 0 FROM messages WHERE id = ? AND conversation_id = ?
+         UNION ALL
+         SELECT m.parent_id, path.depth + 1
+           FROM messages m
+           JOIN path ON m.id = path.id
+          WHERE m.parent_id IS NOT NULL AND path.depth < ${MAX_BRANCH_DEPTH}
+       )
+       SELECT m.* FROM path
+         JOIN messages m ON m.id = path.id
+        WHERE m.conversation_id = ?
+        ORDER BY path.depth DESC`
+    ).all(leafId, conversationId, conversationId) as Record<string, unknown>[]
+  }
+
+  /** The newest message at or below this one: the end of its most recent branch. */
+  private newestInSubtree(messageId: string): string {
+    const row = this.stmt(
+      'newestInSubtree',
+      `${SUBTREE_CTE}
+       SELECT m.id FROM subtree
+         JOIN messages m ON m.id = subtree.id
+        ORDER BY m.rowid DESC
+        LIMIT 1`
+    ).get(messageId) as { id: string } | undefined
+    return row?.id ?? messageId
+  }
+
+  /** The last message of the branch on screen; a missing or stale pointer falls back to the newest message. */
+  private activeLeafId(conversationId: string): string | null {
+    const active = this.stmt(
+      'getActiveLeaf',
+      `SELECT m.id FROM conversations c
+         JOIN messages m ON m.id = c.active_leaf_id AND m.conversation_id = c.id
+        WHERE c.id = ?`
+    ).get(conversationId) as { id: string } | undefined
+    if (active) return active.id
+
+    const newest = this.stmt(
+      'getNewestMessage',
+      'SELECT id FROM messages WHERE conversation_id = ? ORDER BY rowid DESC LIMIT 1'
+    ).get(conversationId) as { id: string } | undefined
+    return newest?.id ?? null
+  }
+
+  private setActiveLeaf(conversationId: string, leafId: string | null): void {
+    this.stmt(
+      'setActiveLeaf',
+      'UPDATE conversations SET active_leaf_id = ? WHERE id = ?'
+    ).run(leafId, conversationId)
+  }
+
+  private isMessageInConversation(messageId: string, conversationId: string): boolean {
+    return this.stmt(
+      'isMessageInConversation',
+      'SELECT 1 FROM messages WHERE id = ? AND conversation_id = ?'
+    ).get(messageId, conversationId) !== undefined
+  }
+
+  /** Each message's replies in this chat, oldest first, keyed by parent id ('' for first messages). */
+  private childrenByParent(conversationId: string): Map<string, string[]> {
+    const rows = this.stmt(
+      'listMessageParents',
+      'SELECT id, parent_id FROM messages WHERE conversation_id = ? ORDER BY rowid ASC'
+    ).all(conversationId) as Array<{ id: string; parent_id: string | null }>
+
+    const children = new Map<string, string[]>()
+    for (const row of rows) {
+      const key = row.parent_id ?? ''
+      const list = children.get(key)
+      if (list) list.push(row.id)
+      else children.set(key, [row.id])
+    }
+    return children
+  }
+
+  private withSiblings(messages: Message[], children: Map<string, string[]>): Message[] {
+    return messages.map((message) => {
+      const siblingIds = children.get(message.parentId ?? '') ?? []
+      return siblingIds.length > 1 ? { ...message, siblingIds } : message
+    })
   }
 
   // ─── Attachment Store ─────────────────────────────────────────────────────
@@ -947,9 +1089,18 @@ export class ConversationService {
     return row ? { mimeType: row.mime_type, data: row.data } : null
   }
 
-  /** Messages with each stored image inlined as a data URL, for export files. */
-  listMessagesWithImageData(conversationId: string): Message[] {
-    return this.listMessages(conversationId).map((message) => {
+  /**
+   * Everything an export file needs: every message on every branch, oldest
+   * first (a parent always comes before its replies), with each stored image
+   * inlined as a data URL, and the message the chat is showing.
+   */
+  exportMessages(conversationId: string): { messages: Message[]; activeMessageId: string | null } {
+    const rows = this.stmt(
+      'listAllMessages',
+      'SELECT * FROM messages WHERE conversation_id = ? ORDER BY rowid ASC'
+    ).all(conversationId) as Record<string, unknown>[]
+
+    const messages = rows.map((row) => this.toMessage(row)).map((message) => {
       if (!message.attachments?.some((attachment) => attachment.kind === 'image' && attachment.blobId)) {
         return message
       }
@@ -965,6 +1116,8 @@ export class ConversationService {
         })
       }
     })
+
+    return { messages, activeMessageId: this.activeLeafId(conversationId) }
   }
 
   // ─── Storage ──────────────────────────────────────────────────────────────

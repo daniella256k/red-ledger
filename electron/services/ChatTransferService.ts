@@ -25,8 +25,9 @@ export interface ImportedConversation {
 
 /**
  * Serializes/deserializes conversations to portable formats.
- * Markdown is human-readable (lossy for binary attachments).
- * XML preserves all message metadata for round-trip import.
+ * Markdown is human-readable: the branch on screen, images named only.
+ * XML preserves all message metadata, every branch and the images, for
+ * round-trip import.
  */
 export class ChatTransferService {
   constructor(private readonly conversations: ConversationService) {}
@@ -38,10 +39,11 @@ export class ChatTransferService {
     if (!conversation) {
       throw new Error(`Conversation not found: ${conversationId}`)
     }
-    // XML carries the image bytes so it re-imports whole; Markdown only names them.
-    return format === 'xml'
-      ? serializeXml(conversation, this.conversations.listMessagesWithImageData(conversationId))
-      : serializeMarkdown(conversation, this.conversations.listMessages(conversationId))
+    if (format === 'markdown') {
+      return serializeMarkdown(conversation, this.conversations.listMessages(conversationId))
+    }
+    const { messages, activeMessageId } = this.conversations.exportMessages(conversationId)
+    return serializeXml(conversation, messages, activeMessageId)
   }
 
   /**
@@ -65,15 +67,28 @@ export class ChatTransferService {
       workspacePath: parsed.conversation.workspacePath
     })
 
+    // Files with message ids (version 2) keep their branches. Older files, and
+    // messages whose parent isn't in the file, continue the previous message.
+    const importedIds = new Map<string, string>()
     for (const message of parsed.messages) {
-      this.conversations.createMessage({
+      const parentId = message.parentId === undefined
+        ? undefined
+        : message.parentId === null ? null : importedIds.get(message.parentId)
+      const created = this.conversations.createMessage({
         conversationId: conversation.id,
         role: message.role,
         content: message.content,
         attachments: message.attachments,
         thinking: message.thinking,
-        toolCalls: message.toolCalls
+        toolCalls: message.toolCalls,
+        parentId
       })
+      if (message.id) importedIds.set(message.id, created.id)
+    }
+
+    const activeMessageId = parsed.activeMessageId && importedIds.get(parsed.activeMessageId)
+    if (activeMessageId) {
+      this.conversations.selectBranch(conversation.id, activeMessageId, { exact: true })
     }
 
     return {
@@ -195,9 +210,10 @@ function prettifyJson(raw: string): string {
 
 // ─── XML serialization ───────────────────────────────────────────────────────
 
-const XML_VERSION = '1'
+/** 2 added message ids, parent ids and the active message, so branches survive. */
+const XML_VERSION = '2'
 
-function serializeXml(conversation: Conversation, messages: Message[]): string {
+function serializeXml(conversation: Conversation, messages: Message[], activeMessageId: string | null): string {
   const lines: string[] = []
   lines.push('<?xml version="1.0" encoding="UTF-8"?>')
   lines.push(`<redLedgerChat version="${XML_VERSION}">`)
@@ -210,10 +226,15 @@ function serializeXml(conversation: Conversation, messages: Message[]): string {
   if (conversation.workspacePath) {
     lines.push(`    <workspacePath>${cdata(conversation.workspacePath)}</workspacePath>`)
   }
+  if (activeMessageId) {
+    lines.push(`    <activeMessageId>${cdata(activeMessageId)}</activeMessageId>`)
+  }
   lines.push('  </conversation>')
   lines.push('  <messages>')
   for (const message of messages) {
-    lines.push(`    <message role="${escapeAttr(message.role)}" timestamp="${escapeAttr(message.timestamp)}" createdAt="${message.createdAt}">`)
+    // A chat's first message (and every edit of it) has no parentId.
+    const parentAttr = message.parentId ? ` parentId="${escapeAttr(message.parentId)}"` : ''
+    lines.push(`    <message id="${escapeAttr(message.id)}"${parentAttr} role="${escapeAttr(message.role)}" timestamp="${escapeAttr(message.timestamp)}" createdAt="${message.createdAt}">`)
     lines.push(`      <content>${cdata(message.content ?? '')}</content>`)
     if (message.thinking) {
       lines.push(`      <thinking>${cdata(message.thinking)}</thinking>`)
@@ -268,7 +289,13 @@ interface ParsedChat {
     provider: ProviderName
     workspacePath: string | null
   }
+  /** The exported chat's id of the message it was showing (version 2). */
+  activeMessageId: string | null
   messages: Array<{
+    /** The exported chat's id for the message (version 2). */
+    id?: string
+    /** Version 2: the exported id of the parent, or null for a first message. Version 1: left out. */
+    parentId?: string | null
     role: Message['role']
     content: string
     thinking?: string
@@ -311,14 +338,19 @@ function parseChatXml(source: string): ParsedChat {
   const messageNodes = messagesNode ? findChildren(messagesNode, 'message') : []
 
   const messages = messageNodes.map((node) => parseMessageNode(node))
+  const activeMessageId = textOf(findChild(conversationNode, 'activeMessageId'))?.trim() || null
 
   return {
     conversation: { title, model, provider, workspacePath },
+    activeMessageId,
     messages
   }
 }
 
 function parseMessageNode(node: XmlNode): ParsedChat['messages'][number] {
+  // Version 2 files give every message an id; only those carry a tree.
+  const id = node.attrs.id?.trim() || undefined
+  const tree = id ? { id, parentId: node.attrs.parentId?.trim() || null } : {}
   const roleRaw = node.attrs.role
   if (roleRaw !== 'user' && roleRaw !== 'assistant' && roleRaw !== 'system') {
     throw new Error(`Invalid message role: ${roleRaw}`)
@@ -336,6 +368,7 @@ function parseMessageNode(node: XmlNode): ParsedChat['messages'][number] {
     : undefined
 
   return {
+    ...tree,
     role: roleRaw,
     content,
     thinking: thinking && thinking.length > 0 ? thinking : undefined,

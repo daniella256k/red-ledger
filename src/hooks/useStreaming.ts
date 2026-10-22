@@ -41,13 +41,12 @@ function isUntitledConversationTitle(title: string | undefined | null): boolean 
   return title.trim().toLowerCase() === AUTO_TITLE_PLACEHOLDER.toLowerCase()
 }
 
-function findLastUserMessage(messages: Message[]): Message | undefined {
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user') {
-      return messages[i]
-    }
-  }
-  return undefined
+/** A prompt to save at the start of a turn. */
+interface TurnPrompt {
+  content: string
+  attachments?: Attachment[]
+  /** Set for an edit: the parent of the message being edited, so the new version sits beside it. */
+  parentId?: string | null
 }
 
 /**
@@ -211,9 +210,12 @@ export function useStreaming() {
 
     try {
       if (!hasAnyOutput) {
-        await window.redLedger.deleteMessagesFrom(conversationId, tempId)
+        // Drop the empty reply; a retry's earlier reply comes back on screen.
+        const branch = await window.redLedger.deleteMessageBranch(conversationId, tempId)
         useConversationStore.setState((state) => ({
-          messages: state.messages.filter((m) => m.id !== tempId)
+          messages: state.activeConversationId === conversationId
+            ? branch
+            : state.messages.filter((m) => m.id !== tempId)
         }))
         return
       }
@@ -314,7 +316,12 @@ export function useStreaming() {
     persistenceErrorNotifiedRef.current = false
   }, [clearPersistTimer, clearThinkingActivity, finalizeTempMessage])
 
-  const sendMessage = useCallback(async (content: string, attachments?: Attachment[]) => {
+  /**
+   * Runs one turn: saves the prompt (if any), then streams a reply to the
+   * branch on screen. With no prompt it answers the user message the branch
+   * already ends at, which is how a retry adds another reply.
+   */
+  const startTurn = useCallback(async (prompt: TurnPrompt | null) => {
     const store = useConversationStore.getState()
     const conversationId = store.activeConversationId
     const activeConversation = store.conversations.find((c) => c.id === conversationId) || null
@@ -368,13 +375,16 @@ export function useStreaming() {
         }))
       }
 
-      // 1. Save user message to DB
-      await store.addMessage({
-        conversationId,
-        role: 'user',
-        content,
-        attachments
-      })
+      // 1. Save user message to DB (an edit places it beside the original)
+      if (prompt) {
+        await store.addMessage({
+          conversationId,
+          role: 'user',
+          content: prompt.content,
+          attachments: prompt.attachments,
+          ...(prompt.parentId !== undefined ? { parentId: prompt.parentId } : {})
+        })
+      }
 
       // 2. Build the message history for the LLM request
       const conversationMessages = await window.redLedger.listMessages(conversationId)
@@ -606,33 +616,41 @@ export function useStreaming() {
     }
   }, [])
 
-  const retry = useCallback(async () => {
+  const sendMessage = useCallback((content: string, attachments?: Attachment[]) => (
+    startTurn({ content, attachments })
+  ), [startTurn])
+
+  /** Asks again: a new reply to this user message, kept beside the earlier ones. */
+  const retry = useCallback(async (userMessageId: string) => {
     if (isStreaming) return
 
     const store = useConversationStore.getState()
-    const lastUserMsg = findLastUserMessage(store.messages)
-    if (!lastUserMsg) return
+    const userMessage = store.messages.find((m) => m.id === userMessageId && m.role === 'user')
+    if (!userMessage) return
 
-    // Delete the user message and everything after it from DB + store
-    await store.deleteMessagesFrom(lastUserMsg.id)
+    // Show the branch ending at the prompt, so the new reply goes beside the old ones.
+    try {
+      await store.selectBranch(userMessage.id, { exact: true })
+    } catch {
+      return // The store already showed the error.
+    }
+    await startTurn(null)
+  }, [isStreaming, startTurn])
 
-    await sendMessage(lastUserMsg.content, lastUserMsg.attachments)
-  }, [isStreaming, sendMessage])
-
-  const editLastUserMessage = useCallback(async (content: string) => {
+  /** Sends an edited copy of this user message as a new version; the original stays. */
+  const editMessage = useCallback(async (userMessageId: string, content: string) => {
     if (isStreaming) return
 
     const store = useConversationStore.getState()
-    const lastUserMsg = findLastUserMessage(store.messages)
-    if (!lastUserMsg) return
+    const userMessage = store.messages.find((m) => m.id === userMessageId && m.role === 'user')
+    if (!userMessage) return
 
     const nextContent = content.trim()
-    const hasAttachments = Boolean(lastUserMsg.attachments && lastUserMsg.attachments.length > 0)
+    const hasAttachments = Boolean(userMessage.attachments && userMessage.attachments.length > 0)
     if (!nextContent && !hasAttachments) return
 
-    await store.deleteMessagesFrom(lastUserMsg.id)
-    await sendMessage(nextContent, lastUserMsg.attachments)
-  }, [isStreaming, sendMessage])
+    await startTurn({ content: nextContent, attachments: userMessage.attachments, parentId: userMessage.parentId })
+  }, [isStreaming, startTurn])
 
   return {
     isStreaming,
@@ -641,6 +659,6 @@ export function useStreaming() {
     sendMessage,
     cancel,
     retry,
-    editLastUserMessage
+    editMessage
   }
 }

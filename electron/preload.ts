@@ -114,8 +114,11 @@ const api: RedLedgerAPI = {
   updateMessage: (id: string, data) =>
     ipcRenderer.invoke('db:updateMessage', id, data),
 
-  deleteMessagesFrom: (conversationId: string, messageId: string) =>
-    ipcRenderer.invoke('db:deleteMessagesFrom', conversationId, messageId),
+  selectBranch: (conversationId: string, messageId: string, options) =>
+    ipcRenderer.invoke('db:selectBranch', conversationId, messageId, options),
+
+  deleteMessageBranch: (conversationId: string, messageId: string) =>
+    ipcRenderer.invoke('db:deleteMessageBranch', conversationId, messageId),
 
   // ─── LLM Streaming ──────────────────────────────────────────────────────
 
@@ -238,12 +241,6 @@ const api: RedLedgerAPI = {
 
   clearCaches: () =>
     ipcRenderer.invoke('storage:clearCaches'),
-
-  showStorageBackup: (name: string) =>
-    ipcRenderer.invoke('storage:showBackup', name),
-
-  deleteStorageBackup: (name: string) =>
-    ipcRenderer.invoke('storage:deleteBackup', name),
 
   // ─── Chat Export / Import ────────────────────────────────────────────────
 

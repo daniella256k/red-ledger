@@ -1,4 +1,4 @@
-import { session, shell } from 'electron'
+import { session } from 'electron'
 import { handleIpc } from './typedIpc'
 import { assertString } from './validate'
 import { StorageService } from '../services/StorageService'
@@ -44,14 +44,4 @@ export function registerStorageHandlers(deps: {
   handleIpc('storage:compact', () => service.compact())
 
   handleIpc('storage:clearCaches', () => service.clearCaches())
-
-  handleIpc('storage:showBackup', (_e, name) => {
-    assertString(name, 'name')
-    shell.showItemInFolder(service.backupPath(name))
-  })
-
-  handleIpc('storage:deleteBackup', (_e, name) => {
-    assertString(name, 'name')
-    service.deleteBackup(name)
-  })
 }
