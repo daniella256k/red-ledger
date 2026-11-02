@@ -55,9 +55,9 @@ registerTool({
 
     const adapter = dialogForWindow(win)
 
-    // Read without a dialog adapter: edit_file is one logical operation, so we
-    // only want to prompt once (in editFile) when strict mode is on, not twice.
-    const content = await workspace.readFile(null, path)
+    // Read without a prompt: edit_file is one logical operation, so we only
+    // want to prompt once (in editFile) when strict mode is on, not twice.
+    const content = workspace.readTextForEdit(path)
 
     const index = content.indexOf(oldString)
     if (index === -1) {

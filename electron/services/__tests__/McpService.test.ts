@@ -324,8 +324,8 @@ describe('McpService connections', () => {
 // ─── Tool calls ─────────────────────────────────────────────────────────────
 
 /** MCP tools only use the window (for Strict Mode); they never touch the workspace. */
-function toolContext(win: unknown = null) {
-  return { win, workspace: null } as never
+function toolContext(win: unknown = null, workspacePath: string | null = null) {
+  return { win, workspace: { getWorkspacePath: () => workspacePath } } as never
 }
 
 describe('McpService tool calls', () => {
@@ -707,6 +707,24 @@ describe('McpService variables and working folder', () => {
       await waitForState(service, 'srv-1', 'connected')
       expect(factory.createTransport).toHaveBeenCalledTimes(3)
       expect(factory.createTransport.mock.calls[2][0].cwd).toBe(second)
+    } finally {
+      rmSync(first, { recursive: true, force: true })
+      rmSync(second, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses tool calls from a chat in another workspace folder', async () => {
+    const first = mkdtempSync(join(tmpdir(), 'mcp-ws-'))
+    const second = mkdtempSync(join(tmpdir(), 'mcp-ws-'))
+    try {
+      const { service, registry } = setup({ deps: { variableContext } })
+      activeService = service
+      service.applyServers([stdioServer({ cwd: '${workspaceFolder}' })], second)
+      await waitForState(service, 'srv-1', 'connected')
+
+      const echo = registry.get('everything__echo')!
+      await expect(echo.execute({ message: 'a' }, toolContext(null, first))).rejects.toThrow(/different workspace folder/)
+      await expect(echo.execute({ message: 'b' }, toolContext(null, second))).resolves.toBeDefined()
     } finally {
       rmSync(first, { recursive: true, force: true })
       rmSync(second, { recursive: true, force: true })

@@ -14,7 +14,7 @@ import { registerDbHandlers, getConversationService } from './ipc/db'
 import { registerContextHandlers, getContextService } from './ipc/context'
 import { registerSettingsHandlers, getCurrentSettings } from './ipc/settings'
 import { registerFsHandlers, getWorkspaceService } from './ipc/fs'
-import { registerLlmHandlers } from './ipc/llm'
+import { cancelConversationStreams, registerLlmHandlers } from './ipc/llm'
 import { registerSearchHandlers } from './ipc/search'
 import { registerMcpHandlers, getMcpService } from './ipc/mcp'
 import { registerTransferHandlers } from './ipc/transfer'
@@ -370,13 +370,21 @@ function registerIpcHandlers(): void {
   ipcHandlersRegistered = true
 
   // Resolve paths
-  const settingsPath = resolveSettingsPath(process.resourcesPath, app.getPath('userData'))
-  const dbPath = resolveDbPath(process.resourcesPath, app.getPath('userData'))
+  // The portable .exe runs from a temporary unpacked copy, so its portable
+  // folder is the resources folder beside the .exe itself.
+  const portableDir = process.env.PORTABLE_EXECUTABLE_DIR
+    ? join(process.env.PORTABLE_EXECUTABLE_DIR, 'resources')
+    : process.resourcesPath
+  const settingsPath = resolveSettingsPath(portableDir, app.getPath('userData'))
+  const dbPath = resolveDbPath(portableDir, app.getPath('userData'))
 
   // 1. Database. New chats take the active context profile (context is
-  // registered in step 4, before any chat can be created).
+  // registered in step 4, before any chat can be created). A deleted chat's
+  // running reply stops first, so it doesn't keep calling tools.
   registerDbHandlers(dbPath, {
     getDefaultProfileId: () => getContextService().getActiveProfileId()
+  }, {
+    beforeDeleteConversation: cancelConversationStreams
   })
 
   // 2. Settings (wires workspace path side effect)

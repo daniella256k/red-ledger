@@ -3,7 +3,6 @@ import type {
   Settings,
   ProviderName,
   ProviderSettings,
-  LMStudioCompatibility,
   McpServerConfig
 } from '../../src/types'
 import {
@@ -36,8 +35,7 @@ const DEFAULT_SETTINGS: Settings = {
     lmstudio: {
       apiKey: '',
       baseUrl: 'http://localhost:1234',
-      models: [],
-      compatibility: 'openai'
+      models: []
     },
     custom: {
       apiKey: '',
@@ -69,18 +67,6 @@ const DEFAULT_SETTINGS: Settings = {
 const MAX_MCP_SERVERS = 50
 const MAX_MCP_NAME_LENGTH = 64
 
-
-const LMSTUDIO_COMPATIBILITY = new Set<LMStudioCompatibility>(['openai', 'lmstudio'])
-
-function sanitizeCompatibility(
-  value: unknown,
-  fallback?: LMStudioCompatibility
-): LMStudioCompatibility | undefined {
-  if (typeof value === 'string' && LMSTUDIO_COMPATIBILITY.has(value as LMStudioCompatibility)) {
-    return value as LMStudioCompatibility
-  }
-  return fallback
-}
 
 /**
  * Write to a temp file, then rename it over the target, so a crash or power
@@ -184,7 +170,6 @@ function sanitizeProviderSettings(value: unknown, defaults: ProviderSettings): P
       ? raw.baseUrl
       : defaults.baseUrl,
     models,
-    compatibility: sanitizeCompatibility(raw.compatibility, defaults.compatibility),
     selectedModel: typeof raw.selectedModel === 'string'
       ? raw.selectedModel
       : defaults.selectedModel,

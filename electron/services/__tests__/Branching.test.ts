@@ -180,7 +180,7 @@ describe('fork', () => {
 })
 
 describe('XML export and import', () => {
-  it('keeps every version and the branch that was on screen', () => {
+  it('keeps every version and the branch that was on screen', async () => {
     const service = open()
     const transfer = new ChatTransferService(service)
     const { chat, say, q1, a1 } = chatWithTurn(service)
@@ -189,7 +189,7 @@ describe('XML export and import', () => {
     service.selectBranch(chat.id, a1.id)
     say('user', 'q2 after a1')
 
-    const imported = transfer.importFromXml(transfer.exportConversation(chat.id, 'xml'))
+    const imported = await transfer.importFromXml(transfer.exportConversation(chat.id, 'xml'))
     const importedId = imported.conversation.id
 
     expect(imported.importedMessageCount).toBe(4)

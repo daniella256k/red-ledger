@@ -61,6 +61,29 @@ describe('OpenAI-compatible request body', () => {
   })
 })
 
+describe('SSE parsing', () => {
+  it('reads data lines written without a space after the colon', async () => {
+    vi.spyOn(axios, 'post').mockResolvedValue({
+      data: Readable.from([`data:${JSON.stringify(STOP)}\n\ndata:[DONE]\n\n`])
+    })
+    const chunks: ProviderChunk[] = []
+
+    await new Promise<void>((resolve) => {
+      new OpenAIProvider('key', 'https://api.example/v1').sendStreaming({
+        messages: [{ role: 'user', content: 'hi' }],
+        model: 'model',
+        tools: [],
+        onChunk: (chunk) => {
+          chunks.push(chunk)
+          if (chunk.type === 'done') resolve()
+        }
+      })
+    })
+
+    expect(chunks).toContainEqual({ type: 'text', content: 'Hi' })
+  })
+})
+
 describe('reasoning echo', () => {
   it('joins streamed reasoning blocks and hands them over before the reply ends', async () => {
     const { chunks } = await stream(new OpenRouterProvider('key'), [

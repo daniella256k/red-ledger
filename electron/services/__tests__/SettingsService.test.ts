@@ -36,7 +36,6 @@ describe('sanitizeSettings', () => {
     expect(result.providers.openrouter.baseUrl).toBe('https://openrouter.ai/api/v1')
     expect(result.providers.ollama.baseUrl).toBe('http://localhost:11434')
     expect(result.providers.lmstudio.baseUrl).toBe('http://localhost:1234')
-    expect(result.providers.lmstudio.compatibility).toBe('openai')
     expect(result.providers.openrouter.selectedModel).toBe(DEFAULT_MODEL)
     expect(result.searchToolsEnabled).toBe(true)
     expect(result.providerSectionExpanded).toBe(true)
@@ -176,20 +175,13 @@ describe('sanitizeSettings', () => {
     expect(result.providers.openai.models).toEqual(['gpt-4', 'gpt-3.5'])
   })
 
-  it('sanitizes lmstudio compatibility', () => {
-    const valid = sanitizeSettings({
+  it('drops the removed LM Studio compatibility mode', () => {
+    const result = sanitizeSettings({
       providers: {
-        lmstudio: { apiKey: '', baseUrl: 'http://localhost:1234', models: [], compatibility: 'lmstudio' }
+        lmstudio: { apiKey: '', baseUrl: 'http://localhost:1234/api/v1', models: [], compatibility: 'lmstudio' }
       }
     } as any)
-    expect(valid.providers.lmstudio.compatibility).toBe('lmstudio')
-
-    const invalid = sanitizeSettings({
-      providers: {
-        lmstudio: { apiKey: '', baseUrl: 'http://localhost:1234', models: [], compatibility: 'invalid' }
-      }
-    } as any)
-    expect(invalid.providers.lmstudio.compatibility).toBe('openai')
+    expect(result.providers.lmstudio).not.toHaveProperty('compatibility')
   })
 
   it('migrates legacy defaultModel into active provider selectedModel', () => {

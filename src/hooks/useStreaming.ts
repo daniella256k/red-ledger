@@ -4,6 +4,7 @@ import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
 import { DEFAULT_CHAT_TITLE, sanitizeGeneratedChatTitle } from '@/lib/chatTitle'
 import { parseStoredToolCalls } from '@/lib/storedToolCalls'
+import { THINKING_BLOCK_SEPARATOR } from '@/lib/thinking'
 import type {
   StreamChunk,
   ToolCall,
@@ -25,7 +26,6 @@ const PERSIST_THROTTLE_MS = 1000
 /** Tools that change workspace files; their results trigger a file tree reload. */
 const WORKSPACE_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'append_file', 'write_pdf', 'move_file'])
 const THINKING_ACTIVE_WINDOW_MS = 1500
-const THINKING_BLOCK_SEPARATOR = '\n\n---\n\n'
 const AUTO_TITLE_PLACEHOLDER = DEFAULT_CHAT_TITLE
 const AUTO_TITLE_DELAY_MS = 500
 const AUTO_TITLE_MAX_TOKENS = 24
@@ -397,7 +397,8 @@ export function useStreaming() {
           : {}),
         ...(m.role === 'assistant' && m.toolCalls
           ? { toolCalls: parseStoredToolCalls(m.toolCalls) }
-          : {})
+          : {}),
+        ...(m.role === 'assistant' && m.thinking ? { thinking: m.thinking } : {})
       }))
 
       const request: LLMRequest = {

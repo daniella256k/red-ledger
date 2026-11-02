@@ -48,15 +48,27 @@ export class ChatTransferService {
     return sanitizeFilename(rawTitle)
   }
 
-  importFromXml(xmlSource: string): ImportedConversation {
+  /**
+   * The file's workspace folder becomes the chat's (and so the assistant's
+   * file access) only if `confirmWorkspace` approves it; otherwise the chat
+   * is imported without one.
+   */
+  async importFromXml(
+    xmlSource: string,
+    confirmWorkspace?: (workspacePath: string) => Promise<boolean>
+  ): Promise<ImportedConversation> {
     const parsed = parseChatXml(xmlSource)
+    const fileWorkspace = parsed.conversation.workspacePath
+    const workspacePath = fileWorkspace && confirmWorkspace && await confirmWorkspace(fileWorkspace)
+      ? fileWorkspace
+      : null
 
     const conversation = this.conversations.createConversation({
       title: parsed.conversation.title,
       model: parsed.conversation.model,
       provider: parsed.conversation.provider,
       isPinned: false,
-      workspacePath: parsed.conversation.workspacePath
+      workspacePath
     })
 
     // Files with message ids (version 2) keep their branches. Older files, and

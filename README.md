@@ -64,11 +64,7 @@ Unpackaged runs (`npm run dev`, `npm run preview`) use their own profile folder,
 
 - OpenAI and OpenRouter use OpenAI-style APIs.
 - Ollama uses local Ollama endpoints.
-- LM Studio supports both:
-  - OpenAI-compatible endpoints
-  - Native LM Studio endpoints
-
-LM Studio compatibility mode is set in the app Settings panel.
+- LM Studio uses its OpenAI-compatible endpoints (`/v1`), which support tools.
 - Custom (OpenAI-compatible) takes any base URL up to the `/v1` path (default `http://localhost:8080/v1`, llama.cpp's server). The API key is optional and only sent when set.
 - A reply cut off by the Max Tokens limit shows a warning instead of passing as a complete answer.
 
@@ -182,7 +178,7 @@ These run `electron-vite build` before `electron-builder`. Running `npx electron
 
 ## Portable Mode
 
-Place a `settings.json` file in the `resources/` directory next to the executable. When detected, Red Ledger stores settings and the SQLite database alongside the binary instead of in the OS user data path. Useful for USB deployments.
+Place a `settings.json` file in the `resources/` directory next to the executable (for the single-file Windows portable `.exe`, create a `resources/` folder beside it). When detected, Red Ledger stores settings and the SQLite database there instead of in the OS user data path. Useful for USB deployments. Context profiles still live in the OS user data path.
 
 ## License
 

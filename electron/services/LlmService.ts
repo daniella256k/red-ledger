@@ -11,6 +11,7 @@ import type {
 import { createProvider } from '../lib/providers/registry'
 import { formatToolResultForModel, getToolDefinitions } from '../lib/tools/registry'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
+import { splitThinkingBlocks } from '../../src/lib/thinking'
 import { findMcpServerByPrefix, parseMcpToolName } from '../../src/lib/mcpConfig'
 import { detectFileType } from '../lib/fileType'
 import type { AttachmentBlob } from './ConversationService'
@@ -157,13 +158,22 @@ function uniqueToolCallId(id: string, usedIds: Set<string>): string {
  * round's text with its tool calls, the full tool results, then the closing
  * text. Rounds are recovered from where each call happened in the reply text
  * (contentOffset); calls stored without one ran before any text.
+ *
+ * With `reasoningBlocks` (the reply's stretches of thinking, in order), each
+ * assistant message carries its round's as `reasoning_content`, for servers
+ * that reject earlier tool rounds without it.
  */
 export function buildPastReplyMessages(
   content: string,
   toolCalls: ToolCall[] | undefined,
-  usedIds: Set<string> = new Set()
+  usedIds: Set<string> = new Set(),
+  reasoningBlocks?: string[]
 ): LLMMessage[] {
-  if (!toolCalls || toolCalls.length === 0) return [{ role: 'assistant', content }]
+  let assistantCount = 0
+  const reasoning = (): Pick<LLMMessage, 'reasoning_content'> =>
+    reasoningBlocks ? { reasoning_content: reasoningBlocks[assistantCount++] ?? '' } : {}
+
+  if (!toolCalls || toolCalls.length === 0) return [{ role: 'assistant', content, ...reasoning() }]
 
   const offsetOf = (tc: ToolCall) => Math.min(Math.max(tc.contentOffset ?? 0, 0), content.length)
   // Array sort is stable, so the calls of one round keep their order.
@@ -184,7 +194,8 @@ export function buildPastReplyMessages(
         id: ids[k],
         type: 'function' as const,
         function: { name: tc.name, arguments: JSON.stringify(tc.arguments ?? {}) }
-      }))
+      })),
+      ...reasoning()
     })
     round.forEach((tc, k) => {
       messages.push({
@@ -197,8 +208,24 @@ export function buildPastReplyMessages(
   }
 
   const closingText = content.slice(cursor)
-  if (closingText.trim().length > 0) messages.push({ role: 'assistant', content: closingText })
+  if (closingText.trim().length > 0) messages.push({ role: 'assistant', content: closingText, ...reasoning() })
   return messages
+}
+
+/**
+ * Servers whose thinking models need earlier turns' reasoning sent back
+ * whenever a request carries tools (DeepSeek answers 400 without it).
+ */
+const REASONING_REPLAY_HOSTS = ['deepseek.com']
+
+export function needsReasoningReplay(baseUrl: string | undefined): boolean {
+  if (!baseUrl) return false
+  try {
+    const host = new URL(baseUrl).hostname.toLowerCase()
+    return REASONING_REPLAY_HOSTS.some((suffix) => host === suffix || host.endsWith(`.${suffix}`))
+  } catch {
+    return false
+  }
 }
 
 /**
@@ -242,8 +269,8 @@ const ESTIMATED_CHARS_PER_TOKEN = 4
 const ESTIMATED_TOKENS_PER_IMAGE = 1000
 const CONTEXT_LENGTH_CACHE_MS = 10 * 60_000
 /**
- * Longest a turn's end waits on the context window lookup (timed from the turn's
- * start). A slower lookup still fills the cache for the next turn.
+ * Longest a turn's first request waits on the context window lookup. A slower
+ * lookup still fills the cache for the next turn.
  */
 const CONTEXT_LENGTH_TIMEOUT_MS = 3_000
 
@@ -305,7 +332,7 @@ export class LlmService {
    * current round (null while tools run); `cancelled` stops the tool loop
    * between rounds, where there is no request to abort.
    */
-  private activeStreams = new Map<string, { handle: AbortHandle | null; cancelled: boolean }>()
+  private activeStreams = new Map<string, { handle: AbortHandle | null; cancelled: boolean; conversationId: string }>()
   /** Context windows by provider + base URL + model, so each turn doesn't refetch model listings. */
   private contextLengthCache = new Map<string, { value: number | null; expiresAt: number }>()
 
@@ -502,6 +529,7 @@ export class LlmService {
     // are replayed with their tool calls and full results, in the same shape
     // as the live tool loop below.
     const replayedToolCallIds = new Set<string>()
+    const replayReasoning = needsReasoningReplay(settings.providers?.[request.provider]?.baseUrl)
     for (const msg of request.messages) {
       if (msg.role === 'user') {
         const sentAt = formatMessageTime(msg.timestamp, this.timeZone)
@@ -514,7 +542,12 @@ export class LlmService {
         const content = msg.content === LEGACY_NO_TEXT_PLACEHOLDER ? '' : msg.content
         // Nothing to replay: no text and no tool calls (e.g. only reasoning).
         if (!content.trim() && !msg.toolCalls?.length) continue
-        messages.push(...buildPastReplyMessages(content, msg.toolCalls, replayedToolCallIds))
+        messages.push(...buildPastReplyMessages(
+          content,
+          msg.toolCalls,
+          replayedToolCallIds,
+          replayReasoning ? splitThinkingBlocks(msg.thinking) : undefined
+        ))
         continue
       }
       messages.push({ role: msg.role, content: msg.content })
@@ -524,29 +557,28 @@ export class LlmService {
       (!SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name) || (settings.searchToolsEnabled && hasSearchApiKey(settings)))
       && !(settings.offlineMode && isNetworkTool(tool.function.name, settings))
     )
-    const shortenedResults = fitToolResultsToContext(
-      messages,
-      tools,
-      this.cachedContextLength(request.provider, request.model)
-    )
-    if (shortenedResults > 0) {
-      sink.send({
-        type: 'notice',
-        content: `Shortened ${shortenedResults} older tool result${shortenedResults === 1 ? '' : 's'} so this chat fits the model's context window.`
-      })
-    }
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
     let totalToolCalls = 0
     let roundsAfterToolLimit = 0
-    // Looked up alongside the reply so the context meter rarely waits for it.
-    const contextLengthLookup = this.lookupContextLength(request.provider, request.model)
+    // Known before the first request so a long chat is shortened even on its
+    // first turn after launch; cached, and capped at a few seconds when not.
+    const contextLength = await this.lookupContextLength(request.provider, request.model)
 
     // Tracked so Stop also ends the turn between rounds, while tools run.
-    const stream: { handle: AbortHandle | null; cancelled: boolean } = { handle: null, cancelled: false }
+    const stream = { handle: null as AbortHandle | null, cancelled: false, conversationId: request.conversationId }
     this.activeStreams.set(channel, stream)
 
     try {
       for (let round = 1; ; round++) {
+        // Every round: one turn's own tool results can outgrow the window.
+        const shortenedResults = fitToolResultsToContext(messages, tools, contextLength)
+        if (shortenedResults > 0) {
+          sink.send({
+            type: 'notice',
+            content: `Shortened ${shortenedResults} older tool result${shortenedResults === 1 ? '' : 's'} so this chat fits the model's context window.`
+          })
+        }
+
         const collectedToolCalls: ToolCall[] = []
         let textAccumulated = ''
         let reportedUsage: ContextUsage | null = null
@@ -611,7 +643,7 @@ export class LlmService {
         if (streamDone === 'done' && !stream.cancelled) {
           // The final round's request holds the whole turn, so it is the turn's peak context use.
           const usage = reportedUsage ?? estimateUsage(messages, tools, textAccumulated)
-          sink.send({ type: 'usage', usage: { ...usage, contextLength: await contextLengthLookup } })
+          sink.send({ type: 'usage', usage: { ...usage, contextLength } })
         }
 
         if (streamDone === 'error' || streamDone === 'done' || stream.cancelled) {
@@ -720,6 +752,13 @@ export class LlmService {
     }
   }
 
+  /** Stops every reply still running for a chat, e.g. before it is deleted. */
+  cancelConversationStreams(conversationId: string): void {
+    for (const [channel, stream] of this.activeStreams) {
+      if (stream.conversationId === conversationId) this.cancelStream(channel)
+    }
+  }
+
   cancelStream(channel: string): void {
     const stream = this.activeStreams.get(channel)
     if (!stream) return
@@ -729,16 +768,14 @@ export class LlmService {
 
   private contextLengthKey(providerName: ProviderName, model: string): string {
     const config = this.getSettings().providers?.[providerName]
-    return `${providerName}|${config?.baseUrl ?? ''}|${config?.compatibility ?? ''}|${model}`
+    return `${providerName}|${config?.baseUrl ?? ''}|${model}`
   }
 
-  /** The model's context window if an earlier turn already looked it up, without waiting on a lookup. */
-  private cachedContextLength(providerName: ProviderName, model: string): number | null {
-    const cached = this.contextLengthCache.get(this.contextLengthKey(providerName, model))
-    return cached && cached.expiresAt > Date.now() ? cached.value : null
-  }
-
-  /** The model's context window for the meter; null when unknown, slow or failing. */
+  /**
+   * The model's context window, for fitting requests and the meter; null when
+   * unknown, slow or failing. An expired value is still used while a fresh
+   * lookup runs in the background, so a chat left idle doesn't wait on it.
+   */
   private lookupContextLength(providerName: ProviderName, model: string): Promise<number | null> {
     const key = this.contextLengthKey(providerName, model)
     const cached = this.contextLengthCache.get(key)
@@ -756,6 +793,10 @@ export class LlmService {
       })
       .catch(() => null)
 
+    if (cached) {
+      clearTimeout(timer)
+      return Promise.resolve(cached.value)
+    }
     return Promise.race([lookup, timeout]).finally(() => clearTimeout(timer))
   }
 

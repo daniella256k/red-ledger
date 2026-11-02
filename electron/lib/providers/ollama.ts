@@ -61,6 +61,26 @@ function parseToolArguments(json: string): Record<string, unknown> {
   }
 }
 
+/** The `error` Ollama sent with a failed request, read from its streamed body. */
+async function readErrorBody(err: unknown): Promise<string> {
+  const data = axios.isAxiosError(err) ? err.response?.data : undefined
+  let text = ''
+  try {
+    if (data && typeof (data as AsyncIterable<Buffer>)[Symbol.asyncIterator] === 'function') {
+      for await (const chunk of data as AsyncIterable<Buffer | string>) {
+        text += chunk.toString()
+        if (text.length > 4_000) break
+      }
+    } else if (typeof data === 'string') {
+      text = data
+    }
+    const parsed = JSON.parse(text) as { error?: unknown }
+    return typeof parsed.error === 'string' ? parsed.error : text
+  } catch {
+    return text
+  }
+}
+
 /**
  * Ollama provider - local LLM server.
  * Uses NDJSON streaming (one JSON object per line) instead of SSE.
@@ -139,31 +159,32 @@ export class OllamaProvider extends BaseLLMProvider {
       body.tools = tools
     }
 
+    // A 400 can mean the model has no tool support or no thinking switch:
+    // drop what it rejected and ask again, telling the user about tools.
     let response: AxiosResponse
-    try {
-      response = await axios.post(`${this.baseUrl}/api/chat`, body, {
-        headers: { 'Content-Type': 'application/json' },
-        responseType: 'stream',
-        timeout: 300_000,
-        signal: controller.signal
-      })
-    } catch (err) {
-      const status = axios.isAxiosError(err) ? err.response?.status : undefined
-      const canRetryWithoutThink = status === 400 && Object.prototype.hasOwnProperty.call(body, 'think')
+    for (;;) {
+      try {
+        response = await axios.post(`${this.baseUrl}/api/chat`, body, {
+          headers: { 'Content-Type': 'application/json' },
+          responseType: 'stream',
+          timeout: 300_000,
+          signal: controller.signal
+        })
+        break
+      } catch (err) {
+        const status = axios.isAxiosError(err) ? err.response?.status : undefined
+        if (status !== 400) throw err
 
-      if (!canRetryWithoutThink) {
-        throw err
+        const reason = await readErrorBody(err)
+        if (body.tools && /does not support tools/i.test(reason)) {
+          delete body.tools
+          onChunk({ type: 'notice', content: `${model} doesn't support tools, so it replied without them.` })
+        } else if (Object.prototype.hasOwnProperty.call(body, 'think')) {
+          delete body.think
+        } else {
+          throw new Error(reason ? `Ollama: ${reason}` : (err as Error).message, { cause: err })
+        }
       }
-
-      const fallbackBody = { ...body }
-      delete fallbackBody.think
-
-      response = await axios.post(`${this.baseUrl}/api/chat`, fallbackBody, {
-        headers: { 'Content-Type': 'application/json' },
-        responseType: 'stream',
-        timeout: 300_000,
-        signal: controller.signal
-      })
     }
 
     const stream = response.data as AsyncIterable<Buffer>

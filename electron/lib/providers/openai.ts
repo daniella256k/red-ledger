@@ -407,15 +407,16 @@ export class OpenAIProvider extends BaseLLMProvider {
         const trimmed = line.trim()
 
         if (!trimmed || trimmed.startsWith(':')) continue // SSE comment or empty
-        if (trimmed === 'data: [DONE]') {
+        // SSE allows "data:" with or without a space after the colon.
+        if (!trimmed.startsWith('data:')) continue
+        const payload = trimmed.slice(5).trimStart()
+        if (payload === '[DONE]') {
           finish()
           return
         }
 
-        if (!trimmed.startsWith('data: ')) continue
-
         try {
-          const data = JSON.parse(trimmed.slice(6))
+          const data = JSON.parse(payload)
 
           // With include_usage the last chunk carries usage and an empty choices array.
           if (data.usage) {

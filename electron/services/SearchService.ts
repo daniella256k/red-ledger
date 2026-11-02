@@ -388,11 +388,24 @@ function isBlockedIpv4(address: string): boolean {
   return BLOCKED_IPV4_SUBNETS.some(([network, prefix]) => isInIpv4Subnet(address, network, prefix))
 }
 
+/** Prefixes whose last 32 bits are an IPv4 address: IPv4-mapped and NAT64. */
+const IPV4_EMBEDDING_IPV6_SUBNETS = [
+  parseIpv6Literal('::ffff:0:0'),
+  parseIpv6Literal('64:ff9b::')
+]
+
 function isBlockedIpv6(address: string): boolean {
   const normalized = normalizeHost(address)
   const mappedPrefix = '::ffff:'
   if (normalized.startsWith(mappedPrefix) && normalized.includes('.')) {
     return isBlockedIpv4(normalized.slice(mappedPrefix.length))
+  }
+
+  // URL parsing writes [::ffff:127.0.0.1] as ::ffff:7f00:1, so check the
+  // embedded IPv4 address whichever way it is written.
+  if (IPV4_EMBEDDING_IPV6_SUBNETS.some((network) => isInIpv6Subnet(normalized, network, 96))) {
+    const low = Number(parseIpv6Literal(normalized) & 0xffffffffn)
+    return isBlockedIpv4([low >>> 24, (low >>> 16) & 255, (low >>> 8) & 255, low & 255].join('.'))
   }
 
   return BLOCKED_IPV6_SUBNETS.some(({ network, prefix }) => isInIpv6Subnet(normalized, network, prefix))

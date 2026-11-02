@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LlmService, MAX_TOOL_CALLS, buildPastReplyMessages, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext, formatMessageTime } from '../LlmService'
+import { LlmService, MAX_TOOL_CALLS, buildPastReplyMessages, needsReasoningReplay, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext, formatMessageTime } from '../LlmService'
 import { parseStoredToolCalls } from '../../../src/lib/storedToolCalls'
 import { sanitizeSettings } from '../SettingsService'
 import { BaseLLMProvider, readContextLength, reportedUsageChunk } from '../../lib/providers/base'
@@ -239,6 +239,26 @@ describe('LlmService tool call history', () => {
       { role: 'tool', content: '{"files":[]}', tool_call_id: 'a' },
       { role: 'assistant', content: 'Done.' }
     ])
+  })
+
+  it('gives each replayed round its stretch of thinking when asked', () => {
+    const messages = buildPastReplyMessages('Looking. Done.', [
+      { id: 'a', name: 'list_files', arguments: {}, result: { files: [] }, contentOffset: 9 }
+    ], new Set(), ['plan the search', 'summarize'])
+
+    expect(messages[0]).toMatchObject({ role: 'assistant', content: 'Looking. ', reasoning_content: 'plan the search' })
+    expect(messages[2]).toEqual({ role: 'assistant', content: 'Done.', reasoning_content: 'summarize' })
+
+    const fewer = buildPastReplyMessages('Done.', [{ id: 'b', name: 'list_files', arguments: {} }], new Set(), [])
+    expect(fewer[0].reasoning_content).toBe('')
+  })
+
+  it('replays reasoning only for servers that require it', () => {
+    expect(needsReasoningReplay('https://api.deepseek.com')).toBe(true)
+    expect(needsReasoningReplay('https://api.deepseek.com/v1')).toBe(true)
+    expect(needsReasoningReplay('https://openrouter.ai/api/v1')).toBe(false)
+    expect(needsReasoningReplay('https://notdeepseek.com')).toBe(false)
+    expect(needsReasoningReplay(undefined)).toBe(false)
   })
 
   it('shortens only the oldest results, and only when a known context window would overflow', () => {
@@ -517,6 +537,38 @@ describe('LlmService cancellation', () => {
     expect(chunks[chunks.length - 1].type).toBe('done')
   })
 
+  it('stops the running reply of a chat by its id, as when the chat is deleted', async () => {
+    let rounds = 0
+    class ToolCallingProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        rounds++
+        queueMicrotask(() => {
+          options.onChunk({ type: 'tool_call', toolCall: { id: `a-${rounds}`, name: 'noop', arguments: {} } })
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+    }
+    registerProvider({ name: 'openai', displayName: 'Tools', defaultBaseUrl: '', factory: () => new ToolCallingProvider('', '') })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    const chunks: StreamChunk[] = []
+    await service.orchestrateStream(
+      { conversationId: 'doomed', model: 'test', provider: 'openai', messages: [{ role: 'user', content: 'go', timestamp: 't' }] },
+      'stream-doomed',
+      { send: (chunk) => chunks.push(chunk) },
+      async (tc) => {
+        service.cancelConversationStreams('other-chat')
+        service.cancelConversationStreams('doomed')
+        return { ...tc, result: { ok: true } }
+      }
+    )
+
+    expect(rounds).toBe(1)
+    expect(chunks[chunks.length - 1].type).toBe('done')
+  })
+
   it('ignores a cancel for a channel that is not streaming', () => {
     expect(() => createService().cancelStream('unknown')).not.toThrow()
   })
@@ -569,6 +621,42 @@ describe('LlmService context usage', () => {
     expect(usage?.contextLength).toBeNull()
     expect(usage?.promptTokens).toBeGreaterThan(0)
     expect(usage?.completionTokens).toBe(Math.ceil('Hello there'.length / 4))
+  })
+
+  it('shortens old tool results on the first request after launch', async () => {
+    const sent: LLMMessage[][] = []
+    class SmallWindowProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        sent.push(options.messages.map((m) => ({ ...m })))
+        queueMicrotask(() => options.onChunk({ type: 'done' }))
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+      override async getContextLength() { return 16_000 }
+    }
+    registerProvider({ name: 'openai', displayName: 'Small', defaultBaseUrl: '', factory: () => new SmallWindowProvider('', '') })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    const chunks: StreamChunk[] = []
+    await service.orchestrateStream(
+      {
+        conversationId: 'c1',
+        model: 'small',
+        provider: 'openai',
+        messages: [
+          { role: 'user', content: 'read it', timestamp: 't' },
+          { role: 'assistant', content: 'Done.', timestamp: 't', toolCalls: [{ id: 'a', name: 'fetch_url', arguments: {}, result: 'x'.repeat(100_000) }] },
+          { role: 'user', content: 'and now?', timestamp: 't' }
+        ]
+      },
+      'stream-fit',
+      { send: (chunk) => chunks.push(chunk) },
+      async (tc) => tc
+    )
+
+    const toolMessage = sent[0].find((m) => m.role === 'tool')!
+    expect((toolMessage.content as string).length).toBeLessThan(5_000)
+    expect(chunks.some((c) => c.type === 'notice' && c.content?.startsWith('Shortened 1 older tool result'))).toBe(true)
   })
 
   it('counts text, tool calls and images in an estimate', () => {

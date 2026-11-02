@@ -76,3 +76,8 @@ export function registerLlmHandlers(deps: {
     return service.generateTitle(request as TitleGenerationRequest)
   })
 }
+
+/** Stops a chat's running reply; safe to call before the LLM handlers exist. */
+export function cancelConversationStreams(conversationId: string): void {
+  service?.cancelConversationStreams(conversationId)
+}

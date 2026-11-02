@@ -1,5 +1,5 @@
 import { resolve, normalize, sep, relative } from 'path'
-import { existsSync, lstatSync } from 'fs'
+import { lstatSync } from 'fs'
 
 /**
  * Path jail — pure utility for workspace containment and symlink rejection.
@@ -53,11 +53,13 @@ export function assertNoSymlinksInPath(workspaceRoot: string, targetPath: string
 
   for (const pathToCheck of pathsToCheck) {
     try {
-      if (!existsSync(pathToCheck)) {
+      // lstat, not exists: a link to a missing target "doesn't exist", yet
+      // writing through it creates the target outside the workspace.
+      const stat = lstatSync(pathToCheck, { throwIfNoEntry: false })
+      if (!stat) {
         // For write targets, final components may not exist yet.
         break
       }
-      const stat = lstatSync(pathToCheck)
       if (stat.isSymbolicLink()) {
         throw new PathJailError('PATH_TRAVERSAL', 'Symbolic links are not allowed')
       }

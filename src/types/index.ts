@@ -1,13 +1,11 @@
 // ─── Provider Types ──────────────────────────────────────────────────────────
 
 export type ProviderName = 'openai' | 'openrouter' | 'ollama' | 'lmstudio' | 'custom'
-export type LMStudioCompatibility = 'openai' | 'lmstudio'
 
 export interface ProviderSettings {
   apiKey: string
   baseUrl: string
   models: string[]
-  compatibility?: LMStudioCompatibility
   selectedModel?: string
   favoriteModels?: string[]
 }
@@ -229,6 +227,8 @@ export interface LLMRequestMessage {
   attachments?: Attachment[]
   /** Tool calls made while producing an earlier assistant reply, results included. */
   toolCalls?: ToolCall[]
+  /** An earlier assistant reply's thinking, for servers that need it sent back. */
+  thinking?: string
 }
 
 // ─── Stream Chunks ───────────────────────────────────────────────────────────

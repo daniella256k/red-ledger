@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { WorkspaceService, type DialogAdapter } from '../WorkspaceService'
@@ -11,7 +11,7 @@ const BASE_SETTINGS: Settings = {
     openai: { apiKey: '', baseUrl: 'https://api.openai.com/v1', models: [] },
     openrouter: { apiKey: '', baseUrl: 'https://openrouter.ai/api/v1', models: [] },
     ollama: { apiKey: '', baseUrl: 'http://localhost:11434', models: [] },
-    lmstudio: { apiKey: '', baseUrl: 'http://localhost:1234', models: [], compatibility: 'openai' },
+    lmstudio: { apiKey: '', baseUrl: 'http://localhost:1234', models: [] },
     custom: { apiKey: '', baseUrl: 'http://localhost:8080/v1', models: [] }
   },
   defaultModel: 'gpt-4',
@@ -188,6 +188,100 @@ describe('WorkspaceService backups and moves', () => {
   })
 })
 
+/** File symlinks need Developer Mode or admin rights on Windows; junctions don't. */
+function canCreateFileSymlinks(): boolean {
+  const dir = mkdtempSync(join(tmpdir(), 'red-ledger-link-probe-'))
+  try {
+    symlinkSync(join(dir, 'missing'), join(dir, 'link'), 'file')
+    return true
+  } catch {
+    return false
+  } finally {
+    rmSync(dir, { recursive: true, force: true })
+  }
+}
+
+describe('WorkspaceService symbolic links', () => {
+  let workspaceRoot: string
+  let outsideRoot: string
+  let service: WorkspaceService
+
+  beforeEach(() => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), 'red-ledger-workspace-'))
+    outsideRoot = mkdtempSync(join(tmpdir(), 'red-ledger-outside-'))
+    service = new WorkspaceService(() => BASE_SETTINGS)
+    service.setWorkspacePath(workspaceRoot)
+  })
+
+  afterEach(() => {
+    rmSync(workspaceRoot, { recursive: true, force: true })
+    rmSync(outsideRoot, { recursive: true, force: true })
+  })
+
+  it('refuses to write through a junction whose target does not exist yet', async () => {
+    const target = join(outsideRoot, 'not-yet')
+    symlinkSync(target, join(workspaceRoot, 'linked'), 'junction')
+
+    await expect(service.writeFile(null, 'linked/escape.txt', 'x', false)).rejects.toThrow(/Symbolic links/)
+    expect(existsSync(target)).toBe(false)
+  })
+
+  it.runIf(canCreateFileSymlinks())('refuses to write through a broken file link', async () => {
+    const target = join(outsideRoot, 'escape.txt')
+    symlinkSync(target, join(workspaceRoot, 'note.txt'), 'file')
+
+    await expect(service.writeFile(null, 'note.txt', 'x', false)).rejects.toThrow(/Symbolic links/)
+    expect(existsSync(target)).toBe(false)
+  })
+
+  it.runIf(canCreateFileSymlinks())('refuses to back up over a .bak link', async () => {
+    const target = join(outsideRoot, 'victim.txt')
+    writeFileSync(target, 'keep me')
+    writeFileSync(join(workspaceRoot, 'notes.md'), 'v1')
+    symlinkSync(target, join(workspaceRoot, 'notes.md.bak'), 'file')
+
+    await expect(service.writeFile(null, 'notes.md', 'v2', false)).rejects.toThrow(/symbolic link/)
+    expect(readFileSync(target, 'utf-8')).toBe('keep me')
+    expect(readFileSync(join(workspaceRoot, 'notes.md'), 'utf-8')).toBe('v1')
+  })
+})
+
+describe('WorkspaceService.readTextForEdit', () => {
+  let workspaceRoot: string
+  let service: WorkspaceService
+
+  beforeEach(() => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), 'red-ledger-workspace-'))
+    service = new WorkspaceService(() => BASE_SETTINGS)
+    service.setWorkspacePath(workspaceRoot)
+  })
+
+  afterEach(() => {
+    rmSync(workspaceRoot, { recursive: true, force: true })
+  })
+
+  it('returns UTF-8 text as is, byte order mark included', () => {
+    writeFileSync(join(workspaceRoot, 'notes.md'), '\uFEFFcaf\u00e9\r\n')
+    expect(service.readTextForEdit('notes.md')).toBe('\uFEFFcaf\u00e9\r\n')
+  })
+
+  it('refuses documents, binary files and text that is not UTF-8', () => {
+    writeFileSync(join(workspaceRoot, 'report.docx'), 'PK\x03\x04')
+    writeFileSync(join(workspaceRoot, 'image.bin'), Buffer.from([1, 0, 2]))
+    writeFileSync(join(workspaceRoot, 'latin1.txt'), Buffer.from('caf\u00e9', 'latin1'))
+
+    expect(() => service.readTextForEdit('report.docx')).toThrow(/is a document/)
+    expect(() => service.readTextForEdit('image.bin')).toThrow(/is binary/)
+    expect(() => service.readTextForEdit('latin1.txt')).toThrow(/not UTF-8/)
+  })
+
+  it('refuses to append text to a document', async () => {
+    writeFileSync(join(workspaceRoot, 'report.pdf'), '%PDF-1.7')
+    await expect(service.writeFile(null, 'report.pdf', 'more', true)).rejects.toThrow(/corrupt the document/)
+    expect(readFileSync(join(workspaceRoot, 'report.pdf'), 'utf-8')).toBe('%PDF-1.7')
+  })
+})
+
 describe('WorkspaceService.snapshot', () => {
   it('stays on the folder it was taken in when the active workspace changes', () => {
     const service = new WorkspaceService(() => BASE_SETTINGS)
@@ -198,5 +292,48 @@ describe('WorkspaceService.snapshot', () => {
 
     expect(pinned.getWorkspacePath()).toBe('/chats/a')
     expect(service.getWorkspacePath()).toBe('/chats/b')
+  })
+})
+
+describe('WorkspaceService.grepFiles', () => {
+  let workspaceRoot: string
+
+  beforeEach(() => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), 'red-ledger-workspace-'))
+  })
+
+  afterEach(() => {
+    rmSync(workspaceRoot, { recursive: true, force: true })
+  })
+
+  it('finds regex matches with their line and column', () => {
+    writeFileSync(join(workspaceRoot, 'notes.md'), 'alpha\nbeta 42\ngamma 7\n')
+    const service = new WorkspaceService(() => BASE_SETTINGS)
+    service.setWorkspacePath(workspaceRoot)
+
+    const matches = service.grepFiles({ pattern: '[0-9]+', isRegex: true })
+
+    expect(matches.map(({ line, column }) => [line, column])).toEqual([[2, 6], [3, 7]])
+  })
+
+  it('stops a regex that backtracks too long instead of freezing', () => {
+    writeFileSync(join(workspaceRoot, 'slow.txt'), `${'a'.repeat(40)}b\n`)
+    const service = new WorkspaceService(() => BASE_SETTINGS)
+    service.setWorkspacePath(workspaceRoot)
+
+    const started = Date.now()
+    expect(() => service.grepFiles({ pattern: '(a+)+$', isRegex: true, regexBudgetMs: 200 }))
+      .toThrow(expect.objectContaining({ code: 'TIMEOUT' }))
+    expect(Date.now() - started).toBeLessThan(2_000)
+  })
+
+  it('asks before searching in strict mode', async () => {
+    const service = new WorkspaceService(() => ({ ...BASE_SETTINGS, strictMode: true }))
+    service.setWorkspacePath(workspaceRoot)
+    const dialog: DialogAdapter = { showMessageBox: vi.fn().mockResolvedValue({ response: 0 }) }
+
+    await expect(service.confirmSearch(dialog, 'password')).rejects.toMatchObject({ code: 'USER_DENIED' })
+    expect(dialog.showMessageBox).toHaveBeenCalledOnce()
+    await expect(service.confirmSearch(null, 'password')).resolves.toBeUndefined()
   })
 })

@@ -111,23 +111,6 @@ export function ProviderSection({
             </div>
           )}
 
-          {/* LM Studio Compatibility */}
-          {settings.activeProvider === 'lmstudio' && (
-            <div>
-              <label className={LABEL_CLASS}>Compatibility</label>
-              <select
-                value={activeProvider.compatibility || 'openai'}
-                onChange={(e) =>
-                  saveActiveProvider({ compatibility: e.target.value as 'openai' | 'lmstudio' })
-                }
-                className="select select-sm w-full"
-              >
-                <option value="openai">OpenAI Endpoints</option>
-                <option value="lmstudio">LM Studio Endpoints</option>
-              </select>
-            </div>
-          )}
-
           {/* Base URL */}
           <div>
             <div className="mb-1 flex items-center justify-between">

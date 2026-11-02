@@ -76,4 +76,37 @@ describe('OllamaProvider', () => {
     expect(chunks.find((c) => c.type === 'notice')?.content).toBe(TRUNCATED_REPLY_NOTICE)
     expect(chunks[chunks.length - 1].type).toBe('done')
   })
+
+  it('retries without tools when the model has no tool support', async () => {
+    const rejected = Object.assign(new axios.AxiosError('Request failed with status code 400'), {
+      response: { status: 400, data: Readable.from([JSON.stringify({ error: 'registry.ollama.ai/library/gemma:2b does not support tools' })]) }
+    })
+    const bodies: Record<string, unknown>[] = []
+    let calls = 0
+    vi.spyOn(axios, 'post').mockImplementation(async (_url, body) => {
+      bodies.push(structuredClone(body as Record<string, unknown>))
+      if (calls++ === 0) throw rejected
+      return ndjson({ message: { content: 'Hi' }, done: false }, { done: true })
+    })
+    const chunks: StreamChunk[] = []
+
+    await new Promise<void>((resolve) => {
+      new OllamaProvider('', 'http://ollama').sendStreaming({
+        messages: [{ role: 'user', content: 'hi' }],
+        model: 'gemma:2b',
+        tools: [{ type: 'function', function: { name: 'read_file', description: '', parameters: { type: 'object', properties: {} } } }],
+        onChunk: (chunk) => {
+          if (chunk.type === 'reasoning_echo') return
+          chunks.push(chunk)
+          if (chunk.type === 'done') resolve()
+        }
+      })
+    })
+
+    expect(bodies).toHaveLength(2)
+    expect(bodies[0]).toHaveProperty('tools')
+    expect(bodies[1]).not.toHaveProperty('tools')
+    expect(chunks).toContainEqual({ type: 'notice', content: "gemma:2b doesn't support tools, so it replied without them." })
+    expect(chunks).toContainEqual({ type: 'text', content: 'Hi' })
+  })
 })

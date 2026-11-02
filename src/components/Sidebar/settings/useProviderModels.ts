@@ -29,7 +29,7 @@ export function useProviderModels(
     ? settings.providers[settings.activeProvider]
     : null
   const modelFetchKey = settings && activeProviderConfig
-    ? `${settings.activeProvider}|${activeProviderConfig.baseUrl}|${activeProviderConfig.apiKey}|${activeProviderConfig.compatibility || ''}`
+    ? `${settings.activeProvider}|${activeProviderConfig.baseUrl}|${activeProviderConfig.apiKey}`
     : ''
   const refreshModels = () => setModelsRefreshNonce((n) => n + 1)
   const requestKey = `${modelsRefreshNonce}|${modelFetchKey}`

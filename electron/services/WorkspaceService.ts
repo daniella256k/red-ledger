@@ -1,8 +1,9 @@
 import { basename, dirname, resolve } from 'path'
+import { Script, createContext } from 'vm'
 import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync, copyFileSync, renameSync } from 'fs'
 import { resolveWorkspacePath, PathJailError } from './pathJail'
 import { loadGitignoreRules, isIgnoredByGitignore, type GitignoreRule } from './gitignore'
-import { DocumentExtractionError, extractDocumentText } from './DocumentTextService'
+import { DocumentExtractionError, extractDocumentText, isExtractedDocument } from './DocumentTextService'
 import type { FileNode, Settings } from '../../src/types'
 
 // Re-export so IPC handlers can use the error type
@@ -41,32 +42,97 @@ export function excerptAroundMatch(line: string, column: number, contextChars = 
   return `${start > 0 ? '...' : ''}${line.slice(start, end)}${end < line.length ? '...' : ''}`
 }
 
+/** A grep regex as JavaScript source and flags, checked to compile. */
+function parseGrepRegex(pattern: string, caseSensitive: boolean): { source: string; flags: string } {
+  // JavaScript regexes have no inline flags; accept a leading (?i) anyway
+  // since models (and people) reach for it out of habit.
+  let source = pattern
+  let ignoreCase = !caseSensitive
+  if (source.startsWith('(?i)')) {
+    source = source.slice(4)
+    ignoreCase = true
+  }
+
+  const flags = ignoreCase ? 'i' : ''
+  try {
+    new RegExp(source, flags)
+  } catch (err) {
+    throw new PathJailError(
+      'INVALID_INPUT',
+      `Invalid regex pattern: ${err instanceof Error ? err.message : String(err)}. `
+        + 'Patterns use JavaScript regex syntax, which has no inline flags like (?i) or (?s) mid-pattern; '
+        + 'use case_sensitive: false for case-insensitive search.'
+    )
+  }
+  return { source, flags }
+}
+
+/** Longest one grep_files call may spend running a regex, across all files. */
+export const GREP_REGEX_BUDGET_MS = 5_000
+
+/** Finds up to `limit` matching lines in a file: [line index, column] pairs. */
+type LineScanner = (lines: string[], limit: number) => Array<[number, number]>
+
+/**
+ * Runs a regex over each file's lines inside a VM context with a time limit,
+ * since a pattern like (a+)+$ can backtrack for minutes on one line and the
+ * search runs on the main process thread. Plain-text searches don't need it.
+ */
+function createRegexScanner(pattern: string, caseSensitive: boolean, budgetMs: number): LineScanner {
+  const context = createContext(parseGrepRegex(pattern, caseSensitive))
+  new Script(`
+    const re = new RegExp(source, flags)
+    function scan(lines, limit) {
+      const found = []
+      for (let i = 0; i < lines.length && found.length < limit; i++) {
+        const m = re.exec(lines[i])
+        if (m) found.push([i, m.index])
+      }
+      return found
+    }
+  `).runInContext(context)
+  const run = new Script('scan(lines, limit)')
+  const deadline = Date.now() + budgetMs
+
+  return (lines, limit) => {
+    context.lines = lines
+    context.limit = limit
+    try {
+      return run.runInContext(context, { timeout: Math.max(1, deadline - Date.now()) }) as Array<[number, number]>
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
+        throw new PathJailError(
+          'TIMEOUT',
+          `The regex took longer than ${budgetMs / 1000} s and was stopped. `
+            + 'Simplify it: avoid nested quantifiers like (a+)+ or (.*)*, or search for literal text instead.'
+        )
+      }
+      throw err
+    } finally {
+      context.lines = undefined
+    }
+  }
+}
+
+function createLineScanner(matcher: (line: string) => number): LineScanner {
+  return (lines, limit) => {
+    const found: Array<[number, number]> = []
+    for (let i = 0; i < lines.length && found.length < limit; i++) {
+      const column = matcher(lines[i])
+      if (column !== -1) found.push([i, column])
+    }
+    return found
+  }
+}
+
 export function buildGrepMatcher(
   pattern: string,
   isRegex: boolean,
   caseSensitive: boolean
 ): (line: string) => number {
   if (isRegex) {
-    // JavaScript regexes have no inline flags; accept a leading (?i) anyway
-    // since models (and people) reach for it out of habit.
-    let source = pattern
-    let ignoreCase = !caseSensitive
-    if (source.startsWith('(?i)')) {
-      source = source.slice(4)
-      ignoreCase = true
-    }
-
-    let re: RegExp
-    try {
-      re = new RegExp(source, ignoreCase ? 'i' : '')
-    } catch (err) {
-      throw new PathJailError(
-        'INVALID_INPUT',
-        `Invalid regex pattern: ${err instanceof Error ? err.message : String(err)}. `
-          + 'Patterns use JavaScript regex syntax, which has no inline flags like (?i) or (?s) mid-pattern; '
-          + 'use case_sensitive: false for case-insensitive search.'
-      )
-    }
+    const { source, flags } = parseGrepRegex(pattern, caseSensitive)
+    const re = new RegExp(source, flags)
     return (line) => {
       const m = re.exec(line)
       return m ? m.index : -1
@@ -291,6 +357,42 @@ export class WorkspaceService {
     return readFileSync(fullPath, 'utf-8')
   }
 
+  /**
+   * A file's raw text for an exact-string edit. Documents (read as extracted
+   * text), binary files and text that isn't valid UTF-8 are refused, since
+   * writing the edited string back would replace the original bytes.
+   */
+  readTextForEdit(relativePath: string): string {
+    if (!this.workspacePath) {
+      throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
+    }
+
+    const fullPath = resolveWorkspacePath(this.workspacePath, relativePath)
+    if (!existsSync(fullPath)) {
+      throw new PathJailError('FILE_NOT_FOUND', `File not found: ${relativePath}`)
+    }
+    if (isExtractedDocument(fullPath)) {
+      throw new PathJailError(
+        'UNSUPPORTED_FILE',
+        `edit_file only edits plain text files, and "${relativePath}" is a document. `
+          + 'Write a new file with write_file (or write_pdf) instead.'
+      )
+    }
+
+    const raw = readFileSync(fullPath)
+    if (raw.subarray(0, 4096).includes(0)) {
+      throw new PathJailError('UNSUPPORTED_FILE', `edit_file only edits text files, and "${relativePath}" is binary.`)
+    }
+    try {
+      return new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(raw)
+    } catch {
+      throw new PathJailError(
+        'UNSUPPORTED_FILE',
+        `"${relativePath}" is not UTF-8 text, so edit_file can't change it without corrupting other characters.`
+      )
+    }
+  }
+
   async writeFile(
     dialog: DialogAdapter | null,
     relativePath: string,
@@ -298,6 +400,12 @@ export class WorkspaceService {
     append: boolean = false
   ): Promise<void> {
     const { fullPath, fileExists } = this.resolveWriteTarget(relativePath)
+    if (append && fileExists && isExtractedDocument(fullPath)) {
+      throw new PathJailError(
+        'UNSUPPORTED_FILE',
+        `Appending text to "${relativePath}" would corrupt the document. Write a new file instead.`
+      )
+    }
     await this.confirmWriteAllowed(dialog, relativePath, fullPath, fileExists, append)
 
     mkdirSync(dirname(fullPath), { recursive: true })
@@ -398,6 +506,23 @@ export class WorkspaceService {
     return { from: fromRelative, to: toDisplay }
   }
 
+  /** Strict Mode: a search returns file contents, so it is asked about like a read. */
+  async confirmSearch(dialog: DialogAdapter | null, pattern: string, relativePath?: string): Promise<void> {
+    if (!dialog || !this.getSettings().strictMode) return
+
+    const confirmed = await dialog.showMessageBox({
+      type: 'question',
+      buttons: ['Deny', 'Allow'],
+      defaultId: 0,
+      title: 'File Search Request',
+      message: `The assistant wants to search ${relativePath ? `"${relativePath}"` : 'the workspace'} for: ${pattern}`,
+      detail: 'Matching lines are sent to the model. Do you want to allow this search?'
+    })
+    if (confirmed.response === 0) {
+      throw new PathJailError('USER_DENIED', 'User denied file search')
+    }
+  }
+
   grepFiles(options: {
     pattern: string
     isRegex?: boolean
@@ -406,6 +531,8 @@ export class WorkspaceService {
     glob?: string
     maxResults?: number
     contextChars?: number
+    /** Override for tests; defaults to GREP_REGEX_BUDGET_MS. */
+    regexBudgetMs?: number
   }): GrepMatch[] {
     if (!this.workspacePath) {
       throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
@@ -419,7 +546,10 @@ export class WorkspaceService {
       throw new PathJailError('FILE_NOT_FOUND', 'Directory not found')
     }
 
-    const matcher = buildGrepMatcher(options.pattern, options.isRegex === true, options.caseSensitive !== false)
+    const caseSensitive = options.caseSensitive !== false
+    const scanner = options.isRegex === true
+      ? createRegexScanner(options.pattern, caseSensitive, options.regexBudgetMs ?? GREP_REGEX_BUDGET_MS)
+      : createLineScanner(buildGrepMatcher(options.pattern, false, caseSensitive))
     const globMatcher = options.glob ? buildGlobMatcher(options.glob) : null
     const maxResults = Math.max(1, Math.min(options.maxResults ?? 200, 1000))
     const contextChars = Math.max(20, Math.min(options.contextChars ?? DEFAULT_GREP_CONTEXT_CHARS, 1000))
@@ -430,7 +560,7 @@ export class WorkspaceService {
       this.workspacePath,
       matches,
       maxResults,
-      matcher,
+      scanner,
       globMatcher,
       contextChars
     )
@@ -443,7 +573,7 @@ export class WorkspaceService {
     rootPath: string,
     matches: GrepMatch[],
     maxResults: number,
-    matcher: (line: string) => number,
+    scanner: LineScanner,
     globMatcher: ((relativePath: string) => boolean) | null,
     contextChars: number,
     gitignoreRules?: GitignoreRule[]
@@ -483,20 +613,20 @@ export class WorkspaceService {
       if (isIgnoredByGitignore(relativePath, isDir, gitignoreRules)) continue
 
       if (isDir) {
-        this.walkForGrep(fullPath, rootPath, matches, maxResults, matcher, globMatcher, contextChars, gitignoreRules)
+        this.walkForGrep(fullPath, rootPath, matches, maxResults, scanner, globMatcher, contextChars, gitignoreRules)
         continue
       }
 
       if (globMatcher && !globMatcher(relativePath)) continue
 
-      this.grepOneFile(fullPath, relativePath, matcher, matches, maxResults, contextChars)
+      this.grepOneFile(fullPath, relativePath, scanner, matches, maxResults, contextChars)
     }
   }
 
   private grepOneFile(
     fullPath: string,
     relativePath: string,
-    matcher: (line: string) => number,
+    scanner: LineScanner,
     matches: GrepMatch[],
     maxResults: number,
     contextChars: number
@@ -524,23 +654,14 @@ export class WorkspaceService {
     const text = raw.toString('utf-8')
     const lines = text.split(/\r?\n/)
     const perFileCap = 30
-    let perFileCount = 0
 
-    for (let lineNum = 0; lineNum < lines.length; lineNum++) {
-      if (matches.length >= maxResults) return
-      if (perFileCount >= perFileCap) return
-
-      const line = lines[lineNum]
-      const column = matcher(line)
-      if (column === -1) continue
-
+    for (const [lineIndex, column] of scanner(lines, Math.min(perFileCap, maxResults - matches.length))) {
       matches.push({
         path: relativePath,
-        line: lineNum + 1,
+        line: lineIndex + 1,
         column: column + 1,
-        text: excerptAroundMatch(line, column, contextChars)
+        text: excerptAroundMatch(lines[lineIndex], column, contextChars)
       })
-      perFileCount++
     }
   }
 
@@ -629,5 +750,11 @@ export class WorkspaceService {
 
 /** Keep the previous version of a file as `<name>.bak` (replacing any older backup) before it is overwritten. */
 function backupFile(fullPath: string): void {
-  copyFileSync(fullPath, `${fullPath}.bak`)
+  const backupPath = `${fullPath}.bak`
+  // The file's folder was checked already; the backup name itself could be a
+  // link that points outside the workspace.
+  if (lstatSync(backupPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new PathJailError('PATH_TRAVERSAL', `Cannot keep a backup: ${basename(backupPath)} is a symbolic link`)
+  }
+  copyFileSync(fullPath, backupPath)
 }

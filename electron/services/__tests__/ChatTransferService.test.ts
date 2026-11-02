@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import type { Conversation, CreateMessageInput, Message } from '../../../src/types'
 import { DEFAULT_PROVIDER } from '../../../src/lib/providers'
 import { ChatTransferService } from '../ChatTransferService'
@@ -128,7 +128,7 @@ describe('ChatTransferService', () => {
     expect(md).toContain('**Image:** pic.png (image/png)')
   })
 
-  it('round-trips XML preserving content, attachments, thinking, and tool calls', () => {
+  it('round-trips XML preserving content, attachments, thinking, and tool calls', async () => {
     const state: FakeServiceState = {
       conversations: new Map([['conv-1', sampleConversation]]),
       messages: new Map([['conv-1', sampleMessages]]),
@@ -142,8 +142,10 @@ describe('ChatTransferService', () => {
     expect(xml).toContain('<redLedgerChat version="2">')
     expect(xml).toContain('<message id="m2" parentId="m1" role="assistant"')
 
-    const result = service.importFromXml(xml)
+    const confirmWorkspace = vi.fn(async () => true)
+    const result = await service.importFromXml(xml, confirmWorkspace)
 
+    expect(confirmWorkspace).toHaveBeenCalledWith('/some/path')
     expect(result.importedMessageCount).toBe(2)
     expect(state.newConversations[0]).toMatchObject({
       title: 'My <test> chat & co.',
@@ -171,7 +173,7 @@ describe('ChatTransferService', () => {
     expect(second.attachments).toEqual(sampleMessages[1].attachments)
   })
 
-  it('preserves message content containing the CDATA terminator sequence', () => {
+  it('preserves message content containing the CDATA terminator sequence', async () => {
     const tricky: Message = {
       id: 'm1',
       conversationId: 'conv-1',
@@ -190,13 +192,13 @@ describe('ChatTransferService', () => {
     const service = new ChatTransferService(createFakeConversationService(state))
 
     const xml = service.exportConversation('conv-1', 'xml')
-    const result = service.importFromXml(xml)
+    const result = await service.importFromXml(xml)
 
     expect(result.importedMessageCount).toBe(1)
     expect(state.created[0].message.content).toBe('before ]]> after')
   })
 
-  it('falls back to default provider for unknown providers', () => {
+  it('falls back to default provider for unknown providers', async () => {
     const state: FakeServiceState = {
       conversations: new Map(),
       messages: new Map(),
@@ -221,12 +223,28 @@ describe('ChatTransferService', () => {
   </messages>
 </redLedgerChat>`
 
-    service.importFromXml(xml)
+    await service.importFromXml(xml)
 
     expect(state.newConversations[0]).toMatchObject({ provider: DEFAULT_PROVIDER })
   })
 
-  it('rejects XML missing the redLedgerChat root', () => {
+  it('imports without the workspace in the file unless it is confirmed', async () => {
+    const state: FakeServiceState = {
+      conversations: new Map([['conv-1', sampleConversation]]),
+      messages: new Map([['conv-1', sampleMessages]]),
+      created: [],
+      newConversations: []
+    }
+    const service = new ChatTransferService(createFakeConversationService(state))
+    const xml = service.exportConversation('conv-1', 'xml')
+
+    await service.importFromXml(xml)
+    await service.importFromXml(xml, async () => false)
+
+    expect(state.newConversations.map((c) => c.workspacePath)).toEqual([null, null])
+  })
+
+  it('rejects XML missing the redLedgerChat root', async () => {
     const state: FakeServiceState = {
       conversations: new Map(),
       messages: new Map(),
@@ -235,9 +253,9 @@ describe('ChatTransferService', () => {
     }
     const service = new ChatTransferService(createFakeConversationService(state))
 
-    expect(() =>
+    await expect(
       service.importFromXml('<?xml version="1.0"?><wrong></wrong>')
-    ).toThrow(/Unexpected root element/)
+    ).rejects.toThrow(/Unexpected root element/)
   })
 
   it('sanitizes filenames derived from the title', () => {

@@ -270,6 +270,8 @@ interface Connection {
   stderrTail: string[]
   /** Set once this connection was replaced or shut down; late async results are dropped. */
   retired: boolean
+  /** The workspace the server was started for, when its settings use `${workspaceFolder}`. */
+  workspaceFolder?: string | null
 }
 
 export interface McpServiceDeps {
@@ -298,6 +300,11 @@ export interface McpServiceDeps {
     onStderr: (chunk: string) => void,
     options: { legacySse: boolean; authProvider?: OAuthClientProvider }
   ) => Transport
+}
+
+/** Whether a server's launch settings depend on the open workspace folder. */
+function usesWorkspaceFolder(config: McpServerConfig): boolean {
+  return JSON.stringify([config.command, config.args, config.env, config.cwd, config.url, config.headers]).includes('${workspaceFolder')
 }
 
 /**
@@ -564,7 +571,8 @@ export class McpService {
       tools: [],
       registered: new Map(),
       stderrTail: [],
-      retired: false
+      retired: false,
+      ...(usesWorkspaceFolder(config) ? { workspaceFolder: this.workspaceFolder } : {})
     }
     this.connections.set(config.id, connection)
     this.emitStatus()
@@ -719,7 +727,7 @@ export class McpService {
       connection.registered.set(name, tool.name)
       this.deps.registerTool({
         definition: toToolDefinition(name, tool, connection.config.name),
-        execute: (args, { win }) => this.callTool(connection, tool.name, args, win)
+        execute: (args, { win, workspace }) => this.callTool(connection, tool.name, args, win, workspace.getWorkspacePath())
       })
     }
   }
@@ -764,10 +772,19 @@ export class McpService {
     connection: Connection,
     toolName: string,
     args: Record<string, unknown>,
-    win: ToolWindow
+    win: ToolWindow,
+    chatWorkspace: string | null
   ): Promise<unknown> {
     if (connection.retired || connection.state !== 'connected' || !connection.client) {
       throw new McpToolError('MCP_ERROR', `The "${connection.config.name}" connection is not available right now.`)
+    }
+    // The server runs for the open workspace; a chat still replying in another
+    // folder must not reach into this one.
+    if (connection.workspaceFolder !== undefined && connection.workspaceFolder !== chatWorkspace) {
+      throw new McpToolError(
+        'MCP_ERROR',
+        `The "${connection.config.name}" connection is running for a different workspace folder than this chat's, so it was not used.`
+      )
     }
 
     await this.confirmToolCall(connection, toolName, args, win)

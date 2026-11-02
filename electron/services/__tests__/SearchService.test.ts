@@ -276,6 +276,16 @@ describe('SearchService.fetchUrl', () => {
     expect(mockedLookup).not.toHaveBeenCalled()
   })
 
+  it('rejects IPv4-mapped IPv6 loopback in either notation', async () => {
+    const service = new SearchService(() => ({} as never))
+
+    for (const url of ['http://[::ffff:127.0.0.1]/', 'http://[::ffff:7f00:1]/', 'http://[64:ff9b::a00:1]/']) {
+      const err = await fetchError(service, url)
+      expect(err.code).toBe('BLOCKED_HOST')
+    }
+    expect(mockedAxios.get).not.toHaveBeenCalled()
+  })
+
   it('rejects domains that resolve to private IP ranges', async () => {
     mockedLookup.mockResolvedValueOnce([{ address: '10.0.0.25', family: 4 }] as never)
 

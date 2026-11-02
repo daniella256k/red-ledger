@@ -16,7 +16,11 @@ export function getConversationService(): ConversationService {
   return service
 }
 
-export function registerDbHandlers(dbPath: string, options: ConversationServiceOptions = {}): void {
+export function registerDbHandlers(
+  dbPath: string,
+  options: ConversationServiceOptions = {},
+  hooks: { beforeDeleteConversation?: (id: string) => void } = {}
+): void {
   service = new ConversationService(dbPath, options)
 
   // ─── Conversations ──────────────────────────────────────────────────────
@@ -48,6 +52,7 @@ export function registerDbHandlers(dbPath: string, options: ConversationServiceO
 
   handleIpc('db:deleteConversation', (_e, id) => {
     assertString(id, 'id')
+    hooks.beforeDeleteConversation?.(id)
     return service.deleteConversation(id)
   })
 

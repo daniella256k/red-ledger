@@ -1,5 +1,5 @@
 import { dialog, BrowserWindow } from 'electron'
-import { readFileSync, writeFileSync } from 'fs'
+import { existsSync, readFileSync, statSync, writeFileSync } from 'fs'
 import { handleIpc } from './typedIpc'
 import { assertString } from './validate'
 import { ChatTransferService, type ChatExportFormat } from '../services/ChatTransferService'
@@ -69,7 +69,20 @@ export function registerTransferHandlers(conversations: ConversationService): vo
 
     try {
       const xml = readFileSync(result.filePaths[0], 'utf-8')
-      const { conversation, importedMessageCount } = service.importFromXml(xml)
+      const { conversation, importedMessageCount } = await service.importFromXml(xml, async (workspacePath) => {
+        if (!existsSync(workspacePath) || !statSync(workspacePath).isDirectory()) return false
+        const options = {
+          type: 'question' as const,
+          buttons: ['Import Without Folder', 'Use Folder'],
+          defaultId: 0,
+          cancelId: 0,
+          title: 'Imported Chat Workspace',
+          message: 'This chat was linked to a workspace folder. Use it for the imported chat?',
+          detail: `${workspacePath}\n\nThe assistant can read and change files in this folder.`
+        }
+        const answer = win ? await dialog.showMessageBox(win, options) : await dialog.showMessageBox(options)
+        return answer.response === 1
+      })
       return { ok: true, conversation, importedMessageCount } as const
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err)
