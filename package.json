@@ -84,13 +84,6 @@
       "output": "dist"
     },
     "npmRebuild": false,
-    "files": [
-      "out/**/*",
-      "build/icon.png",
-      "package.json",
-      "!node_modules/better-sqlite3/{deps,src}/**",
-      "!node_modules/better-sqlite3/binding.gyp"
-    ],
     "extraResources": [
       {
         "from": "contexts",
@@ -99,6 +92,11 @@
     ],
     "win": {
       "files": [
+        "out/**/*",
+        "build/icon.png",
+        "package.json",
+        "!node_modules/better-sqlite3/{deps,src}/**",
+        "!node_modules/better-sqlite3/binding.gyp",
         "!node_modules/better-sqlite3/prebuilds/{darwin,linux,linuxmusl}-*"
       ],
       "target": [
@@ -108,6 +106,11 @@
     },
     "mac": {
       "files": [
+        "out/**/*",
+        "build/icon.png",
+        "package.json",
+        "!node_modules/better-sqlite3/{deps,src}/**",
+        "!node_modules/better-sqlite3/binding.gyp",
         "!node_modules/better-sqlite3/prebuilds/{win32,linux,linuxmusl}-*"
       ],
       "target": [
@@ -117,6 +120,11 @@
     },
     "linux": {
       "files": [
+        "out/**/*",
+        "build/icon.png",
+        "package.json",
+        "!node_modules/better-sqlite3/{deps,src}/**",
+        "!node_modules/better-sqlite3/binding.gyp",
         "!node_modules/better-sqlite3/prebuilds/{win32,darwin}-*"
       ],
       "target": [
