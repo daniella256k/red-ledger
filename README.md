@@ -19,7 +19,10 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 - Storage panel (Settings → Storage): database size, chats sorted by size on disk, the largest images, and manual Remove / Compact / Clear caches. Nothing is deleted automatically.
 - Favorite models: star models in Settings for one-click switching.
 - Per-chat info popover (model, request settings, counts) from the chat header.
-- Context meter under the message box: how much of the model's context window the chat's last reply used. See [Context Meter](#context-meter).
+- Context meter under the message box: a small bar showing how much of the model's context window the chat's last reply used (hover for the numbers). See [Context Meter](#context-meter).
+- Compact: the Compact button left of the context meter has the model summarize the chat so far. The chat continues from the summary; earlier messages stay on screen but are no longer sent.
+- Undo file changes: every reply's workspace file changes can be undone from that reply's actions (Undo file changes), which puts each file back the way it was before the reply.
+- API keys are saved encrypted with the OS keychain, or read from an environment variable when entered as `${env:NAME}`.
 
 ## Quick Start
 
@@ -70,7 +73,9 @@ Unpackaged runs (`npm run dev`, `npm run preview`) use their own profile folder,
 
 ## Context Meter
 
-After each reply, the bottom right of the chat shows the tokens the reply's final request used (history, tool results and tool definitions, plus the generated text) against the model's context window, e.g. `12.4k / 128k tokens`. It turns red past 80%. Hover it for the breakdown. It is saved with the chat, so it changes with the chat you select.
+After each reply, a small bar at the bottom right of the chat fills to show the tokens the reply's final request used (history, tool results and tool definitions, plus the generated text) against the model's context window. It turns red past 80%. Hover it for the numbers, e.g. `12.4k of 128k tokens used (10%)`; when the window is unknown the bar stays empty and the tooltip shows the count alone. It is saved with the chat, so it changes with the chat you select.
+
+When a chat gets long, **Compact** (left of the meter) asks the model for a summary of everything so far: goals, decisions, findings with their sources, files changed, and where the work stands. The summary appears in the chat as a collapsible divider, and from then on each request sends the system prompt, the summary and the messages after it instead of the full history. Compacting again folds the earlier summary into the new one. Editing or retrying a message above the divider starts a branch without it, which sees the full history again.
 
 - Token counts come from the provider: OpenAI-compatible servers report them via `stream_options.include_usage`, and Ollama via its eval counts. When a server reports nothing, the count is estimated from text length (shown with `~`).
 - The context window comes from the provider when it publishes one: OpenRouter and vLLM model listings, the window LM Studio loaded the model with, or Ollama's loaded `num_ctx` (`/api/ps`). OpenAI's API doesn't publish it, so only the token count is shown there.
@@ -78,6 +83,8 @@ After each reply, the bottom right of the chat shows the tokens the reply's fina
 ## Data + Storage
 
 - Settings: `settings.json`
+- API keys: `api-keys.json` next to `settings.json`, encrypted with the OS keychain (DPAPI on Windows), so `settings.json` holds them blank. Keys saved as plain text by earlier versions move there on first launch. A key entered as `${env:NAME}` (e.g. `${env:OPENAI_API_KEY}`) is kept as written and read from the environment instead. Without a keychain (some Linux setups) keys stay in `settings.json`. The keychain is tied to your OS account, so a copied profile or portable folder needs its keys entered again.
+- File history: before a reply first changes a workspace file, its previous content is kept in `conversations.db` (gzipped, stored once per distinct content; files over 25 MB are not kept). Undo file changes on the reply restores those files and deletes files the reply created, after a confirmation that lists each file and warns about files changed since. History is deleted with its reply or chat. Nothing is written next to your files.
 - Conversations/messages: `conversations.db` (SQLite, WAL)
 - Messages form a tree: each one records the message it follows, so a retry or edit adds a sibling instead of replacing anything. A chat shows one branch at a time and remembers which.
 - Images are stored once each, as raw bytes keyed by their SHA-256, and shared by every message (and fork) that uses them. Text attachments stay inside their message.
@@ -112,7 +119,7 @@ Server configs can use `${workspaceFolder}`, `${workspaceFolderBasename}`, `${us
 
 Remote servers that require an account show a Sign in button: Red Ledger registers itself with the server's OAuth provider, opens the sign-in page in your browser and receives the result on a one-time `http://127.0.0.1:<port>/callback` page. Tokens are stored in `mcp-auth.json` next to `settings.json`, encrypted with the OS keystore when available, and refreshed automatically. Providers that require your own OAuth app take a client ID/secret, scope and fixed callback port under "Sign-in options". A server with its own `Authorization` header is never asked to sign in.
 
-Overwrites and edits keep the previous version next to the file as `<name>.bak`. Offline Mode (Settings) hides every tool that reaches the network: web/org/wiki search, `fetch_url`, and HTTP MCP connections.
+A reply's file changes can be undone from the reply (see File history under [Data + Storage](#data--storage)). Offline Mode (Settings) hides every tool that reaches the network: web/org/wiki search, `fetch_url`, and HTTP MCP connections.
 
 Tools self-register via the tool registry. Strict mode shows a native confirmation dialog before each operation. Tool errors are caught and returned in the result so the LLM can self-correct without crashing the stream. Pressing Stop ends the whole turn: no further tool calls or model requests run, even if it is pressed while a tool is working.
 

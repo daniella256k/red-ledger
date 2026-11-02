@@ -1,4 +1,4 @@
-import { HelpIcon, INLINE_LABEL_CLASS, LABEL_CLASS, SectionToggle, ToggleRow, type SettingsSectionProps } from './controls'
+import { ApiKeyInput, HelpIcon, INLINE_LABEL_CLASS, SectionToggle, ToggleRow, type SettingsSectionProps } from './controls'
 
 export function SearchSection({ settings, saveSettings }: SettingsSectionProps) {
   return (
@@ -30,28 +30,18 @@ export function SearchSection({ settings, saveSettings }: SettingsSectionProps) 
           />
 
           <fieldset disabled={!settings.searchToolsEnabled} className="space-y-3 disabled:opacity-45">
-            {/* Tavily Key */}
-            <div>
-              <label className={LABEL_CLASS}>Tavily API Key</label>
-              <input
-                type="password"
-                value={settings.tavilyApiKey}
-                onChange={(e) => saveSettings({ ...settings, tavilyApiKey: e.target.value })}
-                placeholder="tvly-..."
-                className="input input-sm w-full"
-              />
-            </div>
+            <ApiKeyInput
+              label="Tavily API Key"
+              value={settings.tavilyApiKey}
+              onChange={(tavilyApiKey) => saveSettings({ ...settings, tavilyApiKey })}
+              placeholder="tvly-..."
+            />
 
-            {/* SerpAPI Key */}
-            <div>
-              <label className={LABEL_CLASS}>SerpAPI Key</label>
-              <input
-                type="password"
-                value={settings.serpApiKey}
-                onChange={(e) => saveSettings({ ...settings, serpApiKey: e.target.value })}
-                className="input input-sm w-full"
-              />
-            </div>
+            <ApiKeyInput
+              label="SerpAPI Key"
+              value={settings.serpApiKey}
+              onChange={(serpApiKey) => saveSettings({ ...settings, serpApiKey })}
+            />
 
             {/* Org Site */}
             <div>

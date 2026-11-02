@@ -153,6 +153,26 @@ const api: RedLedgerAPI = {
   generateTitle: (request) =>
     ipcRenderer.invoke('llm:generateTitle', request),
 
+  compactChat: (request) => {
+    const channel = `llm:compact:${Date.now()}-${Math.random().toString(36).slice(2)}`
+    return {
+      result: ipcRenderer.invoke('llm:compact', request, channel),
+      cancel: () => {
+        ipcRenderer.invoke('llm:cancelStream', channel).catch(() => {
+          // Already finished
+        })
+      }
+    }
+  },
+
+  // ─── File history ────────────────────────────────────────────────────────
+
+  listUndoableReplies: (conversationId) =>
+    ipcRenderer.invoke('fileHistory:replies', conversationId),
+
+  undoReplyFileChanges: (messageId) =>
+    ipcRenderer.invoke('fileHistory:undo', messageId),
+
   // ─── Settings ────────────────────────────────────────────────────────────
 
   loadSettings: () =>
@@ -160,6 +180,9 @@ const api: RedLedgerAPI = {
 
   saveSettings: (settings) =>
     ipcRenderer.invoke('settings:save', settings),
+
+  getKeyStorage: () =>
+    ipcRenderer.invoke('settings:keyStorage'),
 
   // ─── Search ──────────────────────────────────────────────────────────────
 

@@ -1,5 +1,5 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
-import { ChevronDown, ChevronUp, Paperclip } from 'lucide-react'
+import { ChevronDown, ChevronRight, ChevronUp, FoldVertical, Paperclip } from 'lucide-react'
 import type { Attachment, ImageAttachment, Message, ToolCall } from '@/types'
 import { ToolCallBurst } from './ToolCallBurst'
 import { imageSrc } from '@/lib/attachments'
@@ -12,6 +12,7 @@ import {
   editAction,
   forkAction,
   retryAction,
+  undoFilesAction,
   type BranchPagerProps,
   type MessageAction
 } from './MessageActions'
@@ -30,6 +31,8 @@ interface MessageBubbleProps {
   branch?: BranchPagerProps
   /** If provided, shows a button that deletes this version. */
   onDeleteVersion?: () => void
+  /** If provided on an assistant message, shows a button that undoes its workspace file changes. */
+  onUndoFiles?: () => void
 }
 
 /** A renderable segment: either a block of text or a tool call. */
@@ -158,7 +161,8 @@ export function MessageBubble({
   onEdit,
   onFork,
   branch,
-  onDeleteVersion
+  onDeleteVersion,
+  onUndoFiles
 }: MessageBubbleProps) {
   const [isEditing, setIsEditing] = useState(false)
   const [editingText, setEditingText] = useState('')
@@ -327,21 +331,44 @@ export function MessageBubble({
     // Don't show actions during streaming or for system messages
     if (isStreaming || message.role === 'system' || isEditing) return []
 
+    // Left to right: destructive actions first (delete outermost, then undo),
+    // everyday ones last, with copy, the most used, at the end. A slip on copy
+    // never lands on something that deletes or reverts.
     const list: MessageAction[] = []
+    if (onDeleteVersion) list.push(deleteVersionAction(onDeleteVersion))
+    if (message.role === 'assistant' && onUndoFiles) list.push(undoFilesAction(onUndoFiles))
     if (onRetry) list.push(retryAction(onRetry))
     if (message.role === 'user' && onEdit) list.push(editAction(openEditMode))
     if (message.role === 'assistant' && onFork) list.push(forkAction(onFork))
     list.push(copyAction)
-    if (onDeleteVersion) list.push(deleteVersionAction(onDeleteVersion))
     return list
-  }, [copyAction, onRetry, onEdit, onFork, onDeleteVersion, isStreaming, isEditing, message.role, openEditMode])
+  }, [copyAction, onRetry, onEdit, onFork, onUndoFiles, onDeleteVersion, isStreaming, isEditing, message.role, openEditMode])
 
   // ─── Assistant Message ─────────────────────────────────────────────────────
 
   const align = message.role === 'user' ? 'right' : 'left'
   const hasThinking = Boolean(message.thinking?.trim())
 
-  if (message.role === 'system') return null // Don't render system messages
+  // A 'system' message in a chat is a compaction summary: the messages above
+  // it stay on screen, but requests send the summary in their place.
+  if (message.role === 'system') {
+    return (
+      <div className="message-row">
+        <details className="group/summary border-y border-weathered/70 py-2">
+          <summary className="flex items-center gap-2 cursor-pointer select-none list-none text-xs text-soft-charcoal/50 hover:text-soft-charcoal [&::-webkit-details-marker]:hidden">
+            <FoldVertical size={12} className="shrink-0" />
+            <span>Chat compacted here. Replies from now on see this summary in place of the messages above.</span>
+            <ChevronRight size={12} className="shrink-0 group-open/summary:rotate-90 transition-transform" />
+          </summary>
+          <div
+            className="prose prose-sm max-w-none mt-2 text-soft-charcoal/80"
+            onClick={copyCodeOnClick}
+            dangerouslySetInnerHTML={{ __html: renderMarkdown(message.content) }}
+          />
+        </details>
+      </div>
+    )
+  }
 
   // ─── User Message ──────────────────────────────────────────────────────────
 

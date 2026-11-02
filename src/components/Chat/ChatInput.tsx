@@ -1,5 +1,5 @@
 import { useRef, useCallback, useLayoutEffect } from 'react'
-import { Send, Square, Paperclip, X } from 'lucide-react'
+import { Send, Square, Paperclip, X, FoldVertical } from 'lucide-react'
 import { useConversationStore, useSettingsStore, useUIStore } from '@/store'
 import { selectComposer } from '@/store/conversationStore'
 import type { useStreaming } from '@/hooks/useStreaming'
@@ -100,6 +100,9 @@ interface ChatInputProps {
   streaming: ReturnType<typeof useStreaming>
 }
 
+const COMPACT_HELP = 'Summarize this chat so far to free up the context window. The chat continues from the summary; '
+  + 'earlier messages stay visible but are no longer sent.'
+
 export function ChatInput({ streaming }: ChatInputProps) {
   const MAX_TEXTAREA_HEIGHT = 200
   const textareaRef = useRef<HTMLTextAreaElement>(null)
@@ -120,7 +123,12 @@ export function ChatInput({ streaming }: ChatInputProps) {
   const settings = useSettingsStore((s) => s.settings)
   const workspacePath = useUIStore((s) => s.workspacePath)
   const addToast = useUIStore((s) => s.addToast)
-  const { isStreaming, sendMessage, cancel } = streaming
+  const { isStreaming, isCompacting, compact, sendMessage, cancel } = streaming
+  // Something to compact: a reply since the chat's last summary (or since it began).
+  const canCompact = useConversationStore((s) => {
+    const sinceSummary = s.messages.slice(s.messages.map((m) => m.role).lastIndexOf('system') + 1)
+    return sinceSummary.some((m) => m.role === 'assistant')
+  })
 
   const handleAttach = useCallback(async () => {
     const files = await window.redLedger.openAttachmentFiles()
@@ -275,19 +283,28 @@ export function ChatInput({ streaming }: ChatInputProps) {
         )}
       </div>
 
-      {(isStreaming || contextUsage) && (
+      {(isStreaming || contextUsage || canCompact) && (
         <div className="flex items-center gap-2 mt-2 text-xs text-soft-charcoal/40">
           {isStreaming && (
             <>
               <span className="loading loading-dots loading-xs text-rca-red" />
-              <span>Generating response...</span>
+              <span>{isCompacting ? 'Summarizing the chat...' : 'Generating response...'}</span>
             </>
           )}
-          {contextUsage && (
-            <div className="ml-auto">
-              <ContextMeter usage={contextUsage} />
-            </div>
-          )}
+          <div className="ml-auto flex items-center gap-3">
+            {canCompact && !isStreaming && (
+              <button
+                type="button"
+                onClick={() => { void compact() }}
+                className="inline-flex items-center gap-1 text-soft-charcoal/40 hover:text-soft-charcoal transition-colors"
+                title={COMPACT_HELP}
+              >
+                <FoldVertical size={12} />
+                <span>Compact</span>
+              </button>
+            )}
+            {contextUsage && <ContextMeter usage={contextUsage} />}
+          </div>
         </div>
       )}
     </div>

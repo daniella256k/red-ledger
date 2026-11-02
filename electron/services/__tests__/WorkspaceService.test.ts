@@ -141,23 +141,6 @@ describe('WorkspaceService backups and moves', () => {
     rmSync(workspaceRoot, { recursive: true, force: true })
   })
 
-  it('keeps the previous version as .bak when overwriting or editing', async () => {
-    writeFileSync(join(workspaceRoot, 'notes.md'), 'v1')
-
-    await service.writeFile(null, 'notes.md', 'v2', false)
-    expect(readFileSync(join(workspaceRoot, 'notes.md.bak'), 'utf-8')).toBe('v1')
-
-    await service.editFile(null, 'notes.md', 'v3')
-    expect(readFileSync(join(workspaceRoot, 'notes.md.bak'), 'utf-8')).toBe('v2')
-    expect(readFileSync(join(workspaceRoot, 'notes.md'), 'utf-8')).toBe('v3')
-  })
-
-  it('does not create a .bak for new files or appends', async () => {
-    await service.writeFile(null, 'log.md', 'a', false)
-    await service.writeFile(null, 'log.md', 'b', true)
-    expect(existsSync(join(workspaceRoot, 'log.md.bak'))).toBe(false)
-  })
-
   it('renames a file and creates missing parent directories', async () => {
     writeFileSync(join(workspaceRoot, 'draft.md'), 'x')
 
@@ -232,17 +215,6 @@ describe('WorkspaceService symbolic links', () => {
 
     await expect(service.writeFile(null, 'note.txt', 'x', false)).rejects.toThrow(/Symbolic links/)
     expect(existsSync(target)).toBe(false)
-  })
-
-  it.runIf(canCreateFileSymlinks())('refuses to back up over a .bak link', async () => {
-    const target = join(outsideRoot, 'victim.txt')
-    writeFileSync(target, 'keep me')
-    writeFileSync(join(workspaceRoot, 'notes.md'), 'v1')
-    symlinkSync(target, join(workspaceRoot, 'notes.md.bak'), 'file')
-
-    await expect(service.writeFile(null, 'notes.md', 'v2', false)).rejects.toThrow(/symbolic link/)
-    expect(readFileSync(target, 'utf-8')).toBe('keep me')
-    expect(readFileSync(join(workspaceRoot, 'notes.md'), 'utf-8')).toBe('v1')
   })
 })
 

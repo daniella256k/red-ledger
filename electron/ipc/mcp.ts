@@ -1,9 +1,10 @@
-import { BrowserWindow, safeStorage, shell } from 'electron'
+import { BrowserWindow, shell } from 'electron'
 import { handleIpc } from './typedIpc'
 import { assertString } from './validate'
 import { dialogForWindow } from './fs'
 import { McpService } from '../services/McpService'
-import { createFileAuthStore, PLAIN_TEXT_CODEC, type McpAuthCodec } from '../services/mcpOAuth'
+import { createFileAuthStore } from '../services/mcpOAuth'
+import { safeStorageCodec } from './safeStorageCodec'
 import { registerTool, unregisterTool } from '../lib/tools/registry'
 import type { Settings } from '../../src/types'
 
@@ -13,16 +14,6 @@ import type { Settings } from '../../src/types'
  * registry, Electron dialogs, the browser, the encrypted sign-in store and
  * status push events.
  */
-
-/** Sign-in tokens are encrypted with the OS keychain (DPAPI on Windows) when it is available. */
-function authCodec(): McpAuthCodec {
-  if (!safeStorage.isEncryptionAvailable()) return PLAIN_TEXT_CODEC
-  return {
-    encrypted: true,
-    encode: (json) => safeStorage.encryptString(json).toString('base64'),
-    decode: (data) => safeStorage.decryptString(Buffer.from(data, 'base64'))
-  }
-}
 
 let service: McpService
 
@@ -39,7 +30,7 @@ export function registerMcpHandlers(getSettings: () => Settings, authStorePath: 
     getDialog: dialogForWindow,
     registerTool,
     unregisterTool,
-    authStore: createFileAuthStore(authStorePath, authCodec),
+    authStore: createFileAuthStore(authStorePath, safeStorageCodec),
     openUrl: (url) => shell.openExternal(url),
     onStatusChange: (statuses) => {
       for (const win of BrowserWindow.getAllWindows()) {

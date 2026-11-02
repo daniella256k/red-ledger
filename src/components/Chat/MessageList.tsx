@@ -1,5 +1,7 @@
-import { useRef, useEffect, useCallback } from 'react'
-import { useConversationStore } from '@/store'
+import { useRef, useEffect, useCallback, useState } from 'react'
+import { useConversationStore, useUIStore } from '@/store'
+import { formatError } from '@/lib/errors'
+import { notify } from '@/lib/notify'
 import type { Message } from '@/types'
 import { MessageBubble } from './MessageBubble'
 import type { BranchPagerProps } from './MessageActions'
@@ -35,6 +37,9 @@ export function MessageList({
   const forkConversationFromMessage = useConversationStore((s) => s.forkConversationFromMessage)
   const selectBranch = useConversationStore((s) => s.selectBranch)
   const deleteMessageBranch = useConversationStore((s) => s.deleteMessageBranch)
+  const activeConversationId = useConversationStore((s) => s.activeConversationId)
+  // Replies whose workspace file changes can still be undone.
+  const [undoableReplies, setUndoableReplies] = useState<ReadonlySet<string>>(new Set())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
   const prevMessageIdsRef = useRef<string[]>([])
@@ -111,6 +116,38 @@ export function MessageList({
     await deleteMessageBranch(message.id)
   }, [deleteMessageBranch])
 
+  // Which replies have file changes to undo: asked again when the chat or its
+  // messages change, and once a reply finishes.
+  useEffect(() => {
+    // Ids left from another chat match none of this chat's messages, so they can wait.
+    if (!window.redLedger || !activeConversationId || isStreaming) return
+    let active = true
+    window.redLedger.listUndoableReplies(activeConversationId)
+      .then((ids) => { if (active) setUndoableReplies(new Set(ids)) })
+      .catch(() => {})
+    return () => { active = false }
+  }, [activeConversationId, messages, isStreaming])
+
+  const handleUndoFiles = useCallback(async (messageId: string) => {
+    if (!window.redLedger) return
+    try {
+      const result = await window.redLedger.undoReplyFileChanges(messageId)
+      if (!result) return
+      setUndoableReplies((current) => {
+        const next = new Set(current)
+        next.delete(messageId)
+        return next
+      })
+      useUIStore.getState().bumpFileTree()
+      const undone = `Undid changes to ${result.undone.length} file${result.undone.length === 1 ? '' : 's'}.`
+      notify(result.skipped.length > 0
+        ? { type: 'warning', message: `${undone} Could not undo: ${result.skipped.join(', ')}` }
+        : { type: 'success', message: undone })
+    } catch (err) {
+      notify({ type: 'error', message: formatError(err) })
+    }
+  }, [])
+
   // Jump to the end when a chat opens or a message is added to the end. Switching
   // versions replaces messages instead of adding one, so the reader stays where
   // they are (the observer above still follows if they were at the end).
@@ -180,6 +217,9 @@ export function MessageList({
               branch={branch}
               onDeleteVersion={branch && !isStreaming
                 ? () => { void handleDeleteVersion(message) }
+                : undefined}
+              onUndoFiles={!isStreaming && undoableReplies.has(message.id)
+                ? () => { void handleUndoFiles(message.id) }
                 : undefined}
             />
           )

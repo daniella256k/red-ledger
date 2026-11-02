@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSy
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { DEFAULT_MODEL } from '../../../src/lib/providers'
-import { SettingsService, sanitizeSettings } from '../SettingsService'
+import { SettingsService, isApiKeyReference, sanitizeSettings, type SecretCodec } from '../SettingsService'
 
 describe('sanitizeSettings', () => {
   it('returns defaults for undefined input', () => {
@@ -443,6 +443,100 @@ describe('SettingsService on disk', () => {
         const kept = readdirSync(dir).filter((name) => name.startsWith('settings.json.corrupt-'))
         expect(kept).toHaveLength(1)
         expect(readFileSync(join(dir, kept[0]), 'utf-8')).toContain('tvly-key')
+      } finally {
+        warn.mockRestore()
+      }
+    })
+  })
+
+  /** Stands in for safeStorage: reversible, and never the plain text. */
+  const fakeCodec = (encrypted = true): SecretCodec => ({
+    encrypted,
+    encode: (text) => Buffer.from(`sealed:${text}`).toString('base64'),
+    decode: (data) => {
+      const text = Buffer.from(data, 'base64').toString()
+      if (!text.startsWith('sealed:')) throw new Error('not ours')
+      return text.slice('sealed:'.length)
+    }
+  })
+
+  it('keeps API keys out of settings.json when they can be encrypted', () => {
+    withTempDir((dir) => {
+      const path = join(dir, 'settings.json')
+      const secretsPath = join(dir, 'api-keys.json')
+      const service = new SettingsService(path, { secretsPath, getCodec: () => fakeCodec() })
+      const current = service.getCurrent()
+      service.save({
+        ...current,
+        tavilyApiKey: 'tvly-secret',
+        providers: { ...current.providers, openai: { ...current.providers.openai, apiKey: 'sk-secret' } }
+      })
+
+      expect(readFileSync(path, 'utf-8')).not.toContain('secret')
+      expect(readFileSync(secretsPath, 'utf-8')).not.toContain('secret')
+      const reopened = new SettingsService(path, { secretsPath, getCodec: () => fakeCodec() })
+      expect(reopened.getCurrent().tavilyApiKey).toBe('tvly-secret')
+      expect(reopened.getCurrent().providers.openai.apiKey).toBe('sk-secret')
+      expect(reopened.keysEncrypted()).toBe(true)
+    })
+  })
+
+  it('moves plain-text keys from an older settings.json into the key file', () => {
+    withTempDir((dir) => {
+      const path = join(dir, 'settings.json')
+      const secretsPath = join(dir, 'api-keys.json')
+      writeFileSync(path, JSON.stringify({ serpApiKey: 'serp-old' }))
+
+      const service = new SettingsService(path, { secretsPath, getCodec: () => fakeCodec() })
+
+      expect(service.getCurrent().serpApiKey).toBe('serp-old')
+      expect(readFileSync(path, 'utf-8')).not.toContain('serp-old')
+      expect(existsSync(secretsPath)).toBe(true)
+    })
+  })
+
+  it('stores keys as plain text when there is no keychain', () => {
+    withTempDir((dir) => {
+      const path = join(dir, 'settings.json')
+      const secretsPath = join(dir, 'api-keys.json')
+      const service = new SettingsService(path, { secretsPath, getCodec: () => fakeCodec(false) })
+      service.save({ ...service.getCurrent(), tavilyApiKey: 'tvly-plain' })
+
+      expect(JSON.parse(readFileSync(path, 'utf-8')).tavilyApiKey).toBe('tvly-plain')
+      expect(existsSync(secretsPath)).toBe(false)
+      expect(service.keysEncrypted()).toBe(false)
+    })
+  })
+
+  it('keeps ${env:NAME} keys as written and reads them from the environment', () => {
+    withTempDir((dir) => {
+      const path = join(dir, 'settings.json')
+      const secretsPath = join(dir, 'api-keys.json')
+      const env = { MY_TAVILY: 'tvly-from-env' }
+      const service = new SettingsService(path, { secretsPath, getCodec: () => fakeCodec(), env })
+      service.save({ ...service.getCurrent(), tavilyApiKey: '${env:MY_TAVILY}', serpApiKey: '${env:UNSET_KEY}' })
+
+      expect(JSON.parse(readFileSync(path, 'utf-8')).tavilyApiKey).toBe('${env:MY_TAVILY}')
+      expect(service.getCurrent().tavilyApiKey).toBe('${env:MY_TAVILY}')
+      expect(service.getResolved().tavilyApiKey).toBe('tvly-from-env')
+      expect(service.getResolved().serpApiKey).toBe('')
+      expect(isApiKeyReference('sk-abc')).toBe(false)
+    })
+  })
+
+  it('starts without keys when the key file belongs to another keychain', () => {
+    withTempDir((dir) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const path = join(dir, 'settings.json')
+        const secretsPath = join(dir, 'api-keys.json')
+        writeFileSync(path, '{}')
+        writeFileSync(secretsPath, JSON.stringify({ encrypted: true, data: 'b3RoZXI=' }))
+
+        const service = new SettingsService(path, { secretsPath, getCodec: () => fakeCodec() })
+
+        expect(service.getCurrent().tavilyApiKey).toBe('')
+        expect(warn).toHaveBeenCalled()
       } finally {
         warn.mockRestore()
       }

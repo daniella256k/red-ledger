@@ -206,11 +206,28 @@ export interface ToolCall {
 
 export interface LLMRequest {
   conversationId: string
+  /** The reply being written; its workspace file changes are recorded under it for undo. */
+  replyMessageId?: string
   messages: LLMRequestMessage[]
   model: string
   provider: ProviderName
   temperature?: number
   maxTokens?: number
+}
+
+/** A finished compaction: the summary, and the context the chat continues from. */
+export interface ChatCompaction {
+  summary: string
+  /** Estimated: the system prompt, the summary and the tool definitions. */
+  usage: ContextUsage
+}
+
+/** What undoing a reply's file changes did. */
+export interface FileUndoResult {
+  /** Files put back to how they were before the reply. */
+  undone: string[]
+  /** Files that couldn't be: too large to have been kept, or no longer reachable safely. */
+  skipped: string[]
 }
 
 export interface TitleGenerationRequest {
@@ -491,9 +508,23 @@ export interface RedLedgerAPI {
   listModels(provider: string): Promise<string[]>
   generateTitle(request: TitleGenerationRequest): Promise<string | null>
 
+  /**
+   * Summarizes the chat so far (the branch in `request.messages`) to stand in
+   * for it. The result is null when cancelled.
+   */
+  compactChat(request: LLMRequest): { result: Promise<ChatCompaction | null>; cancel: () => void }
+
+  // File history
+  /** Replies in a chat whose workspace file changes can be undone. */
+  listUndoableReplies(conversationId: string): Promise<string[]>
+  /** Asks, then undoes a reply's file changes; null when the user cancels. */
+  undoReplyFileChanges(messageId: string): Promise<FileUndoResult | null>
+
   // Settings
   loadSettings(): Promise<Settings>
   saveSettings(settings: Settings): Promise<void>
+  /** Whether API keys are saved encrypted (OS keychain) or as plain text. */
+  getKeyStorage(): Promise<'encrypted' | 'plain'>
 
   // Search
   webSearch(query: string, numResults?: number): Promise<SearchResult[]>

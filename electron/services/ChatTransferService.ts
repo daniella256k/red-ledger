@@ -196,7 +196,8 @@ function roleHeading(role: Message['role']): string {
   switch (role) {
     case 'user': return 'User'
     case 'assistant': return 'Assistant'
-    case 'system': return 'System'
+    // A chat's only system messages are compaction summaries.
+    case 'system': return 'Summary of earlier messages'
   }
 }
 

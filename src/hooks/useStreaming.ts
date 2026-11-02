@@ -96,6 +96,22 @@ function recordRequestInfo(
   })()
 }
 
+/** A chat's messages in the shape an LLM request carries them. */
+function toRequestMessages(conversationMessages: Message[]): LLMRequest['messages'] {
+  return conversationMessages.map((m) => ({
+    role: m.role,
+    content: m.content,
+    timestamp: m.timestamp,
+    ...(m.role === 'user' && m.attachments && m.attachments.length > 0
+      ? { attachments: m.attachments }
+      : {}),
+    ...(m.role === 'assistant' && m.toolCalls
+      ? { toolCalls: parseStoredToolCalls(m.toolCalls) }
+      : {}),
+    ...(m.role === 'assistant' && m.thinking ? { thinking: m.thinking } : {})
+  }))
+}
+
 /** Save the finished reply's context use for the chat's context meter. Best-effort, like recordRequestInfo. */
 function recordContextUsage(conversationId: string, usage: ContextUsage): void {
   const previous = findConversation(conversationId)?.lastRequest
@@ -123,6 +139,8 @@ export function useStreaming() {
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
 
   const cleanupRef = useRef<(() => void) | null>(null)
+  const compactCancelRef = useRef<(() => void) | null>(null)
+  const [isCompacting, setIsCompacting] = useState(false)
   const tempMessageIdRef = useRef<string | null>(null)
   const tempConversationIdRef = useRef<string | null>(null)
   const contentRef = useRef('')
@@ -282,6 +300,11 @@ export function useStreaming() {
   }, [])
 
   const cancel = useCallback(() => {
+    if (compactCancelRef.current) {
+      compactCancelRef.current()
+      compactCancelRef.current = null
+      return
+    }
     const tempId = tempMessageIdRef.current
     const tempConversationId = tempConversationIdRef.current
 
@@ -388,18 +411,7 @@ export function useStreaming() {
 
       // 2. Build the message history for the LLM request
       const conversationMessages = await window.redLedger.listMessages(conversationId)
-      const messages = conversationMessages.map((m) => ({
-        role: m.role,
-        content: m.content,
-        timestamp: m.timestamp,
-        ...(m.role === 'user' && m.attachments && m.attachments.length > 0
-          ? { attachments: m.attachments }
-          : {}),
-        ...(m.role === 'assistant' && m.toolCalls
-          ? { toolCalls: parseStoredToolCalls(m.toolCalls) }
-          : {}),
-        ...(m.role === 'assistant' && m.thinking ? { thinking: m.thinking } : {})
-      }))
+      const messages = toRequestMessages(conversationMessages)
 
       const request: LLMRequest = {
         conversationId,
@@ -448,7 +460,7 @@ export function useStreaming() {
       }
 
       // 4. Start the stream
-      const cleanup = window.redLedger.sendMessage(request, (chunk: StreamChunk) => {
+      const cleanup = window.redLedger.sendMessage({ ...request, replyMessageId: tempId }, (chunk: StreamChunk) => {
         switch (chunk.type) {
           case 'thinking': {
             const incomingThinking = chunk.content || ''
@@ -653,8 +665,69 @@ export function useStreaming() {
     await startTurn({ content: nextContent, attachments: userMessage.attachments, parentId: userMessage.parentId })
   }, [isStreaming, startTurn])
 
+  /**
+   * Compacts the chat: the model summarizes the branch on screen, and the
+   * summary is added after it as a 'system' message. From then on requests
+   * send the summary in place of everything before it (see LlmService).
+   */
+  const compact = useCallback(async () => {
+    if (isStreaming) return
+
+    const store = useConversationStore.getState()
+    const conversationId = store.activeConversationId
+    const conversation = store.conversations.find((c) => c.id === conversationId)
+    const currentSettings = useSettingsStore.getState().settings
+    if (!conversationId || !conversation || !currentSettings) return
+
+    setIsStreaming(true)
+    setIsCompacting(true)
+    try {
+      const conversationMessages = await window.redLedger.listMessages(conversationId)
+      const sinceSummary = conversationMessages.slice(
+        conversationMessages.map((m) => m.role).lastIndexOf('system') + 1
+      )
+      if (!sinceSummary.some((m) => m.role === 'assistant')) {
+        notify({ type: 'info', message: 'Nothing new to compact yet.' })
+        return
+      }
+
+      const provider = conversation.provider || currentSettings.activeProvider
+      const request: LLMRequest = {
+        conversationId,
+        messages: toRequestMessages(conversationMessages),
+        model: conversation.model
+          || currentSettings.providers[provider].selectedModel
+          || currentSettings.defaultModel,
+        provider,
+        ...(currentSettings.temperatureEnabled ? { temperature: currentSettings.temperature } : {}),
+        ...(currentSettings.maxTokensEnabled ? { maxTokens: currentSettings.maxTokens } : {})
+      }
+
+      const { result, cancel: cancelCompaction } = window.redLedger.compactChat(request)
+      compactCancelRef.current = cancelCompaction
+      const compaction = await result
+      if (!compaction) return
+
+      await useConversationStore.getState().addMessage({
+        conversationId,
+        role: 'system',
+        content: compaction.summary
+      })
+      recordContextUsage(conversationId, compaction.usage)
+      notify({ type: 'success', message: 'Chat compacted. It continues from the summary of the earlier messages.' })
+    } catch (err) {
+      notify({ type: 'error', message: `Could not compact the chat: ${formatError(err)}` })
+    } finally {
+      compactCancelRef.current = null
+      setIsCompacting(false)
+      setIsStreaming(false)
+    }
+  }, [isStreaming])
+
   return {
     isStreaming,
+    isCompacting,
+    compact,
     isReceivingThinking,
     streamingMessageId,
     sendMessage,

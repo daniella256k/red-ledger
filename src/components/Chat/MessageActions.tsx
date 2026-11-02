@@ -1,5 +1,5 @@
 import { useState, useCallback } from 'react'
-import { Copy, Check, RotateCcw, GitFork, Pencil, Trash2, ChevronLeft, ChevronRight } from 'lucide-react'
+import { Copy, Check, RotateCcw, GitFork, Pencil, Trash2, ChevronLeft, ChevronRight, Undo2 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
 // ─── Action Descriptor ───────────────────────────────────────────────────────
@@ -76,6 +76,16 @@ export function deleteVersionAction(onDelete: () => void): MessageAction {
     icon: Trash2,
     label: 'Delete this version',
     onClick: onDelete
+  }
+}
+
+/** Undo-files action - puts workspace files back the way they were before this reply. */
+export function undoFilesAction(onUndo: () => void): MessageAction {
+  return {
+    key: 'undo-files',
+    icon: Undo2,
+    label: 'Undo file changes',
+    onClick: onUndo
   }
 }
 

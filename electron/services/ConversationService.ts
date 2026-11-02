@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from 'crypto'
 import type Database from 'better-sqlite3'
+import { FileHistoryStore } from './FileHistoryService'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
 import { BLOB_ID_PATTERN, isImageMimeType } from '../../src/lib/attachments'
 import type {
@@ -136,6 +137,8 @@ export class ConversationService {
   private statements: Map<string, Database.Statement> = new Map()
   private getDefaultProfileId: () => string | null
   private messageSearchIndexed = false
+  /** Workspace file versions replaced by each reply, for undo; kept in the same database. */
+  readonly fileHistory: FileHistoryStore
 
   constructor(dbPath: string, options: ConversationServiceOptions = {}) {
     this.getDefaultProfileId = options.getDefaultProfileId ?? (() => null)
@@ -146,6 +149,7 @@ export class ConversationService {
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
     this.createTables()
+    this.fileHistory = new FileHistoryStore(this.db)
   }
 
   // ─── Schema ───────────────────────────────────────────────────────────────
@@ -1062,13 +1066,14 @@ export class ConversationService {
     return row ? row.size : null
   }
 
-  /** Deletes stored images that no message uses any more. */
+  /** Deletes stored images and file versions that no message uses any more. */
   private pruneUnusedBlobs(): void {
     this.stmt(
       'pruneUnusedBlobs',
       `DELETE FROM attachment_blobs
        WHERE NOT EXISTS (SELECT 1 FROM message_blobs mb WHERE mb.blob_id = attachment_blobs.id)`
     ).run()
+    this.fileHistory.pruneUnusedVersions()
   }
 
   getAttachmentBlob(blobId: string): AttachmentBlob | null {

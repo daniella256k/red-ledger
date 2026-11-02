@@ -19,6 +19,7 @@ import { registerSearchHandlers } from './ipc/search'
 import { registerMcpHandlers, getMcpService } from './ipc/mcp'
 import { registerTransferHandlers } from './ipc/transfer'
 import { registerStorageHandlers } from './ipc/storage'
+import { registerFileHistoryHandlers } from './ipc/fileHistory'
 import { handleIpc } from './ipc/typedIpc'
 import { assertObject } from './ipc/validate'
 import { ATTACHMENT_URL_SCHEME } from '../src/lib/attachments'
@@ -434,6 +435,9 @@ function registerIpcHandlers(): void {
 
   // 8. Chat import/export
   registerTransferHandlers(getConversationService())
+
+  // 8a. Undoing a reply's file changes
+  registerFileHistoryHandlers(getConversationService().fileHistory)
 
   // 8b. Storage panel
   registerStorageHandlers({

@@ -3,6 +3,7 @@ import { LlmService, type StreamSink } from '../services/LlmService'
 import type { AttachmentBlob } from '../services/ConversationService'
 import { executeTool } from '../lib/tools/executor'
 import { getWorkspaceService } from './fs'
+import { getConversationService } from './db'
 import { assertString, assertObject, assertOptionalNumber } from './validate'
 import type { LLMRequest, StreamChunk, ProviderName, Settings, TitleGenerationRequest } from '../../src/types'
 import { handleIpc } from './typedIpc'
@@ -39,7 +40,12 @@ export function registerLlmHandlers(deps: {
         send: (chunk) => win.webContents.send(channel, chunk)
       }
       // The folder this chat is in now; later chat switches don't move the turn.
-      const workspace = getWorkspaceService().snapshot()
+      // File changes are recorded under the reply so they can be undone.
+      const workspaceRoot = getWorkspaceService().getWorkspacePath()
+      const history = request.replyMessageId && workspaceRoot
+        ? getConversationService().fileHistory.recorderFor(request.replyMessageId, workspaceRoot)
+        : null
+      const workspace = getWorkspaceService().snapshot(history)
 
       await service.orchestrateStream(
         request,
@@ -74,6 +80,12 @@ export function registerLlmHandlers(deps: {
     assertString(request.prompt, 'request.prompt')
     assertOptionalNumber(request.maxTokens, 'request.maxTokens')
     return service.generateTitle(request as TitleGenerationRequest)
+  })
+
+  handleIpc('llm:compact', async (_e, request, channel) => {
+    assertObject(request, 'request')
+    assertString(channel, 'channel')
+    return service.compactConversation(request, channel)
   })
 }
 

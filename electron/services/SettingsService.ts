@@ -1,4 +1,6 @@
 import { copyFileSync, existsSync, readFileSync, renameSync, rmSync, writeFileSync } from 'fs'
+import { homedir } from 'os'
+import { sep } from 'path'
 import type {
   Settings,
   ProviderName,
@@ -6,6 +8,7 @@ import type {
   McpServerConfig
 } from '../../src/types'
 import {
+  expandMcpVariables,
   normalizeMcpTransport,
   sanitizeMcpOAuth,
   sanitizeStringArray,
@@ -85,38 +88,183 @@ function writeFileAtomic(path: string, content: string): void {
   }
 }
 
+// ─── API keys ───────────────────────────────────────────────────────────────
+
+/** Encrypts API keys at rest; in the app, Electron's safeStorage (DPAPI on Windows). */
+export interface SecretCodec {
+  /** False when the system has no keychain to encrypt with. */
+  encrypted: boolean
+  encode(text: string): string
+  decode(data: string): string
+}
+
+interface SecretField {
+  id: string
+  get: (settings: Settings) => string
+  set: (settings: Settings, value: string) => void
+}
+
+/** Every API key in settings, by a stable id for the key file. */
+const SECRET_FIELDS: SecretField[] = [
+  ...PROVIDER_NAMES.map((name): SecretField => ({
+    id: `provider:${name}`,
+    get: (settings) => settings.providers[name].apiKey,
+    set: (settings, value) => { settings.providers[name].apiKey = value }
+  })),
+  {
+    id: 'search:tavily',
+    get: (settings) => settings.tavilyApiKey,
+    set: (settings, value) => { settings.tavilyApiKey = value }
+  },
+  {
+    id: 'search:serpapi',
+    get: (settings) => settings.serpApiKey,
+    set: (settings, value) => { settings.serpApiKey = value }
+  }
+]
+
+/**
+ * A key field holding `${env:NAME}` (or any `${...}` reference) names where the
+ * key lives instead of holding it, so it stays readable in settings.json.
+ */
+export function isApiKeyReference(value: string): boolean {
+  return value.includes('${')
+}
+
+function cloneSettings(settings: Settings): Settings {
+  return JSON.parse(JSON.stringify(settings)) as Settings
+}
+
+export interface SettingsServiceOptions {
+  /** Where encrypted API keys are kept; without it (or a codec) keys stay in settings.json. */
+  secretsPath?: string
+  /** Called on each save and load, since the keychain may only be ready after app start. */
+  getCodec?: () => SecretCodec
+  /** Environment for `${env:NAME}` key references; defaults to process.env. */
+  env?: Record<string, string | undefined>
+}
+
 /**
  * Domain service for application settings.
  * Owns load/save/sanitize logic. No Electron imports.
+ *
+ * API keys are written to a separate key file, encrypted, when a codec that
+ * can encrypt is available; settings.json then holds them blank. Keys written
+ * as `${env:NAME}` stay in settings.json and are read from the environment.
  *
  * The caller (IPC handler) is responsible for applying side effects
  * like setting the workspace path — this service just manages data.
  */
 export class SettingsService {
   private settingsPath: string
+  private options: SettingsServiceOptions
   private currentSettings: Settings
+  private resolvedSettings: Settings
   /** Set once a corrupt settings file has been copied aside, so repeat loads don't copy it again. */
   private keptCorruptCopy = false
 
-  constructor(settingsPath: string) {
+  constructor(settingsPath: string, options: SettingsServiceOptions = {}) {
     this.settingsPath = settingsPath
+    this.options = options
     this.currentSettings = this.loadFromDisk()
+    this.resolvedSettings = this.resolveKeys(this.currentSettings)
   }
 
+  /** Settings as the user entered them, `${env:NAME}` key references included (for the Settings panel). */
   getCurrent(): Settings {
     return this.currentSettings
   }
 
+  /** Settings with key references replaced by their values, for the code that uses the keys. */
+  getResolved(): Settings {
+    return this.resolvedSettings
+  }
+
+  /** Whether API keys are saved encrypted rather than as plain text. */
+  keysEncrypted(): boolean {
+    return this.secretStorage() !== null
+  }
+
   load(): Settings {
     this.currentSettings = this.loadFromDisk()
+    this.resolvedSettings = this.resolveKeys(this.currentSettings)
     return this.currentSettings
   }
 
   save(settings: Settings): Settings {
     const sanitized = sanitizeSettings(settings)
-    writeFileAtomic(this.settingsPath, JSON.stringify(sanitized, null, 2))
+    const storage = this.secretStorage()
+    if (storage) {
+      const onDisk = cloneSettings(sanitized)
+      const secrets: Record<string, string> = {}
+      for (const field of SECRET_FIELDS) {
+        const value = field.get(sanitized)
+        if (!value || isApiKeyReference(value)) continue
+        secrets[field.id] = value
+        field.set(onDisk, '')
+      }
+      // Keys first: if the settings write then fails, the old file still has them.
+      writeFileAtomic(storage.path, JSON.stringify({
+        encrypted: true,
+        data: storage.codec.encode(JSON.stringify(secrets))
+      }))
+      writeFileAtomic(this.settingsPath, JSON.stringify(onDisk, null, 2))
+    } else {
+      writeFileAtomic(this.settingsPath, JSON.stringify(sanitized, null, 2))
+    }
     this.currentSettings = sanitized
+    this.resolvedSettings = this.resolveKeys(sanitized)
     return sanitized
+  }
+
+  private secretStorage(): { path: string; codec: SecretCodec } | null {
+    const { secretsPath, getCodec } = this.options
+    if (!secretsPath || !getCodec) return null
+    try {
+      const codec = getCodec()
+      return codec.encrypted ? { path: secretsPath, codec } : null
+    } catch {
+      return null
+    }
+  }
+
+  /** Keys from the encrypted key file; empty when there is none or it can't be read here. */
+  private readSecrets(): Record<string, string> {
+    const { secretsPath } = this.options
+    if (!secretsPath || !existsSync(secretsPath)) return {}
+    try {
+      const storage = this.secretStorage()
+      if (!storage) throw new Error('Encryption is not available')
+      const file = JSON.parse(readFileSync(secretsPath, 'utf-8')) as { data?: unknown }
+      if (typeof file.data !== 'string') return {}
+      const parsed = JSON.parse(storage.codec.decode(file.data)) as unknown
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
+      return Object.fromEntries(
+        Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
+      )
+    } catch (err) {
+      // Another computer's or user's keychain (a copied portable folder, say):
+      // the keys have to be entered again, and the file is replaced on save.
+      console.warn('[SettingsService] Could not read saved API keys:', err)
+      return {}
+    }
+  }
+
+  private resolveKeys(settings: Settings): Settings {
+    if (!SECRET_FIELDS.some((field) => isApiKeyReference(field.get(settings)))) return settings
+    const resolved = cloneSettings(settings)
+    const context = { workspaceFolder: null, userHome: homedir(), pathSeparator: sep, env: this.options.env ?? process.env }
+    for (const field of SECRET_FIELDS) {
+      const value = field.get(settings)
+      if (!isApiKeyReference(value)) continue
+      try {
+        field.set(resolved, expandMcpVariables(value, context).trim())
+      } catch {
+        // An unset variable reads as no key, so the request fails as a missing key would.
+        field.set(resolved, '')
+      }
+    }
+    return resolved
   }
 
   private loadFromDisk(): Settings {
@@ -124,7 +272,23 @@ export class SettingsService {
       if (existsSync(this.settingsPath)) {
         const raw = readFileSync(this.settingsPath, 'utf-8')
         const parsed = JSON.parse(raw) as Partial<Settings>
-        return sanitizeSettings(parsed)
+        const settings = sanitizeSettings(parsed)
+
+        // Keys saved as plain text (before 1.9, or without a keychain) move
+        // into the encrypted key file the first time it can be written.
+        const hasPlainKeys = SECRET_FIELDS.some((field) => {
+          const value = field.get(settings)
+          return value.length > 0 && !isApiKeyReference(value)
+        })
+        this.addSavedKeys(settings)
+        if (hasPlainKeys && this.secretStorage()) {
+          try {
+            return this.save(settings)
+          } catch (err) {
+            console.warn('[SettingsService] Could not move API keys to encrypted storage:', err)
+          }
+        }
+        return settings
       }
     } catch (err) {
       // Corrupted settings file: use defaults, but keep a copy first, since the
@@ -140,7 +304,19 @@ export class SettingsService {
         }
       }
     }
-    return sanitizeSettings(undefined)
+    // Saved keys still apply, so the next save doesn't drop them from the key file.
+    const defaults = sanitizeSettings(undefined)
+    this.addSavedKeys(defaults)
+    return defaults
+  }
+
+  /** Fills blank key fields from the encrypted key file. */
+  private addSavedKeys(settings: Settings): void {
+    const secrets = this.readSecrets()
+    for (const field of SECRET_FIELDS) {
+      const saved = secrets[field.id]
+      if (saved && !field.get(settings)) field.set(settings, saved)
+    }
   }
 }
 

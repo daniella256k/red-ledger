@@ -10,7 +10,7 @@ import type {
   Attachment, AttachmentParseResult, LLMRequest, StreamChunk, ContextProfile, TitleGenerationRequest,
   McpServerStatus, McpSignInResult,
   StorageOverview, ChatStorageInfo, StoredImageInfo, RemoveImageResult, CompactResult,
-  CreateMessageInput, SelectBranchOptions
+  CreateMessageInput, SelectBranchOptions, FileUndoResult, ChatCompaction
 } from '../../src/types'
 
 export type ChatExportFormat = 'markdown' | 'xml'
@@ -80,6 +80,7 @@ export interface IpcContract {
   // Settings
   'settings:load':              { params: [];                                          result: Settings }
   'settings:save':              { params: [settings: Settings];                        result: void }
+  'settings:keyStorage':        { params: [];                                          result: 'encrypted' | 'plain' }
 
   // Search
   'search:web':                 { params: [query: string, numResults?: number];        result: SearchResult[] }
@@ -95,6 +96,11 @@ export interface IpcContract {
   'llm:listModels':             { params: [provider: string];                          result: string[] }
   'llm:cancelStream':           { params: [channel: string];                           result: void }
   'llm:generateTitle':          { params: [request: TitleGenerationRequest];           result: string | null }
+  'llm:compact':                { params: [request: LLMRequest, channel: string]; result: ChatCompaction | null }
+
+  // File history (undo a reply's file changes)
+  'fileHistory:replies':        { params: [conversationId: string];                    result: string[] }
+  'fileHistory:undo':           { params: [messageId: string];                         result: FileUndoResult | null }
 
   // Dialogs
   'dialog:confirm':             { params: [options: ConfirmDialogOptions];             result: boolean }

@@ -1,9 +1,10 @@
 import { basename, dirname, resolve } from 'path'
 import { Script, createContext } from 'vm'
-import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync, copyFileSync, renameSync } from 'fs'
+import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync, renameSync } from 'fs'
 import { resolveWorkspacePath, PathJailError } from './pathJail'
 import { loadGitignoreRules, isIgnoredByGitignore, type GitignoreRule } from './gitignore'
 import { DocumentExtractionError, extractDocumentText, isExtractedDocument } from './DocumentTextService'
+import type { FileChangeRecorder } from './FileHistoryService'
 import type { FileNode, Settings } from '../../src/types'
 
 // Re-export so IPC handlers can use the error type
@@ -209,6 +210,8 @@ export interface DialogAdapter {
 export class WorkspaceService {
   private workspacePath: string | null = null
   private getSettings: () => Settings
+  /** Keeps what files looked like before a reply changed them, for undo; null outside a reply. */
+  private history: FileChangeRecorder | null = null
 
   constructor(getSettings: () => Settings) {
     this.getSettings = getSettings
@@ -226,10 +229,35 @@ export class WorkspaceService {
    * A copy fixed to the current folder. A chat's tool calls run against one so
    * switching chats (and so the active workspace) mid-reply can't redirect them.
    */
-  snapshot(): WorkspaceService {
+  snapshot(history: FileChangeRecorder | null = null): WorkspaceService {
     const pinned = new WorkspaceService(this.getSettings)
     pinned.setWorkspacePath(this.workspacePath)
+    pinned.history = history
     return pinned
+  }
+
+  /**
+   * Runs a change to workspace files, recording each file's state before and
+   * after it for undo. History is a convenience: if it can't be recorded the
+   * change still goes ahead.
+   */
+  private changeFiles<T>(fullPaths: string[], change: () => T): T {
+    const record = (step: 'beforeChange' | 'afterChange') => {
+      if (!this.history) return
+      for (const fullPath of fullPaths) {
+        try {
+          this.history[step](fullPath)
+        } catch (err) {
+          console.warn(`[WorkspaceService] Could not record file history for ${fullPath}:`, err)
+        }
+      }
+    }
+    record('beforeChange')
+    try {
+      return change()
+    } finally {
+      record('afterChange')
+    }
   }
 
   private resolveWriteTarget(relativePath: string): { fullPath: string; fileExists: boolean } {
@@ -259,7 +287,9 @@ export class WorkspaceService {
         buttons: ['Cancel', 'Overwrite'],
         defaultId: 0,
         title: 'Overwrite File',
-        message: 'Overwrite existing file? The previous version will be kept as a .bak file.',
+        message: this.history
+          ? "Overwrite existing file? You can undo this reply's file changes from the chat."
+          : 'Overwrite existing file?',
         detail: fullPath
       })
       if (confirmed.response === 0) {
@@ -408,14 +438,14 @@ export class WorkspaceService {
     }
     await this.confirmWriteAllowed(dialog, relativePath, fullPath, fileExists, append)
 
-    mkdirSync(dirname(fullPath), { recursive: true })
-
-    if (append) {
-      appendFileSync(fullPath, content, 'utf-8')
-    } else {
-      if (fileExists) backupFile(fullPath)
-      writeFileSync(fullPath, content, 'utf-8')
-    }
+    this.changeFiles([fullPath], () => {
+      mkdirSync(dirname(fullPath), { recursive: true })
+      if (append) {
+        appendFileSync(fullPath, content, 'utf-8')
+      } else {
+        writeFileSync(fullPath, content, 'utf-8')
+      }
+    })
   }
 
   async editFile(
@@ -442,8 +472,7 @@ export class WorkspaceService {
       }
     }
 
-    backupFile(fullPath)
-    writeFileSync(fullPath, content, 'utf-8')
+    this.changeFiles([fullPath], () => writeFileSync(fullPath, content, 'utf-8'))
   }
 
   async writeBinaryFile(
@@ -454,9 +483,10 @@ export class WorkspaceService {
     const { fullPath, fileExists } = this.resolveWriteTarget(relativePath)
     await this.confirmWriteAllowed(dialog, relativePath, fullPath, fileExists, false)
 
-    mkdirSync(dirname(fullPath), { recursive: true })
-    if (fileExists) backupFile(fullPath)
-    writeFileSync(fullPath, content)
+    this.changeFiles([fullPath], () => {
+      mkdirSync(dirname(fullPath), { recursive: true })
+      writeFileSync(fullPath, content)
+    })
   }
 
   /**
@@ -501,8 +531,10 @@ export class WorkspaceService {
       }
     }
 
-    mkdirSync(dirname(toPath), { recursive: true })
-    renameSync(fromPath, toPath)
+    this.changeFiles([fromPath, toPath], () => {
+      mkdirSync(dirname(toPath), { recursive: true })
+      renameSync(fromPath, toPath)
+    })
     return { from: fromRelative, to: toDisplay }
   }
 
@@ -746,15 +778,4 @@ export class WorkspaceService {
       return a.name.localeCompare(b.name)
     })
   }
-}
-
-/** Keep the previous version of a file as `<name>.bak` (replacing any older backup) before it is overwritten. */
-function backupFile(fullPath: string): void {
-  const backupPath = `${fullPath}.bak`
-  // The file's folder was checked already; the backup name itself could be a
-  // link that points outside the workspace.
-  if (lstatSync(backupPath, { throwIfNoEntry: false })?.isSymbolicLink()) {
-    throw new PathJailError('PATH_TRAVERSAL', `Cannot keep a backup: ${basename(backupPath)} is a symbolic link`)
-  }
-  copyFileSync(fullPath, backupPath)
 }

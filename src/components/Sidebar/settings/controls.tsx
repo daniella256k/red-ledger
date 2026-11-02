@@ -1,4 +1,4 @@
-import type { ReactNode } from 'react'
+import { useEffect, useState, type ReactNode } from 'react'
 import { ChevronDown, ChevronRight, CircleHelp } from 'lucide-react'
 import type { Settings } from '@/types'
 
@@ -77,6 +77,64 @@ export function ToggleRow({
           className="toggle toggle-sm toggle-primary"
         />
       </div>
+    </div>
+  )
+}
+
+let keyStorageRequest: Promise<'encrypted' | 'plain'> | null = null
+
+/** How API keys are saved on this computer; asked once per app run. */
+function useKeyStorage(): 'encrypted' | 'plain' | null {
+  const [storage, setStorage] = useState<'encrypted' | 'plain' | null>(null)
+  useEffect(() => {
+    if (!window.redLedger) return
+    keyStorageRequest ??= window.redLedger.getKeyStorage()
+    let active = true
+    keyStorageRequest.then((value) => { if (active) setStorage(value) }).catch(() => {})
+    return () => { active = false }
+  }, [])
+  return storage
+}
+
+/**
+ * An API key field. A key is masked; an environment variable reference like
+ * ${env:OPENAI_API_KEY} is shown as typed, since it names the key rather than
+ * holding it.
+ */
+export function ApiKeyInput({
+  label,
+  value,
+  onChange,
+  placeholder
+}: {
+  label: string
+  value: string
+  onChange: (value: string) => void
+  placeholder?: string
+}) {
+  const storage = useKeyStorage()
+  const isReference = value.includes('${')
+  const help = [
+    storage === 'plain'
+      ? 'This system has no keychain, so keys are saved as plain text in settings.json.'
+      : 'Saved encrypted with your system keychain, not in settings.json.',
+    'To read the key from an environment variable instead, enter ${env:NAME}, for example ${env:OPENAI_API_KEY}.'
+  ].join(' ')
+
+  return (
+    <div>
+      <div className="mb-1 flex items-center justify-between">
+        <label className={INLINE_LABEL_CLASS}>{label}</label>
+        <HelpIcon title={help} label={`${label} help`} />
+      </div>
+      <input
+        type={isReference ? 'text' : 'password'}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        spellCheck={false}
+        className="input input-sm w-full"
+      />
     </div>
   )
 }

@@ -1,6 +1,7 @@
 import { Star } from 'lucide-react'
 import type { ProviderName, ProviderSettings, Settings } from '@/types'
 import {
+  ApiKeyInput,
   INLINE_LABEL_CLASS,
   LABEL_CLASS,
   SMALL_BUTTON_CLASS,
@@ -99,16 +100,12 @@ export function ProviderSection({
 
           {/* API Key */}
           {!PROVIDERS_WITHOUT_API_KEY.has(settings.activeProvider) && (
-            <div>
-              <label className={LABEL_CLASS}>API Key</label>
-              <input
-                type="password"
-                value={activeProvider.apiKey}
-                onChange={(e) => saveActiveProvider({ apiKey: e.target.value })}
-                placeholder={settings.activeProvider === 'custom' ? 'Optional' : 'sk-...'}
-                className="input input-sm w-full"
-              />
-            </div>
+            <ApiKeyInput
+              label="API Key"
+              value={activeProvider.apiKey}
+              onChange={(apiKey) => saveActiveProvider({ apiKey })}
+              placeholder={settings.activeProvider === 'custom' ? 'Optional' : 'sk-...'}
+            />
           )}
 
           {/* Base URL */}

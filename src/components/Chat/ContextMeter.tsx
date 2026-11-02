@@ -1,43 +1,39 @@
 import {
   CONTEXT_WARNING_RATIO,
   contextRatio,
-  describeContextUsage,
+  contextTokensUsed,
   formatTokenCount
 } from '@/lib/contextUsage'
 import type { ContextUsage } from '@/types'
 
+/** "12.4k of 128k tokens used (10%)", or without the limit when the model's window is unknown. */
 function buildTooltip(usage: ContextUsage, ratio: number | null): string {
-  const lines = [
-    `Context used by the last reply: ${describeContextUsage(usage)}${ratio === null ? '' : ` (${Math.round(ratio * 100)}%)`}`,
-    `Sent ${formatTokenCount(usage.promptTokens)} | generated ${formatTokenCount(usage.completionTokens)}`
-  ]
-  if (usage.estimated) lines.push('Estimated from text length: this provider did not report token usage.')
-  if (usage.contextLength === null) lines.push('The model\'s context window is unknown for this provider.')
-  return lines.join('\n')
+  const used = `${usage.estimated ? '~' : ''}${formatTokenCount(contextTokensUsed(usage))}`
+  const fill = usage.contextLength && ratio !== null
+    ? `${used} of ${formatTokenCount(usage.contextLength)} tokens used (${Math.round(ratio * 100)}%)`
+    : `${used} tokens used (context limit unknown)`
+  return usage.estimated ? `${fill}\nEstimated` : fill
 }
 
 /**
- * Compact readout under the message box: how full the model's context window
- * was at the end of this chat's last reply.
+ * A bare bar under the message box: how full the model's context window was
+ * at the end of this chat's last reply. The numbers are in its tooltip.
  */
 export function ContextMeter({ usage }: { usage: ContextUsage }) {
   const ratio = contextRatio(usage)
   const isNearLimit = ratio !== null && ratio >= CONTEXT_WARNING_RATIO
+  const tooltip = buildTooltip(usage, ratio)
 
   return (
-    <div
-      className={`flex items-center gap-1.5 shrink-0 tabular-nums cursor-default ${isNearLimit ? 'text-rca-red/80' : ''}`}
-      title={buildTooltip(usage, ratio)}
-    >
-      {ratio !== null && (
-        <div className="h-1 w-14 rounded-full bg-weathered/60 overflow-hidden">
+    <div className="shrink-0 py-1.5 cursor-default" title={tooltip} aria-label={tooltip} role="img">
+      <div className="h-1 w-16 rounded-full bg-weathered/60 overflow-hidden">
+        {ratio !== null && (
           <div
             className={`h-full rounded-full ${isNearLimit ? 'bg-rca-red/70' : 'bg-soft-charcoal/30'}`}
             style={{ width: `${Math.max(ratio * 100, 2)}%` }}
           />
-        </div>
-      )}
-      <span>{describeContextUsage(usage)}</span>
+        )}
+      </div>
     </div>
   )
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LlmService, MAX_TOOL_CALLS, buildPastReplyMessages, needsReasoningReplay, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext, formatMessageTime } from '../LlmService'
+import { LlmService, MAX_TOOL_CALLS, buildPastReplyMessages, needsReasoningReplay, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext, formatMessageTime, dropOldestToFit } from '../LlmService'
 import { parseStoredToolCalls } from '../../../src/lib/storedToolCalls'
 import { sanitizeSettings } from '../SettingsService'
 import { BaseLLMProvider, readContextLength, reportedUsageChunk } from '../../lib/providers/base'
@@ -803,5 +803,91 @@ describe('LlmService request format', () => {
     expect(seen[0].some((message) => 'reasoning_details' in message)).toBe(false)
     const toolRound = seen[1].find((message) => message.role === 'assistant')!
     expect(toolRound).toMatchObject({ tool_calls: [{ id: 'call_1' }], ...reasoning })
+  })
+})
+
+describe('LlmService compaction', () => {
+  function recordingProvider(reply: string, sent: Array<{ messages: LLMMessage[]; tools: unknown[] }>) {
+    class RecordingProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        sent.push({ messages: options.messages.map((m) => ({ ...m })), tools: options.tools })
+        queueMicrotask(() => {
+          if (reply) options.onChunk({ type: 'text', content: reply })
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+      override async getContextLength() { return 100_000 }
+    }
+    registerProvider({ name: 'openai', displayName: 'Recording', defaultBaseUrl: '', factory: () => new RecordingProvider('', '') })
+    return new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system prompt' })
+  }
+
+  const chat: LLMRequest['messages'] = [
+    { role: 'user', content: 'first question', timestamp: 't' },
+    { role: 'assistant', content: 'first answer', timestamp: 't' },
+    { role: 'system', content: 'SUMMARY OF EARLIER', timestamp: 't' },
+    { role: 'user', content: 'next question', timestamp: 't' }
+  ]
+
+  it('sends a summary in place of the messages before it', async () => {
+    const sent: Array<{ messages: LLMMessage[]; tools: unknown[] }> = []
+    const service = recordingProvider('ok', sent)
+
+    await service.orchestrateStream(
+      { conversationId: 'c1', model: 'm', provider: 'openai', messages: chat },
+      'stream-summary',
+      { send: () => {} },
+      async (tc) => tc
+    )
+
+    const [system, ...rest] = sent[0].messages
+    expect(system.role).toBe('system')
+    expect(system.content).toContain('system prompt')
+    expect(system.content).toContain('<conversation_summary>\nSUMMARY OF EARLIER\n</conversation_summary>')
+    expect(rest.map((m) => m.role)).toEqual(['user'])
+    expect(JSON.stringify(rest)).toContain('next question')
+    expect(JSON.stringify(sent[0].messages)).not.toContain('first question')
+  })
+
+  it('asks for a summary without tools and estimates the context left', async () => {
+    const sent: Array<{ messages: LLMMessage[]; tools: unknown[] }> = []
+    const service = recordingProvider('  The new summary.  ', sent)
+
+    const result = await service.compactConversation(
+      { conversationId: 'c1', model: 'm', provider: 'openai', messages: chat },
+      'compact-1'
+    )
+
+    expect(result?.summary).toBe('The new summary.')
+    expect(result?.usage).toMatchObject({ estimated: true, contextLength: 100_000 })
+    expect(sent[0].tools).toEqual([])
+    const last = sent[0].messages[sent[0].messages.length - 1]
+    expect(last.role).toBe('user')
+    expect(last.content).toContain('Write a summary of this conversation')
+    // The earlier summary is part of what gets summarized again.
+    expect(sent[0].messages[0].content).toContain('SUMMARY OF EARLIER')
+  })
+
+  it('refuses an empty summary', async () => {
+    const service = recordingProvider('', [])
+    await expect(service.compactConversation(
+      { conversationId: 'c1', model: 'm', provider: 'openai', messages: chat },
+      'compact-2'
+    )).rejects.toThrow(/empty summary/)
+  })
+
+  it('leaves out the oldest messages, with their tool results, to fit', () => {
+    const messages: LLMMessage[] = [
+      { role: 'system', content: 'system' },
+      { role: 'assistant', content: null, tool_calls: [{ id: 'a', type: 'function', function: { name: 'read', arguments: '{}' } }] },
+      { role: 'tool', content: 'x'.repeat(40_000), tool_call_id: 'a' },
+      { role: 'user', content: 'recent' }
+    ]
+
+    expect(dropOldestToFit(messages, [], 8_000)).toBe(2)
+    expect(messages.map((m) => m.role)).toEqual(['system', 'user'])
+    expect(dropOldestToFit(messages, [], null)).toBe(0)
   })
 })

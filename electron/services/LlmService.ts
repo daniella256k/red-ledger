@@ -263,6 +263,54 @@ export function fitToolResultsToContext(
   return shortened
 }
 
+/**
+ * Leaves out the oldest messages (after the system message) until the request
+ * fits the context window, keeping each tool result with the call it answers.
+ * Returns how many messages were left out.
+ */
+export function dropOldestToFit(messages: LLMMessage[], extra: LLMMessage[], contextLength: number | null): number {
+  if (!contextLength) return 0
+  const limit = contextLength * CONTEXT_FILL_LIMIT
+  let dropped = 0
+  while (messages.length > 2 && estimateUsage([...messages, ...extra], [], '').promptTokens > limit) {
+    messages.splice(1, 1)
+    dropped += 1
+    // A tool result can't start the history without the call it answers.
+    while (messages.length > 2 && messages[1].role === 'tool') {
+      messages.splice(1, 1)
+      dropped += 1
+    }
+  }
+  return dropped
+}
+
+/** How a compaction summary is put in front of the model, inside the system prompt. */
+export function summaryNote(summary: string): string {
+  return [
+    'This chat was compacted: earlier messages were replaced by the summary below, which the assistant wrote. Treat it as what was said and done before the messages that follow.',
+    '<conversation_summary>',
+    summary,
+    '</conversation_summary>'
+  ].join('\n')
+}
+
+/** The request for a summary, sent after the chat itself. */
+export function compactionPrompt(): string {
+  const lines = [
+    'Write a summary of this conversation so far. It will replace the earlier messages, so the conversation can continue from it without them. Do not reply to the conversation and do not call tools; write only the summary.',
+    '',
+    'Keep everything needed to carry on the work:',
+    '- What the user wants: goals, requirements, constraints and preferences, in their own terms.',
+    '- Decisions made and why, and anything ruled out.',
+    '- Key facts, figures, quotes and findings, with their sources (URLs, file paths, document names).',
+    '- Workspace files read, created or changed, and what changed in them.',
+    '- Where the work stands: what is done, what is in progress, open questions and next steps.',
+    '',
+    'Be specific and complete rather than short: names, numbers and paths matter more than prose. Use headings and bullet points.'
+  ]
+  return lines.join('\n')
+}
+
 /** Rough tokens-per-character ratio for text when the provider reports no usage. */
 const ESTIMATED_CHARS_PER_TOKEN = 4
 /** Rough flat cost per image part; real costs vary by provider and image size. */
@@ -515,48 +563,9 @@ export class LlmService {
     toolExecutor: (tc: ToolCall) => Promise<ToolCall>
   ): Promise<void> {
     const provider = this.createProvider(request.provider)
-    const systemPrompt = this.getSystemPrompt(request.conversationId)
     const settings = this.getSettings()
-
-    // Build the conversation history in LLMMessage format
-    const messages: LLMMessage[] = []
-
-    // System message first. The note explaining <sent_at> names no date, so
-    // the system prompt stays identical turn to turn (providers cache it).
-    messages.push({ role: 'system', content: `${systemPrompt}\n\n${sentAtNote(this.timeZone)}` })
-
-    // Each user message carries the local time it was sent. Earlier replies
-    // are replayed with their tool calls and full results, in the same shape
-    // as the live tool loop below.
-    const replayedToolCallIds = new Set<string>()
-    const replayReasoning = needsReasoningReplay(settings.providers?.[request.provider]?.baseUrl)
-    for (const msg of request.messages) {
-      if (msg.role === 'user') {
-        const sentAt = formatMessageTime(msg.timestamp, this.timeZone)
-        messages.push({ role: msg.role, content: this.buildUserMessageContent(msg.content, msg.attachments, request.provider, sentAt) })
-        continue
-      }
-
-      if (msg.role === 'assistant') {
-        // Replies saved before 1.8 hold this UI text when the model wrote none.
-        const content = msg.content === LEGACY_NO_TEXT_PLACEHOLDER ? '' : msg.content
-        // Nothing to replay: no text and no tool calls (e.g. only reasoning).
-        if (!content.trim() && !msg.toolCalls?.length) continue
-        messages.push(...buildPastReplyMessages(
-          content,
-          msg.toolCalls,
-          replayedToolCallIds,
-          replayReasoning ? splitThinkingBlocks(msg.thinking) : undefined
-        ))
-        continue
-      }
-      messages.push({ role: msg.role, content: msg.content })
-    }
-
-    const tools = this.withDynamicToolDescriptions(getToolDefinitions(), settings).filter((tool) =>
-      (!SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name) || (settings.searchToolsEnabled && hasSearchApiKey(settings)))
-      && !(settings.offlineMode && isNetworkTool(tool.function.name, settings))
-    )
+    const messages = this.buildHistory(request, settings)
+    const tools = this.availableTools(settings)
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
     let totalToolCalls = 0
     let roundsAfterToolLimit = 0
@@ -756,6 +765,115 @@ export class LlmService {
   cancelConversationStreams(conversationId: string): void {
     for (const [channel, stream] of this.activeStreams) {
       if (stream.conversationId === conversationId) this.cancelStream(channel)
+    }
+  }
+
+  /**
+   * The conversation as the model sees it: the system prompt, then each
+   * message. A compaction summary (a 'system' message in the chat) stands in
+   * for everything before it: it joins the system prompt, and earlier
+   * messages are left out.
+   */
+  private buildHistory(request: LLMRequest, settings: Settings): LLMMessage[] {
+    const summaryIndex = request.messages.map((msg) => msg.role).lastIndexOf('system')
+    const summary = summaryIndex >= 0 ? request.messages[summaryIndex].content : null
+
+    // System message first. The note explaining <sent_at> names no date, so
+    // the system prompt stays identical turn to turn (providers cache it).
+    const systemParts = [this.getSystemPrompt(request.conversationId), sentAtNote(this.timeZone)]
+    if (summary) systemParts.push(summaryNote(summary))
+    const messages: LLMMessage[] = [{ role: 'system', content: systemParts.join('\n\n') }]
+
+    // Each user message carries the local time it was sent. Earlier replies
+    // are replayed with their tool calls and full results, in the same shape
+    // as the live tool loop.
+    const replayedToolCallIds = new Set<string>()
+    const replayReasoning = needsReasoningReplay(settings.providers?.[request.provider]?.baseUrl)
+    for (const msg of request.messages.slice(summaryIndex + 1)) {
+      if (msg.role === 'user') {
+        const sentAt = formatMessageTime(msg.timestamp, this.timeZone)
+        messages.push({ role: msg.role, content: this.buildUserMessageContent(msg.content, msg.attachments, request.provider, sentAt) })
+        continue
+      }
+
+      if (msg.role === 'assistant') {
+        // Replies saved before 1.8 hold this UI text when the model wrote none.
+        const content = msg.content === LEGACY_NO_TEXT_PLACEHOLDER ? '' : msg.content
+        // Nothing to replay: no text and no tool calls (e.g. only reasoning).
+        if (!content.trim() && !msg.toolCalls?.length) continue
+        messages.push(...buildPastReplyMessages(
+          content,
+          msg.toolCalls,
+          replayedToolCallIds,
+          replayReasoning ? splitThinkingBlocks(msg.thinking) : undefined
+        ))
+      }
+    }
+    return messages
+  }
+
+  private availableTools(settings: Settings): ToolDefinition[] {
+    return this.withDynamicToolDescriptions(getToolDefinitions(), settings).filter((tool) =>
+      (!SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name) || (settings.searchToolsEnabled && hasSearchApiKey(settings)))
+      && !(settings.offlineMode && isNetworkTool(tool.function.name, settings))
+    )
+  }
+
+  /**
+   * Compaction: asks the model for a summary of the chat so far, to stand in
+   * for it from the next message on. Runs without tools. Returns null when
+   * stopped (cancelStream on `channel`). The usage is an estimate of the
+   * context the next request starts from.
+   */
+  async compactConversation(
+    request: LLMRequest,
+    channel: string
+  ): Promise<{ summary: string; usage: ContextUsage } | null> {
+    const provider = this.createProvider(request.provider)
+    const settings = this.getSettings()
+    const contextLength = await this.lookupContextLength(request.provider, request.model)
+    const messages = this.buildHistory(request, settings)
+    const instruction: LLMMessage = { role: 'user', content: compactionPrompt() }
+
+    // The chat may already be past the window: shorten old tool results, then
+    // leave out the oldest messages until the request fits.
+    fitToolResultsToContext(messages, [], contextLength)
+    const omitted = dropOldestToFit(messages, [instruction], contextLength)
+    if (omitted > 0) {
+      instruction.content = `${instruction.content as string}\n\n(The ${omitted} oldest messages were left out to fit the context window; the summary at the top covers what came before them, if there is one.)`
+    }
+    messages.push(instruction)
+
+    const stream = { handle: null as AbortHandle | null, cancelled: false, conversationId: request.conversationId }
+    this.activeStreams.set(channel, stream)
+    try {
+      let text = ''
+      const outcome = await new Promise<{ error: string } | null>((resolve) => {
+        stream.handle = provider.sendStreaming({
+          messages,
+          model: request.model,
+          tools: [],
+          temperature: request.temperature,
+          maxTokens: request.maxTokens ?? (settings.maxTokensEnabled ? settings.maxTokens : undefined),
+          reasoningEnabled: settings.reasoningEnabled,
+          onChunk: (chunk: ProviderChunk) => {
+            if (chunk.type === 'text') text += chunk.content || ''
+            else if (chunk.type === 'error') resolve({ error: chunk.error || 'The summary request failed.' })
+            else if (chunk.type === 'done') resolve(null)
+          }
+        })
+      })
+      if (stream.cancelled) return null
+      if (outcome) throw new Error(outcome.error)
+
+      const summary = text.trim()
+      if (!summary) throw new Error('The model returned an empty summary, so nothing was compacted.')
+
+      const tools = this.availableTools(settings)
+      const after = this.buildHistory({ ...request, messages: [{ role: 'system', content: summary, timestamp: '' }] }, settings)
+      return { summary, usage: { ...estimateUsage(after, tools, ''), contextLength } }
+    } finally {
+      if (this.activeStreams.get(channel) === stream) this.activeStreams.delete(channel)
     }
   }
 
