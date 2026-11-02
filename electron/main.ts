@@ -1,4 +1,4 @@
-import { app, BrowserWindow, dialog, Menu, protocol, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, protocol, screen, shell } from 'electron'
 import type { MenuItemConstructorOptions } from 'electron'
 import { dirname, join } from 'path'
 import { readFileSync } from 'fs'
@@ -22,6 +22,7 @@ import { registerStorageHandlers } from './ipc/storage'
 import { handleIpc } from './ipc/typedIpc'
 import { assertObject } from './ipc/validate'
 import { ATTACHMENT_URL_SCHEME } from '../src/lib/attachments'
+import { fitWindowState, loadWindowState, saveWindowState } from './services/windowState'
 
 // Development runs (electron-vite dev/preview) keep their own profile, so they
 // never open the real chat database or fill its caches with dev-server files.
@@ -89,12 +90,12 @@ function setApplicationMenu(): void {
     label: 'File',
     submenu: [
       {
-        label: 'Export Chat…',
+        label: 'Export Chat...',
         accelerator: isMac ? 'Cmd+E' : 'Ctrl+E',
         click: () => sendMenuAction('exportChat')
       },
       {
-        label: 'Import Chat…',
+        label: 'Import Chat...',
         accelerator: isMac ? 'Cmd+I' : 'Ctrl+I',
         click: () => sendMenuAction('importChat')
       },
@@ -165,6 +166,8 @@ function isSameAppUrl(currentUrl: string, targetUrl: string): boolean {
 
 // ─── Single Instance Lock ────────────────────────────────────────────────────
 
+// A second copy only focuses the first one (second-instance below) and quits;
+// the ready handler checks gotLock so it never opens the database or a window.
 const gotLock = app.requestSingleInstanceLock()
 if (!gotLock) {
   app.quit()
@@ -179,6 +182,12 @@ app.on('second-instance', () => {
 
 // ─── Window Creation ─────────────────────────────────────────────────────────
 
+const WINDOW_MIN_SIZE = { width: 900, height: 600 }
+
+function getWindowStatePath(): string {
+  return join(app.getPath('userData'), 'window-state.json')
+}
+
 function createWindow(): void {
   const prefersDarkMode = (() => {
     try {
@@ -188,11 +197,19 @@ function createWindow(): void {
     }
   })()
 
+  // Reopen where the window was last closed, if that spot is still on a screen.
+  const savedState = fitWindowState(
+    loadWindowState(getWindowStatePath()),
+    screen.getAllDisplays().map((display) => display.workArea),
+    WINDOW_MIN_SIZE
+  )
+
   mainWindow = new BrowserWindow({
-    width: 1400,
-    height: 900,
-    minWidth: 900,
-    minHeight: 600,
+    width: savedState?.width ?? 1400,
+    height: savedState?.height ?? 900,
+    ...(savedState ? { x: savedState.x, y: savedState.y } : {}),
+    minWidth: WINDOW_MIN_SIZE.width,
+    minHeight: WINDOW_MIN_SIZE.height,
     title: APP_WINDOW_TITLE,
     backgroundColor: prefersDarkMode ? '#1F1A19' : '#FDFCF8',
     icon: join(__dirname, '../../build/icon.png'),
@@ -206,6 +223,17 @@ function createWindow(): void {
       // so long-running streams/tool calls can complete.
       backgroundThrottling: false
     }
+  })
+
+  if (savedState?.isMaximized) mainWindow.maximize()
+
+  mainWindow.on('close', () => {
+    if (!mainWindow) return
+    // Normal bounds are the size it restores to, even when closed maximized.
+    saveWindowState(getWindowStatePath(), {
+      ...mainWindow.getNormalBounds(),
+      isMaximized: mainWindow.isMaximized()
+    })
   })
 
   // Keep native window title controlled by main process.
@@ -507,6 +535,7 @@ function registerAttachmentProtocol(): void {
 }
 
 app.whenReady().then(() => {
+  if (!gotLock) return
   registerIpcHandlers()
   registerAttachmentProtocol()
 

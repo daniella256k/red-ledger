@@ -636,7 +636,7 @@ const DOT_CLASS: Record<McpServerStatus['state'], string> = {
 
 const STATE_LABEL: Record<McpServerStatus['state'], string> = {
   connected: 'Connected',
-  connecting: 'Connecting…',
+  connecting: 'Connecting...',
   needs_auth: 'Sign-in needed',
   error: 'Error',
   disabled: 'Off'

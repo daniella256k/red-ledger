@@ -210,14 +210,24 @@ export interface OpenAIProviderOptions {
    * OpenAI-compatible servers, OpenRouter included, read max_tokens.
    */
   maxTokensField?: 'max_tokens' | 'max_completion_tokens'
+  /**
+   * How long a streaming request may wait with no data (default 120s). Local
+   * servers get longer, since a large prompt can take minutes to process on CPU.
+   */
+  streamTimeoutMs?: number
 }
+
+/** Matches Ollama and LM Studio's native mode. */
+export const LOCAL_SERVER_STREAM_TIMEOUT_MS = 300_000
 
 export class OpenAIProvider extends BaseLLMProvider {
   private readonly maxTokensField: NonNullable<OpenAIProviderOptions['maxTokensField']>
+  private readonly streamTimeoutMs: number
 
   constructor(apiKey: string, baseUrl: string = 'https://api.openai.com/v1', options: OpenAIProviderOptions = {}) {
     super(apiKey, baseUrl)
     this.maxTokensField = options.maxTokensField ?? 'max_tokens'
+    this.streamTimeoutMs = options.streamTimeoutMs ?? 120_000
   }
 
   protected getAuthHeaders(): Record<string, string> {
@@ -313,7 +323,7 @@ export class OpenAIProvider extends BaseLLMProvider {
               ...this.getAuthHeaders()
             },
             responseType: 'stream',
-            timeout: 120_000,
+            timeout: this.streamTimeoutMs,
             signal: controller.signal
           })
         } catch (err) {

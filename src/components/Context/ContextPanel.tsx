@@ -5,9 +5,9 @@ import { useContextProfileStore, useConversationStore, useUIStore } from '@/stor
 import { ContextEditor } from './ContextEditor'
 
 const CONTEXT_TYPES = [
-  { type: 'system' as const, title: 'System Prompt', description: 'Core behavioral instructions' },
-  { type: 'user' as const, title: 'User Context', description: 'Personal info, preferences' },
-  { type: 'org' as const, title: 'Org Context', description: 'Organization mission, terms, style' }
+  { type: 'system' as const, title: 'System Prompt', placeholder: 'Core behavioral instructions' },
+  { type: 'user' as const, title: 'User Context', placeholder: 'Personal info, preferences' },
+  { type: 'org' as const, title: 'Org Context', placeholder: 'Organization mission, terms, style' }
 ]
 
 const HIDE_PROFILE_LABEL_BREAKPOINT = 340
@@ -335,13 +335,13 @@ export function ContextPanel() {
       )}
 
       <div className="flex-1 flex flex-col p-3 gap-3 min-h-0">
-        {CONTEXT_TYPES.map(({ type, title, description }) => (
+        {CONTEXT_TYPES.map(({ type, title, placeholder }) => (
           <ContextEditor
             key={`${profileState.activeProfileId}:${type}`}
             profileId={profileState.activeProfileId}
             type={type}
             title={title}
-            description={description}
+            placeholder={placeholder}
           />
         ))}
       </div>

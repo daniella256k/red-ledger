@@ -1,28 +1,9 @@
 import { useCallback, useState } from 'react'
 import { Group, Panel, Separator, usePanelRef } from 'react-resizable-panels'
+import { PanelRightClose, PanelRightOpen } from 'lucide-react'
 import { Sidebar } from './Sidebar'
 import { ChatPanel } from './Chat/ChatPanel'
 import { ContextPanel } from './Context/ContextPanel'
-
-interface SidebarTriangleProps {
-  direction: 'left' | 'right'
-}
-
-function SidebarTriangle({ direction }: SidebarTriangleProps) {
-  if (direction === 'left') {
-    return (
-      <svg viewBox="0 0 8 10" aria-hidden="true" className="h-4 w-3 fill-current">
-        <path d="M7.5 0.8L1 5l6.5 4.2V0.8Z" />
-      </svg>
-    )
-  }
-
-  return (
-    <svg viewBox="0 0 8 10" aria-hidden="true" className="h-4 w-3 fill-current">
-      <path d="M0.5 0.8L7 5 0.5 9.2V0.8Z" />
-    </svg>
-  )
-}
 
 export function Layout() {
   const contextPanelRef = usePanelRef()
@@ -39,7 +20,7 @@ export function Layout() {
     }
   }, [contextPanelRef])
 
-  const contextToggleLabel = isContextCollapsed ? 'Expand context sidebar' : 'Collapse context sidebar'
+  const contextToggleLabel = isContextCollapsed ? 'Show context panel' : 'Hide context panel'
 
   return (
     <Group className="h-full w-full">
@@ -67,7 +48,9 @@ export function Layout() {
           title={contextToggleLabel}
           aria-label={contextToggleLabel}
         >
-          <SidebarTriangle direction={isContextCollapsed ? 'left' : 'right'} />
+          {isContextCollapsed
+            ? <PanelRightOpen size={16} strokeWidth={1.75} />
+            : <PanelRightClose size={16} strokeWidth={1.75} />}
         </button>
       </Separator>
 

@@ -155,7 +155,7 @@ export function ExportChatModal({ conversation, onClose }: ExportChatModalProps)
             className="btn btn-primary btn-sm gap-2"
           >
             <Download size={14} />
-            {isExporting ? 'Exporting…' : 'Choose Location & Save'}
+            {isExporting ? 'Exporting...' : 'Choose Location & Save'}
           </button>
         </div>
       </div>

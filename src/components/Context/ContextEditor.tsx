@@ -10,10 +10,11 @@ interface ContextEditorProps {
   profileId: string
   type: 'system' | 'user' | 'org'
   title: string
-  description: string
+  /** Shown in the editor while it is empty. */
+  placeholder: string
 }
 
-export function ContextEditor({ profileId, type, title, description }: ContextEditorProps) {
+export function ContextEditor({ profileId, type, title, placeholder }: ContextEditorProps) {
   const [content, setContent] = useState('')
   const [savedSnapshot, setSavedSnapshot] = useState('')
   const [saveStatus, setSaveStatus] = useState<'idle' | 'saved'>('idle')
@@ -134,16 +135,8 @@ export function ContextEditor({ profileId, type, title, description }: ContextEd
       <div ref={headerRef} className="editor-header shrink-0 flex-wrap">
         <div className={cn('flex items-center gap-2 min-w-0', forceButtonWrap ? 'basis-full' : 'flex-1')}>
           <span className="font-medium text-soft-charcoal whitespace-nowrap shrink-0">{title}</span>
-          <span
-            className={cn(
-              'text-[11px] text-soft-charcoal/35 min-w-0 flex-1 truncate',
-              forceButtonWrap ? 'hidden' : 'hidden sm:block'
-            )}
-          >
-            {description}
-          </span>
           {isDirty && (
-            <span className="text-[11px] text-warning shrink-0">&#x2022; Unsaved</span>
+            <span className="text-[11px] text-warning shrink-0">Unsaved</span>
           )}
           {saveStatus === 'saved' && !isDirty && (
             <span className="text-[11px] text-success shrink-0">&#x2713; Saved</span>
@@ -190,7 +183,7 @@ export function ContextEditor({ profileId, type, title, description }: ContextEd
         <Editor
           value={content}
           onChange={setContent}
-          placeholder={description}
+          placeholder={placeholder}
         />
       </div>
     </div>

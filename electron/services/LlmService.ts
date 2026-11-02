@@ -90,6 +90,11 @@ const SEARCH_TOOLS_REQUIRING_API_KEYS = new Set(['web_search', 'org_search'])
 const ORG_SEARCH_TOOL_NAME = 'org_search'
 /** Built-in tools that reach the network; hidden in offline mode. */
 const NETWORK_TOOLS = new Set(['web_search', 'org_search', 'wiki_search', 'fetch_url'])
+
+/** web_search and org_search need Search switched on and a Tavily or SerpAPI key to work. */
+function hasSearchApiKey(settings: Settings): boolean {
+  return !!settings.tavilyApiKey?.trim() || !!settings.serpApiKey?.trim()
+}
 const TITLE_GENERATION_SYSTEM_PROMPT =
   'Generate a concise chat title for the provided user prompt. Return only the title text in 2 to 6 words. No reasoning, no prefix, no quotes, no markdown, and no trailing punctuation.'
 
@@ -516,7 +521,7 @@ export class LlmService {
     }
 
     const tools = this.withDynamicToolDescriptions(getToolDefinitions(), settings).filter((tool) =>
-      (settings.searchToolsEnabled || !SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name))
+      (!SEARCH_TOOLS_REQUIRING_API_KEYS.has(tool.function.name) || (settings.searchToolsEnabled && hasSearchApiKey(settings)))
       && !(settings.offlineMode && isNetworkTool(tool.function.name, settings))
     )
     const shortenedResults = fitToolResultsToContext(
@@ -678,6 +683,8 @@ export class LlmService {
                     ? `Tool "${tc.name}" is unavailable: offline mode is on.`
                     : !settings.searchToolsEnabled && SEARCH_TOOLS_REQUIRING_API_KEYS.has(tc.name)
                     ? `Tool "${tc.name}" is disabled in Settings.`
+                    : !hasSearchApiKey(settings) && SEARCH_TOOLS_REQUIRING_API_KEYS.has(tc.name)
+                    ? `Tool "${tc.name}" needs a Tavily or SerpAPI key in Settings.`
                     : `Tool "${tc.name}" is not available for this request.`,
                   code: 'PERMISSION_DENIED'
                 }

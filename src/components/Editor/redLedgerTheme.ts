@@ -78,6 +78,8 @@ function buildTheme(palette: ThemePalette) {
     '.cm-content': {
       caretColor: palette.cursor,
       fontFamily: "'JetBrains Mono', 'Menlo', monospace",
+      // JetBrains Mono otherwise draws <!-- and --> as arrows.
+      fontVariantLigatures: 'none',
       padding: '8px 0'
     },
     '.cm-cursor, .cm-dropCursor': {

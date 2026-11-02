@@ -55,7 +55,7 @@
     "@vitejs/plugin-react": "^6.1.2",
     "daisyui": "^5.7.50",
     "dompurify": "^3.4.17",
-    "electron": "^44.9.0",
+    "electron": "^44.10.1",
     "electron-builder": "26.15.3",
     "electron-vite": "^6.0.0",
     "eslint": "^10.13.0",

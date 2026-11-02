@@ -14,7 +14,7 @@ const PROVIDER_LABELS: Record<ProviderName, string> = {
 
 function formatDateTime(value: number | string): string {
   const date = new Date(value)
-  if (Number.isNaN(date.getTime())) return '—'
+  if (Number.isNaN(date.getTime())) return '-'
   return date.toLocaleString(undefined, {
     month: 'short',
     day: 'numeric',
@@ -80,7 +80,7 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
   const { profile, isFallback } = resolveConversationProfile(conversation.profileId, { profiles, activeProfileId })
   const profileLabel = profile
     ? (isFallback ? `${profile.name} (active)` : profile.name)
-    : '—'
+    : '-'
 
   useEffect(() => {
     if (!isOpen) return
@@ -154,7 +154,7 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
               <>
                 <SectionLabel>Last request</SectionLabel>
                 <InfoRow label="Sent" value={formatDateTime(lastRequest.sentAt)} />
-                <InfoRow label="Context profile" value={lastRequest.contextProfile ?? '—'} />
+                <InfoRow label="Context profile" value={lastRequest.contextProfile ?? '-'} />
                 <InfoRow
                   label="Temperature"
                   value={lastRequest.temperature === null ? 'Provider default' : lastRequest.temperature.toFixed(1)}
@@ -176,7 +176,7 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
                 <SectionLabel>Chat</SectionLabel>
                 <InfoRow
                   label="Messages"
-                  value={`${stats.userMessages} sent · ${stats.assistantMessages} replies`}
+                  value={`${stats.userMessages} sent | ${stats.assistantMessages} replies`}
                 />
                 <InfoRow label="Tool calls" value={String(stats.toolCalls)} />
                 <InfoRow label="Attachments" value={String(stats.attachments)} />

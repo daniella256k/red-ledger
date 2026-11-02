@@ -38,7 +38,7 @@ export function excerptAroundMatch(line: string, column: number, contextChars = 
 
   const start = Math.max(0, column - contextChars)
   const end = Math.min(line.length, column + contextChars)
-  return `${start > 0 ? '…' : ''}${line.slice(start, end)}${end < line.length ? '…' : ''}`
+  return `${start > 0 ? '...' : ''}${line.slice(start, end)}${end < line.length ? '...' : ''}`
 }
 
 export function buildGrepMatcher(

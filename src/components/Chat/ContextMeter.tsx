@@ -9,7 +9,7 @@ import type { ContextUsage } from '@/types'
 function buildTooltip(usage: ContextUsage, ratio: number | null): string {
   const lines = [
     `Context used by the last reply: ${describeContextUsage(usage)}${ratio === null ? '' : ` (${Math.round(ratio * 100)}%)`}`,
-    `Sent ${formatTokenCount(usage.promptTokens)} · generated ${formatTokenCount(usage.completionTokens)}`
+    `Sent ${formatTokenCount(usage.promptTokens)} | generated ${formatTokenCount(usage.completionTokens)}`
   ]
   if (usage.estimated) lines.push('Estimated from text length: this provider did not report token usage.')
   if (usage.contextLength === null) lines.push('The model\'s context window is unknown for this provider.')

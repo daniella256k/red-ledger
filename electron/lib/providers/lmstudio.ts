@@ -9,7 +9,7 @@ import {
   type LLMMessage,
   type LLMMessageContent
 } from './base'
-import { OpenAIProvider } from './openai'
+import { LOCAL_SERVER_STREAM_TIMEOUT_MS, OpenAIProvider } from './openai'
 import { registerProvider } from './registry'
 import type { LMStudioCompatibility, ProviderSettings } from '../../../src/types'
 
@@ -301,7 +301,7 @@ export class LMStudioProvider extends BaseLLMProvider {
     super('', baseUrl)
 
     this.provider = compatibility === 'openai'
-      ? new OpenAIProvider('', baseUrl)
+      ? new OpenAIProvider('', baseUrl, { streamTimeoutMs: LOCAL_SERVER_STREAM_TIMEOUT_MS })
       : new LMStudioNativeProvider(baseUrl)
   }
 

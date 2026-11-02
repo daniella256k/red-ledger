@@ -6,7 +6,7 @@ const ERROR_MESSAGES: Record<ErrorCode, string> = {
   PERMISSION_DENIED: 'Permission denied',
   WORKSPACE_NOT_SET: 'No workspace folder selected. Open one in Settings.',
   API_ERROR: 'The AI provider returned an error',
-  NETWORK_ERROR: 'Network error — check your connection',
+  NETWORK_ERROR: 'Network error: check your connection',
   INVALID_INPUT: 'Invalid input',
   DATABASE_ERROR: 'Database error',
   USER_DENIED: 'Operation cancelled by user',

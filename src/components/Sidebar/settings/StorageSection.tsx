@@ -34,7 +34,7 @@ export function StorageSection() {
       >
         <span className="inline-flex items-center gap-2">
           <HardDrive size={14} />
-          Manage storage…
+          Manage storage...
         </span>
         {databaseBytes !== null && (
           <span className="text-xs text-soft-charcoal/50 tabular-nums">{formatBytes(databaseBytes)}</span>

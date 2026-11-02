@@ -1,4 +1,4 @@
-import { OpenAIProvider } from './openai'
+import { LOCAL_SERVER_STREAM_TIMEOUT_MS, OpenAIProvider } from './openai'
 import { registerProvider } from './registry'
 
 /**
@@ -10,5 +10,5 @@ registerProvider({
   name: 'custom',
   displayName: 'Custom (OpenAI-compatible)',
   defaultBaseUrl: 'http://localhost:8080/v1',
-  factory: (settings) => new OpenAIProvider(settings.apiKey, settings.baseUrl)
+  factory: (settings) => new OpenAIProvider(settings.apiKey, settings.baseUrl, { streamTimeoutMs: LOCAL_SERVER_STREAM_TIMEOUT_MS })
 })

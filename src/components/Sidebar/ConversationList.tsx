@@ -262,7 +262,7 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search chats…"
+            placeholder="Search chats..."
             className="input input-xs w-full pl-7 pr-7"
             aria-label="Search chats"
           />

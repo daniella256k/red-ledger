@@ -141,10 +141,10 @@ describe('excerptAroundMatch', () => {
     const line = 'a'.repeat(633) + 'privacy and safety' + 'b'.repeat(600)
     const excerpt = excerptAroundMatch(line, 633, 50)
 
-    expect(excerpt.startsWith('…')).toBe(true)
-    expect(excerpt.endsWith('…')).toBe(true)
+    expect(excerpt.startsWith('...')).toBe(true)
+    expect(excerpt.endsWith('...')).toBe(true)
     expect(excerpt).toContain('privacy and safety')
-    expect(excerpt.length).toBe(102)
+    expect(excerpt.length).toBe(106)
   })
 
   it('does not add an ellipsis at the line edges', () => {

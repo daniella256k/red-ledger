@@ -129,7 +129,7 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
       `This frees about ${formatBytes(chat.totalBytes)}. This action cannot be undone.`
     )
     if (!confirmed) return
-    await run('Deleting chat…', () => deleteConversation(chat.conversationId))
+    await run('Deleting chat...', () => deleteConversation(chat.conversationId))
   }
 
   const handleRemoveImage = async (image: StoredImageInfo) => {
@@ -141,7 +141,7 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
         + 'The messages and their text stay. This action cannot be undone.'
     )
     if (!confirmed) return
-    await run('Removing image…', async () => {
+    await run('Removing image...', async () => {
       const result = await window.redLedger.removeStoredImage(image.blobId)
       const { activeConversationId, loadMessages } = useConversationStore.getState()
       if (activeConversationId && result.conversationIds.includes(activeConversationId)) {
@@ -151,7 +151,7 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
     })
   }
 
-  const handleCompact = () => run('Compacting…', async () => {
+  const handleCompact = () => run('Compacting...', async () => {
     const result = await window.redLedger.compactDatabase()
     notify({
       type: 'success',
@@ -159,7 +159,7 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
     })
   })
 
-  const handleClearCaches = () => run('Clearing caches…', async () => {
+  const handleClearCaches = () => run('Clearing caches...', async () => {
     await window.redLedger.clearCaches()
     notify({ type: 'success', message: 'Browser caches cleared.' })
   })
@@ -205,10 +205,10 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
 
         <div className="px-4 py-3 space-y-2 border-b border-weathered">
           <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
-            <Stat label="Database" value={overview ? formatBytes(overview.databaseBytes) : '—'} hint="Chats, messages and images on disk" />
-            <Stat label="Images" value={overview ? formatBytes(overview.imageBytes) : '—'} hint="Stored images, counted once each" />
-            <Stat label="Free in file" value={overview ? formatBytes(overview.reclaimableBytes) : '—'} hint="Space from deleted data that Compact gives back" />
-            <Stat label="Caches" value={overview ? formatBytes(overview.cacheBytes) : '—'} hint="Browser caches; rebuilt as needed" />
+            <Stat label="Database" value={overview ? formatBytes(overview.databaseBytes) : '-'} hint="Chats, messages and images on disk" />
+            <Stat label="Images" value={overview ? formatBytes(overview.imageBytes) : '-'} hint="Stored images, counted once each" />
+            <Stat label="Free in file" value={overview ? formatBytes(overview.reclaimableBytes) : '-'} hint="Space from deleted data that Compact gives back" />
+            <Stat label="Caches" value={overview ? formatBytes(overview.cacheBytes) : '-'} hint="Browser caches; rebuilt as needed" />
           </div>
           <div className="flex flex-wrap items-center gap-2">
             <button type="button" onClick={handleCompact} disabled={isBusy} className="btn btn-ghost btn-xs">
@@ -278,9 +278,9 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
                       <span className="truncate" title={chat.title}>{chat.title}</span>
                     </div>
                     <div className="text-[11px] text-soft-charcoal/50 tabular-nums">
-                      {chat.messageCount} messages · text {formatBytes(chat.textBytes)}
-                      {chat.imageCount > 0 && ` · ${chat.imageCount} image${chat.imageCount === 1 ? '' : 's'} ${formatBytes(chat.imageBytes)}`}
-                      {` · ${formatTimestamp(chat.updatedAt)}`}
+                      {chat.messageCount} messages | text {formatBytes(chat.textBytes)}
+                      {chat.imageCount > 0 && ` | ${chat.imageCount} image${chat.imageCount === 1 ? '' : 's'} ${formatBytes(chat.imageBytes)}`}
+                      {` | ${formatTimestamp(chat.updatedAt)}`}
                     </div>
                   </div>
                   <span className="text-xs font-medium text-soft-charcoal tabular-nums">{formatBytes(chat.totalBytes)}</span>
@@ -330,7 +330,7 @@ export function StorageModal({ onClose }: { onClose: () => void }) {
                       >
                         {image.chats[0]?.title}
                         {image.chats.length > 1 && ` and ${image.chats.length - 1} more`}
-                        {` · last active ${formatTimestamp(image.lastChatActivityAt)}`}
+                        {` | last active ${formatTimestamp(image.lastChatActivityAt)}`}
                       </div>
                     </div>
                     <span className="text-xs font-medium text-soft-charcoal tabular-nums">{formatBytes(image.bytes)}</span>

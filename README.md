@@ -34,7 +34,7 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 ### Install + Run
 
 ```bash
-git clone https://github.com/domwxyz/red-ledger.git
+git clone https://github.com/daniella256k/red-ledger.git
 cd red-ledger
 npm install
 npm run dev
