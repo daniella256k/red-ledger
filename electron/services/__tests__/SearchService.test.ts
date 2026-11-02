@@ -463,8 +463,8 @@ describe('SearchService.search', () => {
     const service = new SearchService(() => ({ tavilyApiKey: 'tvly-test', serpApiKey: '' } as never))
     const [result] = (await service.search('long', 1)).results
 
-    expect(result.snippet.length).toBeLessThanOrEqual(601)
-    expect(result.snippet.endsWith('organize…')).toBe(true)
+    expect(result.snippet.length).toBeLessThanOrEqual(603)
+    expect(result.snippet.endsWith('organize...')).toBe(true)
   })
 
   it('says why Tavily failed when there is no SerpAPI key to fall back on', async () => {
@@ -599,6 +599,6 @@ describe('SearchService.searchWikipedia', () => {
       domain: 'en.wikipedia.org'
     })
     expect(response.results[0].snippet.startsWith('The Labor Management Relations Act of 1947.')).toBe(true)
-    expect(response.results[0].snippet.length).toBeLessThanOrEqual(801)
+    expect(response.results[0].snippet.length).toBeLessThanOrEqual(803)
   })
 })

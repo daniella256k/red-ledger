@@ -541,7 +541,7 @@ export class LlmService {
     this.activeStreams.set(channel, stream)
 
     try {
-      while (true) {
+      for (let round = 1; ; round++) {
         const collectedToolCalls: ToolCall[] = []
         let textAccumulated = ''
         let reportedUsage: ContextUsage | null = null
@@ -665,11 +665,13 @@ export class LlmService {
           }
 
           const withinBudget = index < remainingBudget
-          const executed = !withinBudget
-            ? { ...tc, result: { error: TOOL_LIMIT_REACHED_ERROR, code: 'LIMIT_REACHED' } }
+          const startedAt = Date.now()
+          const executed: ToolCall = !withinBudget
+            ? { ...tc, round, result: { error: TOOL_LIMIT_REACHED_ERROR, code: 'LIMIT_REACHED' } }
             : availableToolNames.has(tc.name)
-              ? await toolExecutor(tc)
+              ? { ...await toolExecutor(tc), round, durationMs: Date.now() - startedAt }
               : {
+                round,
                 ...tc,
                 result: {
                   error: settings.offlineMode && isNetworkTool(tc.name, settings)

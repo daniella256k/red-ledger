@@ -249,7 +249,7 @@
   }
 
   .assistant-message-shell .message-bubble.assistant,
-  .assistant-message-shell .tool-card {
+  .assistant-message-shell .tool-burst {
     max-width: 100%;
   }
 
@@ -277,21 +277,123 @@
     z-index: 1;
   }
 
-  /* Tool Call Cards */
-  .tool-card {
-    @apply border border-weathered rounded-card overflow-hidden text-sm;
+  /* Tool calls: a burst collapses to one line like the reasoning trace; each
+     call is a plain line. Color only marks failures. */
+  .tool-burst {
+    @apply w-full border border-weathered rounded-card bg-base-100 overflow-hidden text-xs;
+    min-width: min(22rem, 100%);
   }
 
-  .tool-card-header {
-    @apply bg-base-200 px-3 py-1.5 text-sm font-medium flex items-center justify-between cursor-pointer select-none;
+  .tool-burst-summary {
+    @apply flex items-baseline gap-1.5 cursor-pointer px-3 py-2 text-soft-charcoal/70 select-none list-none;
   }
 
-  .tool-card-header.success {
-    @apply bg-success/10 text-success;
+  .tool-burst-summary:hover {
+    @apply text-soft-charcoal;
   }
 
-  .tool-card-header.error {
-    @apply bg-error/10 text-error;
+  .tool-burst-summary::-webkit-details-marker {
+    display: none;
+  }
+
+  .tool-burst-label {
+    @apply font-medium uppercase tracking-wide;
+  }
+
+  .tool-burst-toggle {
+    @apply text-[10px] opacity-50 transition-transform;
+  }
+
+  .tool-burst[open] > .tool-burst-summary .tool-burst-toggle {
+    transform: rotate(90deg);
+  }
+
+  .tool-burst-counts {
+    @apply ml-1 tabular-nums;
+  }
+
+  .tool-burst-rows > .tool-call {
+    @apply border-t border-weathered;
+  }
+
+  .tool-call-line {
+    @apply grid w-full items-baseline gap-3 px-3 py-1.5 text-left;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+
+  .tool-call-line:hover {
+    @apply bg-base-200/40;
+  }
+
+  .tool-call-name {
+    @apply font-mono text-[11px] text-soft-charcoal/60 whitespace-nowrap;
+  }
+
+  .tool-call-server {
+    @apply uppercase tracking-wide text-[10px] text-soft-charcoal/45;
+  }
+
+  .tool-call-subject {
+    @apply truncate text-soft-charcoal;
+  }
+
+  .tool-call-muted {
+    @apply text-soft-charcoal/50;
+  }
+
+  .tool-call-result {
+    @apply whitespace-nowrap text-[11px] text-soft-charcoal/50 tabular-nums;
+  }
+
+  .tool-call-result.is-error,
+  .tool-call-error {
+    @apply text-error;
+  }
+
+  .tool-call-details {
+    @apply border-t border-weathered bg-base-200/40 px-3 py-2.5 space-y-2;
+  }
+
+  .tool-call-error {
+    @apply m-0 break-words;
+  }
+
+  .tool-call-pre {
+    @apply m-0 max-h-[280px] overflow-auto whitespace-pre-wrap break-words rounded-sm border border-weathered bg-base-100 p-2 font-mono text-[11px] leading-relaxed;
+  }
+
+  .tool-call-results {
+    @apply m-0 list-decimal space-y-1 pl-5;
+  }
+
+  .tool-call-results li > a,
+  .tool-call-details a {
+    @apply text-soft-charcoal underline decoration-weathered underline-offset-2;
+  }
+
+  .tool-call-results li > a:hover,
+  .tool-call-details a:hover {
+    @apply decoration-soft-charcoal/50;
+  }
+
+  .tool-call-results li > .tool-call-muted {
+    @apply block text-[11px];
+  }
+
+  .tool-call-tabs {
+    @apply flex items-baseline gap-3 text-[11px] text-soft-charcoal/50;
+  }
+
+  .tool-call-tab:hover {
+    @apply text-soft-charcoal;
+  }
+
+  .tool-call-tab.is-active {
+    @apply text-soft-charcoal underline underline-offset-4;
+  }
+
+  .tool-call-stats {
+    @apply m-0 font-mono text-[11px] text-soft-charcoal/50 break-words;
   }
 
   /* Editor Container */

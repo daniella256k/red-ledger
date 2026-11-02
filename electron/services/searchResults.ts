@@ -1,3 +1,4 @@
+import { displayDomain } from '../../src/lib/toolResultText'
 import type { SearchResult } from '../../src/types'
 
 /**
@@ -21,7 +22,7 @@ export function capSnippet(text: string, maxChars: number = SNIPPET_MAX_CHARS): 
   if (clean.length <= maxChars) return clean
   const cut = clean.slice(0, maxChars)
   const lastSpace = cut.lastIndexOf(' ')
-  return `${(lastSpace > maxChars * 0.7 ? cut.slice(0, lastSpace) : cut).replace(/[\s.,;:]+$/, '')}…`
+  return `${(lastSpace > maxChars * 0.7 ? cut.slice(0, lastSpace) : cut).replace(/[\s.,;:]+$/, '')}...`
 }
 
 /**
@@ -43,10 +44,6 @@ export function normalizePublished(raw: unknown): string | undefined {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
 }
 
-/** "www.nlrb.gov" → "nlrb.gov". */
-export function displayDomain(hostname: string): string {
-  return hostname.toLowerCase().replace(/^www\./, '')
-}
 
 /**
  * The hostname in a site setting or domain filter, whether written as

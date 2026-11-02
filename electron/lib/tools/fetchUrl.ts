@@ -6,7 +6,7 @@ import {
   FETCH_MAX_MAX_CHARS,
   FETCH_MIN_MAX_CHARS
 } from '../../services/SearchService'
-import { formatFetchUrlResult } from './fetchUrlFormat'
+import { formatFetchUrlResult } from '../../../src/lib/toolResultText'
 
 registerTool({
   definition: {

@@ -3,8 +3,9 @@ import { marked } from 'marked'
 import DOMPurify from 'dompurify'
 import { ChevronDown, ChevronUp, Paperclip } from 'lucide-react'
 import type { Attachment, ImageAttachment, Message, ToolCall } from '@/types'
-import { ToolCallCard } from './ToolCallCard'
+import { ToolCallBurst } from './ToolCallBurst'
 import { imageSrc } from '@/lib/attachments'
+import { burstSummaryText, groupToolRuns } from '@/lib/toolDisplay'
 import {
   MessageActionsBar,
   useCopyAction,
@@ -42,6 +43,11 @@ interface MessageBubbleProps {
 type Segment =
   | { kind: 'text'; text: string; html: string }
   | { kind: 'tool'; toolCall: ToolCall }
+
+/** What the reply shows: text blocks, and runs of consecutive tool calls as one burst. */
+type DisplaySegment =
+  | Extract<Segment, { kind: 'text' }>
+  | { kind: 'tools'; toolCalls: ToolCall[] }
 
 type CollapsedPreviewBlock =
   | { kind: 'text'; content: string }
@@ -139,19 +145,11 @@ function buildSegments(content: string, toolCalls: ToolCall[]): Segment[] {
   return segments
 }
 
-function getToolCallPreviewLabel(toolCall: ToolCall): string {
-  const hasError = toolCall.result !== undefined
-    && typeof toolCall.result === 'object'
-    && toolCall.result !== null
-    && 'error' in toolCall.result
-
-  const status = toolCall.result === undefined
-    ? 'pending'
-    : hasError
-      ? 'error'
-      : 'complete'
-
-  return `[Tool] ${toolCall.name} (${status})`
+function groupSegments(segments: Segment[]): DisplaySegment[] {
+  return groupToolRuns(segments, (seg) => (seg.kind === 'tool' ? seg.toolCall : undefined))
+    .map((item) => (Array.isArray(item)
+      ? { kind: 'tools' as const, toolCalls: item }
+      : item as Extract<Segment, { kind: 'text' }>))
 }
 
 function truncateCollapsedBlock(text: string): string {
@@ -195,7 +193,7 @@ export function MessageBubble({
   }, [message.attachments, message.content, message.role])
 
   const segments = useMemo(
-    () => buildSegments(message.content, toolCalls),
+    () => groupSegments(buildSegments(message.content, toolCalls)),
     [message.content, toolCalls]
   )
 
@@ -203,7 +201,7 @@ export function MessageBubble({
     if (message.role !== 'assistant') return message.content
 
     const textSegments = segments
-      .filter((seg): seg is Extract<Segment, { kind: 'text' }> => seg.kind === 'text')
+      .filter((seg): seg is Extract<DisplaySegment, { kind: 'text' }> => seg.kind === 'text')
       .map((seg) => seg.text.trim())
       .filter(Boolean)
 
@@ -216,8 +214,8 @@ export function MessageBubble({
 
     const blocks: CollapsedPreviewBlock[] = []
     for (const seg of segments) {
-      if (seg.kind === 'tool') {
-        blocks.push({ kind: 'tool', content: getToolCallPreviewLabel(seg.toolCall) })
+      if (seg.kind === 'tools') {
+        blocks.push({ kind: 'tool', content: `[Tools] ${burstSummaryText(seg.toolCalls)}` })
         continue
       }
 
@@ -481,8 +479,8 @@ export function MessageBubble({
             )}
 
             {segments.map((seg, i) => {
-              if (seg.kind === 'tool') {
-                return <ToolCallCard key={seg.toolCall.id} toolCall={seg.toolCall} />
+              if (seg.kind === 'tools') {
+                return <ToolCallBurst key={seg.toolCalls[0].id || `tools-${i}`} toolCalls={seg.toolCalls} />
               }
 
               // Text segment

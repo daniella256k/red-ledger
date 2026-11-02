@@ -298,15 +298,20 @@ describe('LlmService tool call history', () => {
     }
     registerProvider({ name: 'openai', displayName: 'Tool then answer', defaultBaseUrl: '', factory: () => new ToolThenAnswerProvider('', '') })
 
+    const chunks: StreamChunk[] = []
     const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
     await service.orchestrateStream(
       { conversationId: 'c1', model: 'test', provider: 'openai', messages: [{ role: 'user', content: 'read it', timestamp: 't1' }] },
       'stream-format',
-      { send: () => {} },
+      { send: (chunk) => chunks.push(chunk) },
       async (tc) => ({ ...tc, result: { text: 'live page' } })
     )
 
     expect(seen[1].at(-1)).toEqual({ role: 'tool', content: 'PAGE: live page', tool_call_id: 'live' })
+    // The renderer gets which round made the call and how long it ran, for the call's details.
+    const resultChunk = chunks.find((chunk) => chunk.type === 'tool_result')
+    expect(resultChunk?.toolCall).toMatchObject({ id: 'live', round: 1, result: { text: 'live page' } })
+    expect(resultChunk?.toolCall?.durationMs).toBeGreaterThanOrEqual(0)
   })
 
   it('replays earlier tool calls and results in the request', async () => {

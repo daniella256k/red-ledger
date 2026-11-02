@@ -1,7 +1,8 @@
 import { registerTool } from './registry'
 import { getSearchService } from '../../ipc/search'
 import { numberArg, requireObjectArgs, requireStringArg } from './args'
-import { formatSearchResponse, parseSearchFilters, searchFilterProperties } from './searchShared'
+import { parseSearchFilters, searchFilterProperties } from './searchShared'
+import { formatSearchResponse } from '../../../src/lib/toolResultText'
 
 registerTool({
   definition: {

@@ -22,7 +22,7 @@ describe('capSnippet', () => {
   })
 
   it('cuts long text at a word break with an ellipsis', () => {
-    expect(capSnippet('one two three four five six', 14)).toBe('one two three…')
+    expect(capSnippet('one two three four five six', 14)).toBe('one two three...')
   })
 })
 

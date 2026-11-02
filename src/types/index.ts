@@ -198,6 +198,10 @@ export interface ToolCall {
   result?: unknown
   /** Character offset into Message.content where this tool call was initiated. */
   contentOffset?: number
+  /** Which model round of the turn made the call, from 1. Shown in the call's details. */
+  round?: number
+  /** How long the tool took to run; absent when it never ran (limit reached, unavailable). */
+  durationMs?: number
 }
 
 // ─── LLM Request ─────────────────────────────────────────────────────────────
