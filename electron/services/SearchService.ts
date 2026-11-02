@@ -7,13 +7,16 @@ import type {
 import { lookup } from 'node:dns/promises'
 import type { LookupAddress } from 'node:dns'
 import { isIP } from 'node:net'
-import type { SearchResult, Settings } from '../../src/types'
-
-interface ExtractedLink {
-  text: string
-  url: string
-  isInternal: boolean
-}
+import { extractHtmlPage } from './webExtract'
+import { extractPdfTextFromBuffer } from './PdfAttachmentService'
+import { WIKI_SNIPPET_MAX_CHARS, finishResults, normalizeSiteHost, toSearchResult } from './searchResults'
+import type {
+  FetchUrlResult,
+  SearchFilters,
+  SearchResponse,
+  SearchResult,
+  Settings
+} from '../../src/types'
 
 interface RedirectableResponse {
   data: unknown
@@ -31,8 +34,188 @@ interface SafeLookupAddress extends AxiosLookupAddressEntry {
 }
 
 const FETCH_TIMEOUT_MS = 20_000
-const FETCH_MAX_BYTES = 5_000_000
+/** Room for long reports published as PDFs. */
+const FETCH_MAX_BYTES = 25_000_000
 const MAX_FETCH_REDIRECTS = 5
+export const FETCH_DEFAULT_MAX_CHARS = 10_000
+export const FETCH_MIN_MAX_CHARS = 1_000
+export const FETCH_MAX_MAX_CHARS = 100_000
+/** Fetched documents are kept briefly, so reading the next part doesn't download it again. */
+const FETCH_CACHE_TTL_MS = 5 * 60_000
+const FETCH_CACHE_MAX_ENTRIES = 20
+/** Says plainly who is asking, so sites can decide; it doesn't pose as a browser. */
+const USER_AGENT = 'RedLedger/1.0'
+const SEARCH_TIMEOUT_MS = 15_000
+
+export type SearchErrorCode =
+  | 'INVALID_URL'
+  | 'BLOCKED_HOST'
+  | 'DNS_FAILED'
+  | 'HTTP_ERROR'
+  | 'TIMEOUT'
+  | 'TOO_LARGE'
+  | 'TOO_MANY_REDIRECTS'
+  | 'UNSUPPORTED_TYPE'
+  | 'EXTRACTION_FAILED'
+  | 'NETWORK_ERROR'
+  | 'NO_SEARCH_KEY'
+
+/**
+ * A failed search or fetch. The tool executor passes code, retryable and
+ * status on to the model, so it can tell a blocked site (try another source)
+ * from a timeout (worth one retry).
+ */
+export class SearchError extends Error {
+  readonly code: SearchErrorCode
+  readonly retryable: boolean
+  readonly status?: number
+
+  constructor(code: SearchErrorCode, message: string, options: { retryable?: boolean; status?: number } = {}) {
+    super(message)
+    this.name = 'SearchError'
+    this.code = code
+    this.retryable = options.retryable ?? false
+    if (options.status !== undefined) this.status = options.status
+  }
+}
+
+const HTTP_STATUS_HINTS: Record<number, string> = {
+  401: 'the page requires a login',
+  403: 'the site refused the request (it may block automated access or require a login); try another source',
+  404: 'the page was not found',
+  410: 'the page has been removed',
+  429: 'too many requests; try again later or use another source',
+  451: 'the page is unavailable for legal reasons'
+}
+
+/** A failed request as a SearchError saying what happened and whether retrying could help. */
+export function toSearchError(err: unknown, source: string, options: { api?: boolean } = {}): SearchError {
+  if (err instanceof SearchError) return err
+
+  const failure = (err ?? {}) as { code?: unknown; message?: unknown; response?: { status?: unknown } }
+  const message = typeof failure.message === 'string' ? failure.message : String(err)
+  const status = typeof failure.response?.status === 'number' ? failure.response.status : undefined
+
+  if (status !== undefined) {
+    const hint = options.api && (status === 401 || status === 403)
+      ? 'the API key was rejected; check it in Settings'
+      : HTTP_STATUS_HINTS[status] ?? (status >= 500 ? 'the server had an error' : 'the request failed')
+    return new SearchError('HTTP_ERROR', `${source} returned HTTP ${status}: ${hint}.`, {
+      status,
+      retryable: status === 408 || status === 429 || status >= 500
+    })
+  }
+  if (failure.code === 'ECONNABORTED' || failure.code === 'ETIMEDOUT' || /timeout/i.test(message)) {
+    return new SearchError('TIMEOUT', `${source} did not respond in time.`, { retryable: true })
+  }
+  if (/maxContentLength/i.test(message)) {
+    return new SearchError('TOO_LARGE', `${source} sent more than ${FETCH_MAX_BYTES / 1_000_000} MB, too much to read.`)
+  }
+  return new SearchError('NETWORK_ERROR', `Could not reach ${source}: ${message}`, { retryable: true })
+}
+
+/** The fetched document whole; fetchUrl hands it out one part at a time. */
+interface FetchedDocument {
+  meta: Omit<FetchUrlResult, 'content' | 'start_index' | 'end_index' | 'total_chars' | 'truncated' | 'next_start_index' | 'note'>
+  text: string
+}
+
+/**
+ * One part of a document: up to maxChars from start, ending at a paragraph,
+ * line or word break when one falls in the last 30%, so parts don't split words.
+ */
+export function sliceDocument(
+  text: string,
+  start: number,
+  maxChars: number
+): Pick<FetchUrlResult, 'content' | 'start_index' | 'end_index' | 'total_chars' | 'truncated' | 'next_start_index' | 'note'> {
+  const total = text.length
+  if (start > 0 && start >= total) {
+    return {
+      content: '',
+      start_index: start,
+      end_index: start,
+      total_chars: total,
+      truncated: false,
+      note: `start_index ${start} is past the end of the document (${total} characters).`
+    }
+  }
+
+  let end = Math.min(start + maxChars, total)
+  if (end < total) {
+    const window = text.slice(start, end)
+    const minCut = Math.floor(maxChars * 0.7)
+    for (const separator of ['\n\n', '\n', ' ']) {
+      const at = window.lastIndexOf(separator)
+      if (at >= minCut) {
+        end = start + at + separator.length
+        break
+      }
+    }
+  }
+
+  return {
+    content: text.slice(start, end).trimEnd(),
+    start_index: start,
+    end_index: end,
+    total_chars: total,
+    truncated: end < total,
+    ...(end < total ? { next_start_index: end } : {})
+  }
+}
+
+function toBytes(data: unknown): Buffer {
+  if (Buffer.isBuffer(data)) return data
+  if (data instanceof ArrayBuffer) return Buffer.from(data)
+  if (ArrayBuffer.isView(data)) return Buffer.from(data.buffer, data.byteOffset, data.byteLength)
+  if (typeof data === 'string') return Buffer.from(data, 'utf8')
+  return Buffer.alloc(0)
+}
+
+function documentKind(contentType: string, bytes: Buffer): 'html' | 'pdf' | 'text' | null {
+  if (contentType === 'application/pdf' || bytes.subarray(0, 5).toString('latin1') === '%PDF-') return 'pdf'
+  if (contentType === 'text/html' || contentType === 'application/xhtml+xml') return 'html'
+  if (
+    contentType.startsWith('text/')
+    || /^application\/(json|xml|javascript|csv)$/.test(contentType)
+    || /\+(json|xml)$/.test(contentType)
+  ) {
+    return 'text'
+  }
+  // No content type sent: read it if it is plainly HTML.
+  if (contentType === 'unknown' && /<(!doctype html|html)[\s>]/i.test(bytes.subarray(0, 1024).toString('latin1'))) {
+    return 'html'
+  }
+  return null
+}
+
+/** The body as text, in the charset the server or the page itself declares (UTF-8 otherwise). */
+function decodeBody(bytes: Buffer, contentTypeHeader: string): string {
+  const declared = /charset=["']?([\w.:-]+)/i.exec(contentTypeHeader)?.[1]
+    ?? /<meta[^>]+charset=["']?([\w.:-]+)/i.exec(bytes.subarray(0, 4096).toString('latin1'))?.[1]
+  try {
+    return new TextDecoder(declared ?? 'utf-8').decode(bytes)
+  } catch {
+    return new TextDecoder('utf-8').decode(bytes)
+  }
+}
+
+/** The query limited to the given sites, for search engines that take Google's site: operator. */
+function withSiteOperators(query: string, domains: string[] | undefined): string {
+  if (!domains?.length) return query
+  const sites = domains.map((domain) => `site:${domain}`)
+  return `${query} ${sites.length === 1 ? sites[0] : `(${sites.join(' OR ')})`}`
+}
+
+/** A readable title for a document without one: its file name, else its host. */
+function titleFromUrl(url: URL): string {
+  const raw = url.pathname.split('/').filter(Boolean).pop() ?? ''
+  try {
+    return decodeURIComponent(raw) || url.hostname
+  } catch {
+    return raw || url.hostname
+  }
+}
 
 const BLOCKED_IPV4_SUBNETS: Array<readonly [string, number]> = [
   ['0.0.0.0', 8],
@@ -230,45 +413,90 @@ function isBlockedIpAddress(address: string): boolean {
  */
 export class SearchService {
   private getSettings: () => Settings
+  /** Recently fetched documents by requested URL, oldest first. */
+  private fetchCache = new Map<string, { doc: FetchedDocument; expiresAt: number }>()
 
   constructor(getSettings: () => Settings) {
     this.getSettings = getSettings
   }
 
-  async search(query: string, numResults: number = 5): Promise<SearchResult[]> {
+  async search(query: string, numResults: number = 5, filters: SearchFilters = {}): Promise<SearchResponse> {
     const settings = this.getSettings()
     const count = Math.max(1, Math.min(10, numResults))
+    const applied: SearchFilters = {
+      ...(filters.recency ? { recency: filters.recency } : {}),
+      ...(filters.topic && filters.topic !== 'general' ? { topic: filters.topic } : {}),
+      ...(filters.domains?.length ? { domains: filters.domains } : {})
+    }
+    let tavilyError: SearchError | null = null
 
     // Try Tavily first (preferred)
     if (settings.tavilyApiKey) {
       try {
-        return await this.searchTavily(query, count, settings.tavilyApiKey)
-      } catch {
+        const results = await this.searchTavily(query, count, settings.tavilyApiKey, applied)
+        return { query, backend: 'tavily', ...applied, results }
+      } catch (err) {
+        tavilyError = toSearchError(err, 'Tavily', { api: true })
         if (!settings.serpApiKey) {
-          throw new Error('Tavily search failed and no SerpAPI key is configured.')
+          throw new SearchError(
+            tavilyError.code,
+            `Tavily search failed: ${tavilyError.message} No SerpAPI key is configured to fall back on.`,
+            { retryable: tavilyError.retryable, status: tavilyError.status }
+          )
         }
       }
     }
 
     // Fall back to SerpAPI
     if (settings.serpApiKey) {
-      return this.searchSerpApi(query, count, settings.serpApiKey)
+      try {
+        const results = await this.searchSerpApi(query, count, settings.serpApiKey, applied)
+        return {
+          query,
+          backend: 'serpapi',
+          ...applied,
+          results,
+          ...(tavilyError ? { note: `Tavily failed (${tavilyError.message}); these results are from SerpAPI.` } : {})
+        }
+      } catch (err) {
+        const serpError = toSearchError(err, 'SerpAPI', { api: true })
+        if (!tavilyError) throw serpError
+        throw new SearchError(
+          serpError.code,
+          `Both search services failed. Tavily: ${tavilyError.message} SerpAPI: ${serpError.message}`,
+          { retryable: tavilyError.retryable || serpError.retryable }
+        )
+      }
     }
 
-    throw new Error(
+    throw new SearchError(
+      'NO_SEARCH_KEY',
       'No search API key configured. Add a Tavily or SerpAPI key in Settings.'
     )
   }
 
-  async orgSearch(query: string, numResults: number = 5): Promise<SearchResult[]> {
+  /** A web search limited to the organization site from settings. */
+  async orgSearch(
+    query: string,
+    numResults: number = 5,
+    filters: Omit<SearchFilters, 'domains'> = {}
+  ): Promise<SearchResponse> {
     const settings = this.getSettings()
     const scopedQuery = this.applySiteOperator(query, settings.orgSite)
-    return this.search(scopedQuery, numResults)
+    return this.search(scopedQuery, numResults, { recency: filters.recency, topic: filters.topic })
   }
 
-  async searchWikipedia(query: string, numResults: number = 5): Promise<SearchResult[]> {
+  async searchWikipedia(query: string, numResults: number = 5): Promise<SearchResponse> {
+    try {
+      return { query, backend: 'wikipedia', results: await this.queryWikipedia(query, numResults) }
+    } catch (err) {
+      throw toSearchError(err, 'Wikipedia', { api: true })
+    }
+  }
+
+  private async queryWikipedia(query: string, numResults: number): Promise<SearchResult[]> {
     const count = Math.max(1, Math.min(10, numResults))
-    const timeout = 15_000
+    const timeout = SEARCH_TIMEOUT_MS
 
     const searchResponse = await axios.get('https://en.wikipedia.org/w/api.php', {
       params: {
@@ -280,7 +508,7 @@ export class SearchService {
         origin: '*'
       },
       headers: {
-        'User-Agent': 'RedLedger/1.0'
+        'User-Agent': USER_AGENT
       },
       timeout
     })
@@ -303,202 +531,127 @@ export class SearchService {
         origin: '*'
       },
       headers: {
-        'User-Agent': 'RedLedger/1.0'
+        'User-Agent': USER_AGENT
       },
       timeout
     })
 
     const pages = (extractResponse.data?.query?.pages || {}) as Record<string, { extract?: string }>
 
-    return searchItems.map((item) => {
+    return finishResults(searchItems.map((item) => {
       const cleanSnippet = (item.snippet || '').replace(/<[^>]*>/g, '')
       const extract = pages[String(item.pageid)]?.extract || ''
       const titleSlug = encodeURIComponent(item.title.replace(/ /g, '_'))
 
-      return {
-        title: item.title || '',
+      return toSearchResult({
+        title: item.title,
         url: `https://en.wikipedia.org/wiki/${titleSlug}`,
-        snippet: (extract || cleanSnippet).slice(0, 800)
-      }
-    })
+        snippet: extract || cleanSnippet
+      }, WIKI_SNIPPET_MAX_CHARS)
+    }), count)
   }
 
-  async fetchUrl(url: string, maxChars: number = 20_000): Promise<{
-    url: string
-    title: string
-    content: string
-    links: ExtractedLink[]
-    truncated: boolean
-    contentType: string
-  }> {
+  /**
+   * One part of the document at a URL: a web page's main content as Markdown,
+   * a PDF's text, or a text format as sent. Pass start_index from the previous
+   * part's next_start_index to read on; the document is cached briefly, so
+   * paging doesn't download it again.
+   */
+  async fetchUrl(
+    url: string,
+    maxChars: number = FETCH_DEFAULT_MAX_CHARS,
+    startIndex: number = 0
+  ): Promise<FetchUrlResult> {
     let parsedUrl: URL
     try {
       parsedUrl = new URL(url)
     } catch {
-      throw new Error('Invalid URL')
+      throw new SearchError('INVALID_URL', 'Invalid URL')
     }
 
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      throw new Error('Only http:// and https:// URLs are supported')
+      throw new SearchError('INVALID_URL', 'Only http:// and https:// URLs are supported')
+    }
+    parsedUrl.hash = ''
+
+    const boundedMaxChars = Math.max(FETCH_MIN_MAX_CHARS, Math.min(FETCH_MAX_MAX_CHARS, Math.floor(maxChars)))
+    const start = Math.max(0, Math.floor(Number.isFinite(startIndex) ? startIndex : 0))
+    const doc = await this.loadDocument(parsedUrl)
+    return { ...doc.meta, ...sliceDocument(doc.text, start, boundedMaxChars) }
+  }
+
+  private async loadDocument(url: URL): Promise<FetchedDocument> {
+    const key = url.toString()
+    const cached = this.fetchCache.get(key)
+    if (cached && cached.expiresAt > Date.now()) return cached.doc
+    this.fetchCache.delete(key)
+
+    const doc = await this.downloadDocument(url)
+    this.fetchCache.set(key, { doc, expiresAt: Date.now() + FETCH_CACHE_TTL_MS })
+    for (const oldest of this.fetchCache.keys()) {
+      if (this.fetchCache.size <= FETCH_CACHE_MAX_ENTRIES) break
+      this.fetchCache.delete(oldest)
+    }
+    return doc
+  }
+
+  private async downloadDocument(url: URL): Promise<FetchedDocument> {
+    let fetched: { response: RedirectableResponse; finalUrl: URL }
+    try {
+      fetched = await this.fetchUrlWithRedirects(url)
+    } catch (err) {
+      throw toSearchError(err, url.hostname)
     }
 
-    const boundedMaxChars = Math.max(1_000, Math.min(100_000, maxChars))
-    const { response, finalUrl } = await this.fetchUrlWithRedirects(parsedUrl)
-
-    const contentTypeHeader = String(response.headers?.['content-type'] || '')
+    const { response, finalUrl } = fetched
+    const bytes = toBytes(response.data)
+    const contentTypeHeader = this.readHeaderValue(response.headers, 'content-type') ?? ''
     const contentType = contentTypeHeader.split(';')[0]?.trim().toLowerCase() || 'unknown'
-
-    if (!contentType.includes('text/html') && !contentType.startsWith('text/')) {
-      throw new Error(`Unsupported content type: ${contentType || 'unknown'}`)
+    const kind = documentKind(contentType, bytes)
+    if (!kind) {
+      throw new SearchError(
+        'UNSUPPORTED_TYPE',
+        `Unsupported content type: ${contentType}. fetch_url reads web pages, PDFs and text formats (plain text, JSON, XML, CSV).`
+      )
     }
 
-    const raw = String(response.data || '')
-    const title = this.extractTitle(raw)
-    const links = contentType.includes('text/html')
-      ? this.extractLinksFromHtml(raw, finalUrl.toString())
-      : []
+    const base = { url: finalUrl.toString(), content_type: contentType }
 
-    const text = contentType.includes('text/html')
-      ? this.extractHtmlText(raw, finalUrl.toString())
-      : raw.trim()
-
-    const truncated = text.length > boundedMaxChars
-    return {
-      url: finalUrl.toString(),
-      title,
-      content: truncated ? text.slice(0, boundedMaxChars) : text,
-      links,
-      truncated,
-      contentType
-    }
-  }
-
-  private extractTitle(html: string): string {
-    const m = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
-    return this.decodeHtmlEntities((m?.[1] || '').trim())
-  }
-
-  private extractHtmlText(html: string, baseUrl: string): string {
-    const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
-    const body = bodyMatch?.[1] || html
-
-    const withInlineLinks = this.inlineAnchorUrls(body, baseUrl)
-
-    const withoutBlocked = withInlineLinks
-      .replace(/<(script|style|noscript|svg|iframe)[^>]*>[\s\S]*?<\/\1>/gi, ' ')
-      .replace(/<br\s*\/?>/gi, '\n')
-      .replace(/<\/(p|div|li|h1|h2|h3|h4|h5|h6|tr|section|article|blockquote)>/gi, '\n')
-      .replace(/<[^>]+>/g, ' ')
-
-    const decoded = this.decodeHtmlEntities(withoutBlocked)
-
-    return decoded
-      .replace(/\r\n/g, '\n')
-      .replace(/[ \t]+\n/g, '\n')
-      .replace(/\n{3,}/g, '\n\n')
-      .replace(/[ \t]{2,}/g, ' ')
-      .trim()
-  }
-
-  private inlineAnchorUrls(html: string, baseUrl: string): string {
-    const anchorRegex =
-      /<a\b[^>]*href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))[^>]*>([\s\S]*?)<\/a>/gi
-
-    return html.replace(anchorRegex, (_match, doubleQuoted, singleQuoted, bare, innerHtml) => {
-      const href = String(doubleQuoted || singleQuoted || bare || '').trim()
-      const resolved = this.resolveFetchableUrl(href, baseUrl)
-      if (!resolved) return String(innerHtml || '')
-      const text = String(innerHtml || '')
-      return text.trim() ? `${text} (${resolved})` : resolved
-    })
-  }
-
-  private extractLinksFromHtml(html: string, baseUrl: string): ExtractedLink[] {
-    const bodyMatch = html.match(/<body[^>]*>([\s\S]*?)<\/body>/i)
-    const body = bodyMatch?.[1] || html
-    const origin = new URL(baseUrl).origin
-    const seen = new Set<string>()
-    const links: ExtractedLink[] = []
-    const maxLinks = 200
-
-    const anchorRegex =
-      /<a\b[^>]*href\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'<>`]+))[^>]*>([\s\S]*?)<\/a>/gi
-
-    body.replace(anchorRegex, (_match, doubleQuoted, singleQuoted, bare, innerHtml) => {
-      if (links.length >= maxLinks) return _match
-
-      const href = String(doubleQuoted || singleQuoted || bare || '').trim()
-      const resolved = this.resolveFetchableUrl(href, baseUrl)
-      if (!resolved || seen.has(resolved)) return _match
-
-      const text = this.extractAnchorText(String(innerHtml || ''))
-      seen.add(resolved)
-      links.push({
-        text: text || resolved,
-        url: resolved,
-        isInternal: resolved.startsWith(origin + '/') || resolved === origin
-      })
-
-      return _match
-    })
-
-    return links
-  }
-
-  private resolveFetchableUrl(href: string, baseUrl: string): string | null {
-    if (!href) return null
-
-    const decodedHref = this.decodeHtmlEntities(href).trim()
-    if (!decodedHref || decodedHref.startsWith('#')) return null
-
-    try {
-      const absolute = new URL(decodedHref, baseUrl)
-      if (!['http:', 'https:'].includes(absolute.protocol)) return null
-      absolute.hash = ''
-      return absolute.toString()
-    } catch {
-      return null
-    }
-  }
-
-  private extractAnchorText(innerHtml: string): string {
-    const withoutTags = innerHtml.replace(/<[^>]+>/g, ' ')
-    return this.decodeHtmlEntities(withoutTags)
-      .replace(/\s+/g, ' ')
-      .trim()
-  }
-
-  private decodeHtmlEntities(input: string): string {
-    const named = input
-      .replace(/&nbsp;/gi, ' ')
-      .replace(/&amp;/gi, '&')
-      .replace(/&lt;/gi, '<')
-      .replace(/&gt;/gi, '>')
-      .replace(/&quot;/gi, '"')
-      .replace(/&#39;/gi, "'")
-      .replace(/&apos;/gi, "'")
-
-    return named
-      .replace(/&#(\d+);/g, (match, dec) => this.decodeCodePoint(dec, 10) ?? match)
-      .replace(/&#x([0-9a-f]+);/gi, (match, hex) => this.decodeCodePoint(hex, 16) ?? match)
-  }
-
-  private decodeCodePoint(value: string, radix: 10 | 16): string | null {
-    const parsed = Number.parseInt(value, radix)
-    if (!Number.isFinite(parsed) || parsed < 0 || parsed > 0x10FFFF) {
-      return null
+    if (kind === 'pdf') {
+      let text: string
+      try {
+        text = await extractPdfTextFromBuffer(bytes)
+      } catch (err) {
+        throw new SearchError('EXTRACTION_FAILED', `Could not read the PDF: ${err instanceof Error ? err.message : String(err)}`)
+      }
+      return {
+        meta: { ...base, title: titleFromUrl(finalUrl), extraction: 'pdf' },
+        text: text || '[No extractable text found in this PDF; it may be a scanned image.]'
+      }
     }
 
-    try {
-      return String.fromCodePoint(parsed)
-    } catch {
-      return null
+    const decoded = decodeBody(bytes, contentTypeHeader)
+    if (kind === 'html') {
+      const page = extractHtmlPage(decoded, finalUrl.toString())
+      return {
+        meta: {
+          ...base,
+          title: page.title || titleFromUrl(finalUrl),
+          ...(page.site_name ? { site_name: page.site_name } : {}),
+          ...(page.byline ? { byline: page.byline } : {}),
+          ...(page.published ? { published: page.published } : {}),
+          extraction: page.extraction
+        },
+        text: page.markdown
+      }
     }
+
+    return { meta: { ...base, title: titleFromUrl(finalUrl), extraction: 'text' }, text: decoded.trim() }
   }
 
   private applySiteOperator(query: string, orgSite: string | undefined): string {
     const trimmedQuery = query.trim()
-    const normalizedSite = this.normalizeOrgSite(orgSite)
+    const normalizedSite = normalizeSiteHost(orgSite)
     if (!normalizedSite || /\bsite:/i.test(trimmedQuery)) {
       return trimmedQuery
     }
@@ -506,30 +659,6 @@ export class SearchService {
       return `site:${normalizedSite}`
     }
     return `${trimmedQuery} site:${normalizedSite}`
-  }
-
-  private normalizeOrgSite(orgSite: string | undefined): string | null {
-    if (!orgSite) return null
-    const trimmed = orgSite.trim()
-    if (!trimmed) return null
-
-    const withoutPrefix = trimmed.replace(/^site:/i, '').trim()
-    if (!withoutPrefix) return null
-
-    const [firstToken] = withoutPrefix.split(/\s+/)
-    if (!firstToken) return null
-
-    const candidate = /^[a-z][a-z0-9+.-]*:\/\//i.test(firstToken)
-      ? firstToken
-      : `https://${firstToken}`
-
-    try {
-      const parsed = new URL(candidate)
-      return parsed.hostname.trim().toLowerCase() || null
-    } catch {
-      const fallbackHost = firstToken.split('/')[0]?.trim().toLowerCase()
-      return fallbackHost || null
-    }
   }
 
   private async fetchUrlWithRedirects(initialUrl: URL): Promise<{
@@ -541,8 +670,8 @@ export class SearchService {
     for (let redirectCount = 0; redirectCount <= MAX_FETCH_REDIRECTS; redirectCount++) {
       const safeAddresses = await this.resolveSafeFetchAddresses(currentUrl)
 
-      const response = await axios.get<string>(currentUrl.toString(), {
-        responseType: 'text',
+      const response = await axios.get<ArrayBuffer>(currentUrl.toString(), {
+        responseType: 'arraybuffer',
         timeout: FETCH_TIMEOUT_MS,
         maxContentLength: FETCH_MAX_BYTES,
         maxBodyLength: FETCH_MAX_BYTES,
@@ -550,7 +679,7 @@ export class SearchService {
         validateStatus: (status) => (status >= 200 && status < 300) || this.isRedirectStatus(status),
         lookup: this.createPinnedLookup(currentUrl.hostname, safeAddresses),
         headers: {
-          'User-Agent': 'RedLedger/1.0'
+          'User-Agent': USER_AGENT
         }
       }) as RedirectableResponse
 
@@ -561,13 +690,13 @@ export class SearchService {
 
       const location = this.readHeaderValue(response.headers, 'location')
       if (!location) {
-        throw new Error('URL redirected without a valid location header')
+        throw new SearchError('HTTP_ERROR', 'URL redirected without a valid location header', { status })
       }
 
       currentUrl = new URL(location, currentUrl)
     }
 
-    throw new Error(`Too many redirects (maximum ${MAX_FETCH_REDIRECTS})`)
+    throw new SearchError('TOO_MANY_REDIRECTS', `Too many redirects (maximum ${MAX_FETCH_REDIRECTS})`)
   }
 
   private isRedirectStatus(status: number): boolean {
@@ -637,15 +766,15 @@ export class SearchService {
   private async resolveSafeFetchAddresses(targetUrl: URL): Promise<SafeLookupAddress[]> {
     const hostname = normalizeHost(targetUrl.hostname)
     if (!hostname) {
-      throw new Error('Invalid URL host')
+      throw new SearchError('INVALID_URL', 'Invalid URL host')
     }
 
     if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
-      throw new Error('Refusing to fetch local or private network resources')
+      throw new SearchError('BLOCKED_HOST', 'Refusing to fetch local or private network resources')
     }
 
     if (isBlockedIpAddress(hostname)) {
-      throw new Error('Refusing to fetch local or private network resources')
+      throw new SearchError('BLOCKED_HOST', 'Refusing to fetch local or private network resources')
     }
 
     const ipFamily = isIP(hostname)
@@ -660,15 +789,15 @@ export class SearchService {
     try {
       records = await lookup(hostname, { all: true, verbatim: true }) as LookupAddress[]
     } catch {
-      throw new Error(`Unable to resolve host: ${hostname}`)
+      throw new SearchError('DNS_FAILED', `Unable to resolve host: ${hostname}`)
     }
 
     if (records.length === 0) {
-      throw new Error(`Unable to resolve host: ${hostname}`)
+      throw new SearchError('DNS_FAILED', `Unable to resolve host: ${hostname}`)
     }
 
     if (records.some((record) => isBlockedIpAddress(record.address))) {
-      throw new Error('Refusing to fetch local or private network resources')
+      throw new SearchError('BLOCKED_HOST', 'Refusing to fetch local or private network resources')
     }
 
     return records.map((record) => ({
@@ -680,54 +809,56 @@ export class SearchService {
   private async searchTavily(
     query: string,
     numResults: number,
-    apiKey: string
+    apiKey: string,
+    filters: SearchFilters
   ): Promise<SearchResult[]> {
     const response = await axios.post(
       'https://api.tavily.com/search',
       {
-        api_key: apiKey,
         query,
         max_results: numResults,
-        search_depth: 'basic'
+        search_depth: 'basic',
+        topic: filters.topic ?? 'general',
+        ...(filters.recency ? { time_range: filters.recency } : {}),
+        ...(filters.domains ? { include_domains: filters.domains } : {})
       },
-      { timeout: 15_000 }
+      { timeout: SEARCH_TIMEOUT_MS, headers: { Authorization: `Bearer ${apiKey}` } }
     )
 
-    const results: SearchResult[] = (response.data?.results || []).map(
-      (r: { title: string; url: string; content: string }) => ({
-        title: r.title || '',
-        url: r.url || '',
-        snippet: r.content || ''
-      })
+    const raw: Array<{ title?: unknown; url?: unknown; content?: unknown; published_date?: unknown }> =
+      Array.isArray(response.data?.results) ? response.data.results : []
+    return finishResults(
+      raw.map((r) => toSearchResult({ title: r.title, url: r.url, snippet: r.content, published: r.published_date })),
+      numResults
     )
-
-    return results.slice(0, numResults)
   }
 
   private async searchSerpApi(
     query: string,
     numResults: number,
-    apiKey: string
+    apiKey: string,
+    filters: SearchFilters
   ): Promise<SearchResult[]> {
+    const news = filters.topic === 'news'
     const response = await axios.get('https://serpapi.com/search', {
       params: {
-        q: query,
+        q: withSiteOperators(query, filters.domains),
         api_key: apiKey,
         num: numResults,
-        engine: 'google'
+        engine: 'google',
+        ...(news ? { tbm: 'nws' } : {}),
+        // Google's "past day/week/month/year": qdr:d, qdr:w, qdr:m, qdr:y.
+        ...(filters.recency ? { tbs: `qdr:${filters.recency[0]}` } : {})
       },
-      timeout: 15_000
+      timeout: SEARCH_TIMEOUT_MS
     })
 
-    const organic = response.data?.organic_results || []
-    const results: SearchResult[] = organic.map(
-      (r: { title: string; link: string; snippet: string }) => ({
-        title: r.title || '',
-        url: r.link || '',
-        snippet: r.snippet || ''
-      })
+    const listed = news ? response.data?.news_results : response.data?.organic_results
+    const raw: Array<{ title?: unknown; link?: unknown; snippet?: unknown; date?: unknown }> =
+      Array.isArray(listed) ? listed : []
+    return finishResults(
+      raw.map((r) => toSearchResult({ title: r.title, url: r.link, snippet: r.snippet, published: r.date })),
+      numResults
     )
-
-    return results.slice(0, numResults)
   }
 }

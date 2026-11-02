@@ -23,6 +23,6 @@ export function registerSearchHandlers(getSettings: () => Settings): void {
   handleIpc('search:web', async (_e, query, numResults) => {
     assertString(query, 'query')
     assertOptionalNumber(numResults, 'numResults')
-    return service.search(query, numResults)
+    return (await service.search(query, numResults)).results
   })
 }

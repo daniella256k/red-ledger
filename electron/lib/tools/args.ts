@@ -81,3 +81,47 @@ export function numberArg(
   if (options.max !== undefined) out = Math.min(options.max, out)
   return out
 }
+
+/** One of a fixed set of strings, matched case-insensitively; undefined when absent or empty. */
+export function optionalEnumArg<T extends string>(
+  args: Record<string, unknown>,
+  key: string,
+  toolName: string,
+  allowed: readonly T[]
+): T | undefined {
+  const value = optionalStringArg(args, key, toolName, { allowEmpty: true })
+  if (!value) return undefined
+  const match = allowed.find((option) => option === value.toLowerCase())
+  if (!match) invalidInput(toolName, `"${key}" must be one of: ${allowed.join(', ')}`)
+  return match
+}
+
+/**
+ * A list of non-empty strings; undefined when absent or empty. A single
+ * string is split on commas, since models sometimes send "a, b" for a list.
+ */
+export function optionalStringListArg(
+  args: Record<string, unknown>,
+  key: string,
+  toolName: string,
+  options: { maxItems?: number } = {}
+): string[] | undefined {
+  const value = args[key]
+  if (value === undefined || value === null || value === '') return undefined
+
+  const items: unknown[] = typeof value === 'string'
+    ? value.split(',')
+    : Array.isArray(value)
+      ? value
+      : invalidInput(toolName, `"${key}" must be a list of strings`)
+
+  const strings = items.map((item) => {
+    if (typeof item !== 'string') invalidInput(toolName, `"${key}" must be a list of strings`)
+    return item.trim()
+  }).filter((item) => item.length > 0)
+
+  if (options.maxItems !== undefined && strings.length > options.maxItems) {
+    invalidInput(toolName, `"${key}" takes at most ${options.maxItems} items`)
+  }
+  return strings.length > 0 ? strings : undefined
+}

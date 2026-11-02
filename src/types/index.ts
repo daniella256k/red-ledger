@@ -255,7 +255,61 @@ export interface FileNode {
 export interface SearchResult {
   title: string
   url: string
+  /** Host without "www.", e.g. "nlrb.gov". */
+  domain: string
+  /** YYYY-MM-DD when the source gives a readable date; otherwise as given ("3 days ago"). */
+  published?: string
   snippet: string
+}
+
+export type SearchRecency = 'day' | 'week' | 'month' | 'year'
+export type SearchTopic = 'general' | 'news'
+
+/** Optional narrowing for a web search. */
+export interface SearchFilters {
+  /** Only results from the past day, week, month or year. */
+  recency?: SearchRecency
+  /** "news" searches news coverage, which carries publish dates. */
+  topic?: SearchTopic
+  /** Only these sites (hostnames). */
+  domains?: string[]
+}
+
+/** What web_search, org_search and wiki_search return. */
+export interface SearchResponse extends SearchFilters {
+  /** The query as sent, including any site: operator org_search added. */
+  query: string
+  backend: 'tavily' | 'serpapi' | 'wikipedia'
+  results: SearchResult[]
+  /** E.g. that results came from the fallback service, and why. */
+  note?: string
+}
+
+/** What fetch_url returns: one part of a web page, PDF or text file. */
+export interface FetchUrlResult {
+  /** Final URL, after redirects. */
+  url: string
+  title: string
+  site_name?: string
+  byline?: string
+  published?: string
+  content_type: string
+  /**
+   * article: the page's main content, as Markdown; page: the whole page
+   * without navigation, as Markdown; pdf: text extracted from a PDF;
+   * text: a text format (plain, JSON, XML, CSV) as sent.
+   */
+  extraction: 'article' | 'page' | 'pdf' | 'text'
+  content: string
+  /** Character range of the whole document that `content` covers. */
+  start_index: number
+  end_index: number
+  total_chars: number
+  /** True when the document continues past this part. */
+  truncated: boolean
+  /** Where the next part starts; present while there is more. */
+  next_start_index?: number
+  note?: string
 }
 
 // ─── Attachments ─────────────────────────────────────────────────────────

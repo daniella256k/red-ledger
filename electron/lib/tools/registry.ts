@@ -24,6 +24,12 @@ export interface ToolContext {
 export interface ToolEntry {
   definition: ToolDefinition
   execute: (args: Record<string, unknown>, context: ToolContext) => Promise<unknown>
+  /**
+   * The text the model reads for a successful result, when JSON isn't the
+   * clearest form (e.g. a page as Markdown). The structured result is still
+   * what the chat stores and the tool card shows.
+   */
+  formatForModel?: (result: unknown) => string
 }
 
 const tools = new Map<string, ToolEntry>()
@@ -38,6 +44,26 @@ export function unregisterTool(name: string): void {
 
 export function getToolDefinitions(): ToolDefinition[] {
   return [...tools.values()].map((e) => e.definition)
+}
+
+function isErrorResult(result: unknown): boolean {
+  return !!result && typeof result === 'object' && 'error' in result
+}
+
+/**
+ * A tool result as the model reads it: the tool's own text form when it has
+ * one, otherwise JSON. Errors are always JSON, so every tool reports them alike.
+ */
+export function formatToolResultForModel(name: string, result: unknown): string {
+  const format = tools.get(name)?.formatForModel
+  if (format && result !== undefined && !isErrorResult(result)) {
+    try {
+      return format(result)
+    } catch {
+      // Unexpected shape (e.g. saved by an older version): fall back to JSON.
+    }
+  }
+  return JSON.stringify(result) ?? 'null'
 }
 
 export async function dispatchTool(

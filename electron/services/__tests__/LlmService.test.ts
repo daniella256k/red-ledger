@@ -264,6 +264,51 @@ describe('LlmService tool call history', () => {
     expect(newResult.length).toBeGreaterThan(40_000)
   })
 
+  it('sends past and live results in the tool\'s own text form, and errors as JSON', async () => {
+    registerTool({
+      definition: {
+        type: 'function',
+        function: { name: 'page_reader', description: 'Reads a page', parameters: { type: 'object', properties: {} } }
+      },
+      execute: async () => ({ text: 'unused' }),
+      formatForModel: (result) => `PAGE: ${(result as { text: string }).text}`
+    })
+
+    const past = buildPastReplyMessages('Read them.', [
+      { id: 'ok', name: 'page_reader', arguments: {}, result: { text: 'old page' } },
+      { id: 'bad', name: 'page_reader', arguments: {}, result: { error: 'HTTP 403', code: 'HTTP_ERROR' } }
+    ])
+    expect(past[1].content).toBe('PAGE: old page')
+    expect(past[2].content).toBe('{"error":"HTTP 403","code":"HTTP_ERROR"}')
+
+    const seen: LLMMessage[][] = []
+    class ToolThenAnswerProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        seen.push([...options.messages])
+        const round = seen.length
+        queueMicrotask(() => {
+          if (round === 1) {
+            options.onChunk({ type: 'tool_call', toolCall: { id: 'live', name: 'page_reader', arguments: {} } })
+          }
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+    }
+    registerProvider({ name: 'openai', displayName: 'Tool then answer', defaultBaseUrl: '', factory: () => new ToolThenAnswerProvider('', '') })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    await service.orchestrateStream(
+      { conversationId: 'c1', model: 'test', provider: 'openai', messages: [{ role: 'user', content: 'read it', timestamp: 't1' }] },
+      'stream-format',
+      { send: () => {} },
+      async (tc) => ({ ...tc, result: { text: 'live page' } })
+    )
+
+    expect(seen[1].at(-1)).toEqual({ role: 'tool', content: 'PAGE: live page', tool_call_id: 'live' })
+  })
+
   it('replays earlier tool calls and results in the request', async () => {
     const seen: LLMMessage[][] = []
     class OneShotProvider extends BaseLLMProvider {

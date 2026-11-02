@@ -1,13 +1,16 @@
 import { registerTool } from './registry'
 import { getSearchService } from '../../ipc/search'
 import { numberArg, requireObjectArgs, requireStringArg } from './args'
+import { formatSearchResponse } from './searchShared'
 
 registerTool({
   definition: {
     type: 'function',
     function: {
       name: 'wiki_search',
-      description: 'Search Wikipedia for encyclopedic background information. Returns article titles, URLs, and summary snippets.',
+      description: 'Search Wikipedia for background on people, places, organizations, laws and history. '
+        + 'Returns article titles, URLs and the opening summary of each; for the full article, call fetch_url on its URL. '
+        + 'For recent events, use web_search.',
       parameters: {
         type: 'object',
         properties: {
@@ -16,8 +19,10 @@ registerTool({
             description: 'The Wikipedia search query'
           },
           num_results: {
-            type: 'number',
-            description: 'Number of results to return (1-10, default 5)'
+            type: 'integer',
+            minimum: 1,
+            maximum: 10,
+            description: 'How many results to return (default 5).'
           }
         },
         required: ['query']
@@ -35,5 +40,6 @@ registerTool({
     })
     const search = getSearchService()
     return search.searchWikipedia(query, numResults)
-  }
+  },
+  formatForModel: formatSearchResponse
 })

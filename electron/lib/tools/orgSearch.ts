@@ -1,13 +1,14 @@
 import { registerTool } from './registry'
 import { getSearchService } from '../../ipc/search'
 import { numberArg, requireObjectArgs, requireStringArg } from './args'
+import { formatSearchResponse, parseSearchFilters, searchFilterProperties } from './searchShared'
 
 registerTool({
   definition: {
     type: 'function',
     function: {
       name: 'org_search',
-      description: 'Search the web with an optional organization site filter from settings. Returns titles, URLs, and snippets.',
+      description: 'Search the web with an optional organization site filter from settings. Returns titles, URLs and snippets; read the most relevant with fetch_url.',
       parameters: {
         type: 'object',
         properties: {
@@ -16,9 +17,12 @@ registerTool({
             description: 'The search query'
           },
           num_results: {
-            type: 'number',
-            description: 'Number of results to return (1-10, default 5)'
-          }
+            type: 'integer',
+            minimum: 1,
+            maximum: 10,
+            description: 'How many results to return (default 5).'
+          },
+          ...searchFilterProperties({ domains: false })
         },
         required: ['query']
       }
@@ -33,7 +37,9 @@ registerTool({
       max: 10,
       integer: true
     })
+    const filters = parseSearchFilters(input, 'org_search', { domains: false })
     const search = getSearchService()
-    return search.orgSearch(query, numResults)
-  }
+    return search.orgSearch(query, numResults, filters)
+  },
+  formatForModel: formatSearchResponse
 })

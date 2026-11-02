@@ -9,7 +9,7 @@ import type {
   ToolDefinition
 } from '../lib/providers/base'
 import { createProvider } from '../lib/providers/registry'
-import { getToolDefinitions } from '../lib/tools/registry'
+import { formatToolResultForModel, getToolDefinitions } from '../lib/tools/registry'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
 import { findMcpServerByPrefix, parseMcpToolName } from '../../src/lib/mcpConfig'
 import { detectFileType } from '../lib/fileType'
@@ -184,7 +184,7 @@ export function buildPastReplyMessages(
     round.forEach((tc, k) => {
       messages.push({
         role: 'tool',
-        content: JSON.stringify(tc.result === undefined ? UNFINISHED_TOOL_RESULT : tc.result) ?? 'null',
+        content: formatToolResultForModel(tc.name, tc.result === undefined ? UNFINISHED_TOOL_RESULT : tc.result),
         tool_call_id: ids[k]
       })
     })
@@ -393,14 +393,14 @@ export class LlmService {
     const normalizedSite = this.normalizeOrgSite(orgSite)
 
     if (!rawSite) {
-      return 'Search the web with a user-configured organization site filter. Current org_search site setting: not set. Use this when the user asks for source-scoped web results. Returns titles, URLs, and snippets.'
+      return 'Search the web with a user-configured organization site filter. Current org_search site setting: not set. Use this when the user asks for source-scoped web results. Returns titles, URLs and snippets; read the most relevant with fetch_url.'
     }
 
     if (!normalizedSite) {
-      return `Search the web with a user-configured organization site filter. Current org_search site setting: "${rawSite}" (currently not normalized to a valid hostname). Use this when the user asks for this configured source. Returns titles, URLs, and snippets.`
+      return `Search the web with a user-configured organization site filter. Current org_search site setting: "${rawSite}" (currently not normalized to a valid hostname). Use this when the user asks for this configured source. Returns titles, URLs and snippets; read the most relevant with fetch_url.`
     }
 
-    return `Search the web with a user-configured organization site filter. Current org_search site setting: "${rawSite}" (effective filter: site:${normalizedSite}). Use this when the user asks to search ${normalizedSite} or this configured source. Returns titles, URLs, and snippets.`
+    return `Search the web with a user-configured organization site filter. Current org_search site setting: "${rawSite}" (effective filter: site:${normalizedSite}). Use this when the user asks to search ${normalizedSite} or this configured source. Returns titles, URLs and snippets; read the most relevant with fetch_url.`
   }
 
   private normalizeOrgSite(orgSite: string | undefined): string | null {
@@ -687,7 +687,7 @@ export class LlmService {
           // Append tool result to conversation for the next round. The budget
           // notice rides along on the last result so every provider sees it.
           const isLastInRound = index === collectedToolCalls.length - 1
-          const resultContent = JSON.stringify(executed.result)
+          const resultContent = formatToolResultForModel(executed.name, executed.result)
           const toolMessage: LLMMessage = {
             role: 'tool',
             content: isLastInRound && budgetNotice

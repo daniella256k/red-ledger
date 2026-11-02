@@ -60,4 +60,28 @@ describe('tool registry', () => {
       dispatchTool({ id: 'tc1', name: 'nonexistent', arguments: {} }, { win: null, workspace: null as never })
     ).rejects.toThrow('Unknown tool: nonexistent')
   })
+
+  it('formats results with the tool\'s own formatter, falling back to JSON', async () => {
+    const { formatToolResultForModel } = await import('../registry')
+    registerTool({
+      definition: {
+        type: 'function',
+        function: { name: 'shouty', description: 'Formats loudly', parameters: { type: 'object', properties: {} } }
+      },
+      execute: async () => ({}),
+      formatForModel: (result) => {
+        const { word } = result as { word?: string }
+        if (!word) throw new Error('unexpected shape')
+        return word.toUpperCase()
+      }
+    })
+
+    expect(formatToolResultForModel('shouty', { word: 'strike' })).toBe('STRIKE')
+    // Errors stay JSON so every tool reports them alike.
+    expect(formatToolResultForModel('shouty', { error: 'boom', code: 'UNKNOWN' })).toBe('{"error":"boom","code":"UNKNOWN"}')
+    // A shape the formatter can't read (e.g. saved by an older version) falls back to JSON.
+    expect(formatToolResultForModel('shouty', { other: 1 })).toBe('{"other":1}')
+    expect(formatToolResultForModel('no_formatter', { a: 1 })).toBe('{"a":1}')
+    expect(formatToolResultForModel('no_formatter', undefined)).toBe('null')
+  })
 })

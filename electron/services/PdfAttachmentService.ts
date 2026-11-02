@@ -74,8 +74,13 @@ async function loadPdfParserCtor(): Promise<PdfParseCtor> {
  * Import is intentionally lazy to avoid startup-time crashes.
  */
 export async function extractPdfText(filePath: string): Promise<string> {
+  return extractPdfTextFromBuffer(readFileSync(filePath))
+}
+
+/** Extract text from PDF bytes already in memory, e.g. a fetched web page. */
+export async function extractPdfTextFromBuffer(data: Uint8Array | Buffer): Promise<string> {
   const PDFParse = await loadPdfParserCtor()
-  const parser = new PDFParse({ data: readFileSync(filePath) })
+  const parser = new PDFParse({ data })
 
   try {
     const parsed = await parser.getText()

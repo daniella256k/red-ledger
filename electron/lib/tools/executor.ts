@@ -40,9 +40,13 @@ export async function executeTool(
     const isRLError = err instanceof PathJailError ||
       (err instanceof Error && 'code' in err)
 
+    // Network tools also say whether retrying could help and the HTTP status.
+    const { retryable, status } = (err ?? {}) as { retryable?: unknown; status?: unknown }
     const errorResult = {
       error: err instanceof Error ? err.message : String(err),
-      code: isRLError ? (err as PathJailError).code : 'UNKNOWN'
+      code: isRLError ? (err as PathJailError).code : 'UNKNOWN',
+      ...(typeof retryable === 'boolean' ? { retryable } : {}),
+      ...(typeof status === 'number' ? { status } : {})
     }
 
     return { ...toolCall, result: errorResult }

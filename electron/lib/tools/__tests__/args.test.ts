@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
   numberArg,
+  optionalEnumArg,
+  optionalStringListArg,
   optionalStringArg,
   requireObjectArgs,
   requireStringArg
@@ -55,5 +57,21 @@ describe('tool args validators', () => {
 
   it('numberArg rejects invalid numeric input', () => {
     expect(() => numberArg({ num_results: 'abc' }, 'num_results', 'web_search')).toThrow(PathJailError)
+  })
+})
+
+describe('list and enum validators', () => {
+  it('optionalEnumArg matches case-insensitively and rejects other values', () => {
+    expect(optionalEnumArg({ topic: 'News' }, 'topic', 'web_search', ['general', 'news'] as const)).toBe('news')
+    expect(optionalEnumArg({}, 'topic', 'web_search', ['general', 'news'] as const)).toBeUndefined()
+    expect(() => optionalEnumArg({ topic: 'sports' }, 'topic', 'web_search', ['general', 'news'] as const))
+      .toThrow('web_search "topic" must be one of: general, news')
+  })
+
+  it('optionalStringListArg accepts arrays or a comma-separated string', () => {
+    expect(optionalStringListArg({ domains: [' a.com ', '', 'b.com'] }, 'domains', 'web_search')).toEqual(['a.com', 'b.com'])
+    expect(optionalStringListArg({ domains: 'a.com,b.com' }, 'domains', 'web_search')).toEqual(['a.com', 'b.com'])
+    expect(optionalStringListArg({ domains: [] }, 'domains', 'web_search')).toBeUndefined()
+    expect(() => optionalStringListArg({ domains: 5 }, 'domains', 'web_search')).toThrow(PathJailError)
   })
 })
