@@ -1,11 +1,10 @@
 import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
-import { marked } from 'marked'
-import DOMPurify from 'dompurify'
 import { ChevronDown, ChevronUp, Paperclip } from 'lucide-react'
 import type { Attachment, ImageAttachment, Message, ToolCall } from '@/types'
 import { ToolCallBurst } from './ToolCallBurst'
 import { imageSrc } from '@/lib/attachments'
 import { burstSummaryText, groupToolRuns } from '@/lib/toolDisplay'
+import { codeBlockHtml, copyCodeOnClick, renderMarkdown, splitFencedCode } from '@/lib/markdown'
 import {
   MessageActionsBar,
   useCopyAction,
@@ -16,12 +15,6 @@ import {
   type BranchPagerProps,
   type MessageAction
 } from './MessageActions'
-
-// Configure marked for GFM + line breaks
-marked.setOptions({
-  gfm: true,
-  breaks: true
-})
 
 interface MessageBubbleProps {
   message: Message
@@ -90,7 +83,7 @@ function buildSegments(content: string, toolCalls: ToolCall[]): Segment[] {
   if (toolCalls.length === 0) {
     // No tool calls — just one text block
     if (!content) return []
-    const html = DOMPurify.sanitize(marked.parse(content) as string)
+    const html = renderMarkdown(content)
     return [{ kind: 'text', text: content, html }]
   }
 
@@ -102,7 +95,7 @@ function buildSegments(content: string, toolCalls: ToolCall[]): Segment[] {
   if (withOffset.length === 0) {
     const segments: Segment[] = legacy.map((tc) => ({ kind: 'tool', toolCall: tc }))
     if (content) {
-      const html = DOMPurify.sanitize(marked.parse(content) as string)
+      const html = renderMarkdown(content)
       segments.push({ kind: 'text', text: content, html })
     }
     return segments
@@ -125,7 +118,7 @@ function buildSegments(content: string, toolCalls: ToolCall[]): Segment[] {
     if (offset > cursor) {
       const slice = content.slice(cursor, offset)
       if (slice.trim()) {
-        const html = DOMPurify.sanitize(marked.parse(slice) as string)
+        const html = renderMarkdown(slice)
         segments.push({ kind: 'text', text: slice, html })
       }
     }
@@ -137,7 +130,7 @@ function buildSegments(content: string, toolCalls: ToolCall[]): Segment[] {
   if (cursor < content.length) {
     const slice = content.slice(cursor)
     if (slice.trim()) {
-      const html = DOMPurify.sanitize(marked.parse(slice) as string)
+      const html = renderMarkdown(slice)
       segments.push({ kind: 'text', text: slice, html })
     }
   }
@@ -188,6 +181,7 @@ export function MessageBubble({
     if (message.role !== 'user') return null
     return {
       text: message.content,
+      textParts: splitFencedCode(message.content),
       attachments: message.attachments ?? []
     }
   }, [message.attachments, message.content, message.role])
@@ -352,7 +346,7 @@ export function MessageBubble({
   // ─── User Message ──────────────────────────────────────────────────────────
 
   if (message.role === 'user') {
-    const { text, attachments } = userParts!
+    const { text, textParts, attachments } = userParts!
     return (
       <div className="message-row group flex flex-col items-end">
         <div className="message-bubble user">
@@ -388,7 +382,17 @@ export function MessageBubble({
             </>
           ) : (
             text && text !== '(see attached files)' && (
-              <pre className="whitespace-pre-wrap font-sans text-sm m-0">{text}</pre>
+              <div className="flex flex-col gap-2" onClick={copyCodeOnClick}>
+                {textParts.map((part, i) => (part.kind === 'code'
+                  ? (
+                    <div
+                      key={i}
+                      className="prose prose-sm max-w-none"
+                      dangerouslySetInnerHTML={{ __html: codeBlockHtml(part.text) }}
+                    />
+                  )
+                  : <pre key={i} className="whitespace-pre-wrap font-sans text-sm m-0">{part.text}</pre>))}
+              </div>
             )
           )}
           {attachments.length > 0 && (
@@ -492,6 +496,7 @@ export function MessageBubble({
                 >
                   <div
                     className="prose prose-sm max-w-none"
+                    onClick={copyCodeOnClick}
                     dangerouslySetInnerHTML={{ __html: seg.html }}
                   />
                   {/* Streaming activity indicator - only on the very last text segment */}
