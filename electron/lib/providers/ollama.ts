@@ -187,13 +187,16 @@ export class OllamaProvider extends BaseLLMProvider {
       }
     }
 
-    const stream = response.data as AsyncIterable<Buffer>
+    const stream = response.data as AsyncIterable<Buffer | string>
     let buffer = ''
+    // A character can be split across network chunks; the decoder holds its
+    // first bytes until the rest arrive instead of writing a replacement character.
+    const decoder = new TextDecoder('utf-8')
 
     for await (const chunk of stream) {
       if (controller.signal.aborted) break
 
-      buffer += chunk.toString('utf-8')
+      buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
 
       // Ollama sends NDJSON — one JSON object per line
       const lines = buffer.split('\n')

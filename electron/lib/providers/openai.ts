@@ -1,4 +1,5 @@
 import axios, { AxiosResponse } from 'axios'
+import { randomUUID } from 'crypto'
 import {
   BaseLLMProvider,
   TRUNCATED_REPLY_NOTICE,
@@ -370,7 +371,7 @@ export class OpenAIProvider extends BaseLLMProvider {
       throw new Error('API request failed without a response')
     }
 
-    const stream = response.data as AsyncIterable<Buffer>
+    const stream = response.data as AsyncIterable<Buffer | string>
 
     // State for accumulating tool call deltas
     // OpenAI sends tool_calls in incremental delta chunks where the arguments
@@ -382,6 +383,9 @@ export class OpenAIProvider extends BaseLLMProvider {
     }> = new Map()
 
     let buffer = ''
+    // A character can be split across network chunks; the decoder holds its
+    // first bytes until the rest arrive instead of writing a replacement character.
+    const decoder = new TextDecoder('utf-8')
     let truncated = false
     const reasoning = new ReasoningCollector()
 
@@ -396,7 +400,7 @@ export class OpenAIProvider extends BaseLLMProvider {
     for await (const chunk of stream) {
       if (controller.signal.aborted) break
 
-      buffer += chunk.toString('utf-8')
+      buffer += typeof chunk === 'string' ? chunk : decoder.decode(chunk, { stream: true })
 
       // Process complete SSE lines
       const lines = buffer.split('\n')
@@ -446,9 +450,11 @@ export class OpenAIProvider extends BaseLLMProvider {
               const idx = tc.index ?? 0
 
               if (!pendingToolCalls.has(idx)) {
-                // First delta for this tool call — has the id and function name
+                // First delta for this tool call — has the id and function name.
+                // Servers that send no id get a random one: an index would repeat
+                // every round, and calls are matched to their results by id.
                 pendingToolCalls.set(idx, {
-                  id: tc.id || `tool_${idx}`,
+                  id: tc.id || `call_${randomUUID()}`,
                   name: tc.function?.name || '',
                   arguments: tc.function?.arguments || ''
                 })

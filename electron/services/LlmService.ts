@@ -569,15 +569,21 @@ export class LlmService {
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
     let totalToolCalls = 0
     let roundsAfterToolLimit = 0
-    // Known before the first request so a long chat is shortened even on its
-    // first turn after launch; cached, and capped at a few seconds when not.
-    const contextLength = await this.lookupContextLength(request.provider, request.model)
 
-    // Tracked so Stop also ends the turn between rounds, while tools run.
+    // Tracked from the start so Stop ends the turn at any point: during the
+    // context window lookup below, between rounds, and while tools run.
     const stream = { handle: null as AbortHandle | null, cancelled: false, conversationId: request.conversationId }
     this.activeStreams.set(channel, stream)
 
     try {
+      // Known before the first request so a long chat is shortened even on its
+      // first turn after launch; cached, and capped at a few seconds when not.
+      const contextLength = await this.lookupContextLength(request.provider, request.model)
+      if (stream.cancelled) {
+        sink.send({ type: 'done' })
+        return
+      }
+
       for (let round = 1; ; round++) {
         // Every round: one turn's own tool results can outgrow the window.
         const shortenedResults = fitToolResultsToContext(messages, tools, contextLength)
@@ -831,22 +837,26 @@ export class LlmService {
   ): Promise<{ summary: string; usage: ContextUsage } | null> {
     const provider = this.createProvider(request.provider)
     const settings = this.getSettings()
-    const contextLength = await this.lookupContextLength(request.provider, request.model)
-    const messages = this.buildHistory(request, settings)
-    const instruction: LLMMessage = { role: 'user', content: compactionPrompt() }
 
-    // The chat may already be past the window: shorten old tool results, then
-    // leave out the oldest messages until the request fits.
-    fitToolResultsToContext(messages, [], contextLength)
-    const omitted = dropOldestToFit(messages, [instruction], contextLength)
-    if (omitted > 0) {
-      instruction.content = `${instruction.content as string}\n\n(The ${omitted} oldest messages were left out to fit the context window; the summary at the top covers what came before them, if there is one.)`
-    }
-    messages.push(instruction)
-
+    // Tracked from the start so Stop also works during the lookup below.
     const stream = { handle: null as AbortHandle | null, cancelled: false, conversationId: request.conversationId }
     this.activeStreams.set(channel, stream)
     try {
+      const contextLength = await this.lookupContextLength(request.provider, request.model)
+      if (stream.cancelled) return null
+
+      const messages = this.buildHistory(request, settings)
+      const instruction: LLMMessage = { role: 'user', content: compactionPrompt() }
+
+      // The chat may already be past the window: shorten old tool results, then
+      // leave out the oldest messages until the request fits.
+      fitToolResultsToContext(messages, [], contextLength)
+      const omitted = dropOldestToFit(messages, [instruction], contextLength)
+      if (omitted > 0) {
+        instruction.content = `${instruction.content as string}\n\n(The ${omitted} oldest messages were left out to fit the context window; the summary at the top covers what came before them, if there is one.)`
+      }
+      messages.push(instruction)
+
       let text = ''
       const outcome = await new Promise<{ error: string } | null>((resolve) => {
         stream.handle = provider.sendStreaming({

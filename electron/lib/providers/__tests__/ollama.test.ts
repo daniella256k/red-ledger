@@ -40,6 +40,33 @@ describe('OllamaProvider', () => {
     expect(body.options).not.toHaveProperty('temperature')
   })
 
+  it('keeps characters whole when their bytes are split across network chunks', async () => {
+    const bytes = Buffer.from(
+      `${JSON.stringify({ message: { content: 'Café \u{1F600}' } })}\n${JSON.stringify({ done: true })}\n`,
+      'utf-8'
+    )
+    const emoji = bytes.indexOf(0xf0)
+    const bounds = [0, bytes.indexOf(0xc3) + 1, emoji + 1, emoji + 3, bytes.length]
+    const pieces = bounds.slice(1).map((end, i) => bytes.subarray(bounds[i], end))
+    vi.spyOn(axios, 'post').mockResolvedValue({ data: Readable.from(pieces) })
+    const chunks: StreamChunk[] = []
+
+    await new Promise<void>((resolve) => {
+      new OllamaProvider('', 'http://ollama').sendStreaming({
+        messages: [{ role: 'user', content: 'hi' }],
+        model: 'llama',
+        tools: [],
+        onChunk: (chunk) => {
+          if (chunk.type === 'reasoning_echo') return
+          chunks.push(chunk)
+          if (chunk.type === 'done') resolve()
+        }
+      })
+    })
+
+    expect(chunks).toContainEqual({ type: 'text', content: 'Café \u{1F600}' })
+  })
+
   it('gives each tool call its own ID, even for the same tool', async () => {
     const { chunks } = await stream([
       {

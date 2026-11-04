@@ -82,6 +82,49 @@ describe('SSE parsing', () => {
 
     expect(chunks).toContainEqual({ type: 'text', content: 'Hi' })
   })
+
+  it('keeps characters whole when their bytes are split across network chunks', async () => {
+    const event = { choices: [{ delta: { content: 'Café — \u{1F600}' }, finish_reason: 'stop' }] }
+    const bytes = Buffer.from(`data: ${JSON.stringify(event)}\n\ndata: [DONE]\n\n`, 'utf-8')
+    // Split inside each multi-byte character (é is 2 bytes, the dash 3, the emoji 4).
+    const bounds = [0, bytes.indexOf(0xc3) + 1, bytes.indexOf(0xe2) + 1, bytes.indexOf(0xf0) + 2, bytes.length]
+    const pieces = bounds.slice(1).map((end, i) => bytes.subarray(bounds[i], end))
+    vi.spyOn(axios, 'post').mockResolvedValue({ data: Readable.from(pieces) })
+    const chunks: ProviderChunk[] = []
+
+    await new Promise<void>((resolve) => {
+      new OpenAIProvider('key', 'https://api.example/v1').sendStreaming({
+        messages: [{ role: 'user', content: 'hi' }],
+        model: 'model',
+        tools: [],
+        onChunk: (chunk) => {
+          chunks.push(chunk)
+          if (chunk.type === 'done') resolve()
+        }
+      })
+    })
+
+    expect(chunks).toContainEqual({ type: 'text', content: 'Café — \u{1F600}' })
+  })
+
+  it('gives tool calls sent without an id a different id every round', async () => {
+    const idless = {
+      choices: [{
+        delta: { tool_calls: [{ index: 0, function: { name: 'read_file', arguments: '{"path":"a.md"}' } }] },
+        finish_reason: 'tool_calls'
+      }]
+    }
+    const ids: string[] = []
+    for (let round = 0; round < 2; round++) {
+      vi.restoreAllMocks()
+      const { chunks } = await stream(new OpenAIProvider('key', 'https://api.example/v1'), [idless])
+      for (const chunk of chunks) if (chunk.type === 'tool_call' && chunk.toolCall) ids.push(chunk.toolCall.id)
+    }
+
+    expect(ids).toHaveLength(2)
+    expect(ids[0]).not.toBe(ids[1])
+    expect(ids.every((id) => id.startsWith('call_'))).toBe(true)
+  })
 })
 
 describe('reasoning echo', () => {

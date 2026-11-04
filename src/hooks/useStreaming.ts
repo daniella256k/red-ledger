@@ -134,7 +134,10 @@ function recordContextUsage(conversationId: string, usage: ContextUsage): void {
  * Streaming content updates are throttled to avoid excessive re-renders.
  */
 export function useStreaming() {
-  const [isStreaming, setIsStreaming] = useState(false)
+  // The chat a reply (or compaction) is running in. Only one runs at a time,
+  // and its Stop button shows in that chat only.
+  const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null)
+  const isStreaming = streamingConversationId !== null
   const [isReceivingThinking, setIsReceivingThinking] = useState(false)
   const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
 
@@ -329,7 +332,7 @@ export function useStreaming() {
       setStreamingMessageId(null)
     }
 
-    setIsStreaming(false)
+    setStreamingConversationId(null)
     clearThinkingActivity()
     contentRef.current = ''
     thinkingRef.current = ''
@@ -352,7 +355,7 @@ export function useStreaming() {
     if (!conversationId || !currentSettings) return
     const workspacePath = useUIStore.getState().workspacePath
 
-    setIsStreaming(true)
+    setStreamingConversationId(conversationId)
     clearThinkingActivity()
     contentRef.current = ''
     thinkingRef.current = ''
@@ -556,7 +559,7 @@ export function useStreaming() {
             cleanup()
             void finalizeTempMessage(tempId, conversationId)
 
-            setIsStreaming(false)
+            setStreamingConversationId(null)
             contentRef.current = ''
             thinkingRef.current = ''
             toolCallsRef.current = []
@@ -583,7 +586,7 @@ export function useStreaming() {
         tempConversationIdRef.current = null
         setStreamingMessageId(null)
       }
-      setIsStreaming(false)
+      setStreamingConversationId(null)
       clearThinkingActivity()
       contentRef.current = ''
       thinkingRef.current = ''
@@ -679,7 +682,7 @@ export function useStreaming() {
     const currentSettings = useSettingsStore.getState().settings
     if (!conversationId || !conversation || !currentSettings) return
 
-    setIsStreaming(true)
+    setStreamingConversationId(conversationId)
     setIsCompacting(true)
     try {
       const conversationMessages = await window.redLedger.listMessages(conversationId)
@@ -720,12 +723,13 @@ export function useStreaming() {
     } finally {
       compactCancelRef.current = null
       setIsCompacting(false)
-      setIsStreaming(false)
+      setStreamingConversationId(null)
     }
   }, [isStreaming])
 
   return {
     isStreaming,
+    streamingConversationId,
     isCompacting,
     compact,
     isReceivingThinking,

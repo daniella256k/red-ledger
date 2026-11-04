@@ -569,6 +569,69 @@ describe('LlmService cancellation', () => {
     expect(chunks[chunks.length - 1].type).toBe('done')
   })
 
+  it('stops when cancelled while the context window is still being looked up', async () => {
+    let requests = 0
+    let releaseLookup: (value: number | null) => void = () => {}
+    class SlowLookupProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        requests += 1
+        queueMicrotask(() => options.onChunk({ type: 'done' }))
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+      override getContextLength() {
+        return new Promise<number | null>((resolve) => { releaseLookup = resolve })
+      }
+    }
+    registerProvider({ name: 'openai', displayName: 'Slow', defaultBaseUrl: '', factory: () => new SlowLookupProvider('', '') })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    const chunks: StreamChunk[] = []
+    const turn = service.orchestrateStream(
+      { conversationId: 'c1', model: 'slow-lookup', provider: 'openai', messages: [{ role: 'user', content: 'hi', timestamp: 't' }] },
+      'stream-early-stop',
+      { send: (chunk) => chunks.push(chunk) },
+      async (tc) => tc
+    )
+    service.cancelStream('stream-early-stop')
+    releaseLookup(8192)
+    await turn
+
+    expect(requests).toBe(0)
+    expect(chunks).toEqual([{ type: 'done' }])
+  })
+
+  it('returns no summary when compaction is cancelled during the context window lookup', async () => {
+    let requests = 0
+    let releaseLookup: (value: number | null) => void = () => {}
+    class SlowLookupProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        requests += 1
+        queueMicrotask(() => {
+          options.onChunk({ type: 'text', content: 'Summary' })
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+      override getContextLength() {
+        return new Promise<number | null>((resolve) => { releaseLookup = resolve })
+      }
+    }
+    registerProvider({ name: 'openai', displayName: 'Slow', defaultBaseUrl: '', factory: () => new SlowLookupProvider('', '') })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    const result = service.compactConversation(
+      { conversationId: 'c1', model: 'slow-compact', provider: 'openai', messages: [{ role: 'user', content: 'hi', timestamp: 't' }] },
+      'compact-early-stop'
+    )
+    service.cancelStream('compact-early-stop')
+    releaseLookup(8192)
+
+    expect(await result).toBeNull()
+    expect(requests).toBe(0)
+  })
+
   it('ignores a cancel for a channel that is not streaming', () => {
     expect(() => createService().cancelStream('unknown')).not.toThrow()
   })
