@@ -69,6 +69,8 @@ export async function extractDocumentText(filePath: string): Promise<string | nu
   try {
     return await extractor(filePath)
   } catch (err) {
+    // The short reason goes to the model and the user; the full error to the log.
+    console.warn(`[DocumentTextService] Could not extract ${extension} text:`, err)
     throw new DocumentExtractionError(describeFailure(err))
   }
 }

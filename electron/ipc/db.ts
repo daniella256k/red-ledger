@@ -69,11 +69,6 @@ export function registerDbHandlers(
     return service.listMessages(conversationId)
   })
 
-  handleIpc('db:createMessage', (_e, data) => {
-    assertObject(data, 'data')
-    return service.createMessage(data)
-  })
-
   handleIpc('db:selectBranch', (_e, conversationId, messageId, options) => {
     assertString(conversationId, 'conversationId')
     assertString(messageId, 'messageId')

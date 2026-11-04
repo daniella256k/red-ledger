@@ -2,15 +2,17 @@
  * Central IPC contract — single source of truth for all IPC channels.
  *
  * Both the main-process handlers and the preload API derive from these types.
+ * The page gets only what it uses: file and message writes, and web
+ * searches, happen in the main process (tools and turns), never from the page.
  * Events the main process sends on its own (turn:event, mcp:status,
  * menu:action) don't fit invoke/handle; their payloads are typed in src/types.
  */
 import type {
-  Conversation, Message, Settings, FileNode, SearchResult,
+  Conversation, Message, Settings, FileNode,
   Attachment, AttachmentParseResult, ContextProfile,
   McpServerStatus, McpSignInResult,
   StorageOverview, ChatStorageInfo, StoredImageInfo, RemoveImageResult, CompactResult,
-  CreateMessageInput, SelectBranchOptions, FileUndoResult,
+  SelectBranchOptions, FileUndoResult,
   TurnStartRequest, CompactStartResult, LiveTurn
 } from '../../src/types'
 
@@ -34,8 +36,6 @@ export interface ContextProfileState {
   activeProfileId: string
 }
 
-export type CreateMessageData = CreateMessageInput
-
 export interface ConfirmDialogOptions {
   title: string
   message: string
@@ -56,14 +56,12 @@ export interface IpcContract {
 
   // Messages
   'db:listMessages':            { params: [conversationId: string];                    result: Message[] }
-  'db:createMessage':           { params: [data: CreateMessageData];                   result: Message }
   'db:selectBranch':            { params: [conversationId: string, messageId: string, options?: SelectBranchOptions]; result: Message[] }
   'db:deleteMessageBranch':     { params: [conversationId: string, messageId: string]; result: Message[] }
 
   // Workspace & Files
   'fs:selectWorkspace':         { params: [];                                          result: string | null }
   'fs:readFile':                { params: [relativePath: string];                      result: string }
-  'fs:writeFile':               { params: [relativePath: string, content: string, append?: boolean]; result: void }
   'fs:listFiles':               { params: [relativePath?: string];                     result: FileNode[] }
   'fs:showInFolder':            { params: [relativePath: string];                      result: void }
 
@@ -81,9 +79,6 @@ export interface IpcContract {
   'settings:load':              { params: [];                                          result: Settings }
   'settings:save':              { params: [settings: Settings];                        result: void }
   'settings:keyStorage':        { params: [];                                          result: 'encrypted' | 'plain' }
-
-  // Search
-  'search:web':                 { params: [query: string, numResults?: number];        result: SearchResult[] }
 
   // MCP connections
   'mcp:getStatus':              { params: [];                                          result: McpServerStatus[] }

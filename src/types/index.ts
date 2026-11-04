@@ -29,6 +29,8 @@ export interface Settings {
   searchToolsEnabled: boolean
   /** Hides every tool that reaches the network (web/wiki/url tools, HTTP MCP servers). */
   offlineMode: boolean
+  /** Compacts a chat by itself once a reply fills AUTO_COMPACT_RATIO of the model's context window. */
+  autoCompact: boolean
   lastWorkspacePath: string | null
   providerSectionExpanded: boolean
   searchSectionExpanded: boolean
@@ -542,7 +544,6 @@ export interface RedLedgerAPI {
   // Workspace & File Operations
   selectWorkspace(): Promise<string | null>
   readFile(relativePath: string): Promise<string>
-  writeFile(relativePath: string, content: string, append?: boolean): Promise<void>
   listFiles(relativePath?: string): Promise<FileNode[]>
   showInFolder(relativePath: string): Promise<void>
 
@@ -567,7 +568,6 @@ export interface RedLedgerAPI {
 
   // Messages (listMessages returns the branch on screen, first message first)
   listMessages(conversationId: string): Promise<Message[]>
-  createMessage(data: CreateMessageInput): Promise<Message>
   /** Shows the branch through this message: its newest reply chain, or exactly up to it. */
   selectBranch(conversationId: string, messageId: string, options?: SelectBranchOptions): Promise<Message[]>
   /** Deletes a message and everything after it on any branch; returns the branch now on screen. */
@@ -600,9 +600,6 @@ export interface RedLedgerAPI {
   saveSettings(settings: Settings): Promise<void>
   /** Whether API keys are saved encrypted (OS keychain) or as plain text. */
   getKeyStorage(): Promise<'encrypted' | 'plain'>
-
-  // Search
-  webSearch(query: string, numResults?: number): Promise<SearchResult[]>
 
   // MCP Connections
   getMcpStatus(): Promise<McpServerStatus[]>

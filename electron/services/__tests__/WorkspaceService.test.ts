@@ -27,6 +27,7 @@ const BASE_SETTINGS: Settings = {
   orgSite: '',
   searchToolsEnabled: true,
   offlineMode: false,
+  autoCompact: true,
   lastWorkspacePath: null,
   providerSectionExpanded: true,
   searchSectionExpanded: true,

@@ -1,6 +1,6 @@
 import { dialog, shell, BrowserWindow } from 'electron'
 import { handleIpc } from './typedIpc'
-import { assertString, assertOptionalString, assertOptionalBoolean } from './validate'
+import { assertString, assertOptionalString } from './validate'
 import { WorkspaceService, type DialogAdapter } from '../services/WorkspaceService'
 import type { Settings } from '../../src/types'
 
@@ -56,14 +56,6 @@ export function registerFsHandlers(getSettings: () => Settings): void {
   handleIpc('fs:readFile', async (_event, relativePath) => {
     assertString(relativePath, 'relativePath')
     return service.readFile(null, relativePath)
-  })
-
-  handleIpc('fs:writeFile', async (event, relativePath, content, append) => {
-    assertString(relativePath, 'relativePath')
-    assertString(content, 'content')
-    assertOptionalBoolean(append, 'append')
-    const win = BrowserWindow.fromWebContents(event.sender) || null
-    return service.writeFile(dialogForWindow(win), relativePath, content, append ?? false)
   })
 
   handleIpc('fs:listFiles', (_e, relativePath) => {

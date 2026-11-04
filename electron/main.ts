@@ -1,12 +1,16 @@
-import { app, BrowserWindow, dialog, Menu, protocol, screen, shell } from 'electron'
+import { app, BrowserWindow, dialog, Menu, protocol, screen, shell, utilityProcess } from 'electron'
+import { Worker } from 'node:worker_threads'
 import type { MenuItemConstructorOptions } from 'electron'
 import { dirname, join } from 'path'
 import { readFileSync } from 'fs'
 import { COMMON_TEXT_EXTENSIONS, IMAGE_MIME_BY_EXTENSION } from './services/AttachmentService'
-import { runInBackground, stopBackgroundWorkers, useWorkerThreads } from './workers/background'
-// Bundled as its own file by electron-vite; workspace searches and document
-// parsing run there instead of on this thread.
-import createTaskWorker from './workers/taskWorker?nodeWorker'
+import {
+  channelFromWorker,
+  runInBackground,
+  stopBackgroundWorkers,
+  useBackgroundRunners,
+  type TaskChannel
+} from './workers/background'
 import { EXTRACTED_DOCUMENT_EXTENSIONS } from './services/DocumentTextService'
 import { APP_NAME } from '../src/lib/appInfo'
 import { resolveSettingsPath, resolveDbPath } from './services/SettingsService'
@@ -16,7 +20,7 @@ import { registerSettingsHandlers, getCurrentSettings } from './ipc/settings'
 import { registerFsHandlers, getWorkspaceService } from './ipc/fs'
 import { registerLlmHandlers } from './ipc/llm'
 import { cancelAllTurns, cancelConversationTurn, registerTurnHandlers, shutdownTurns } from './ipc/turns'
-import { registerSearchHandlers } from './ipc/search'
+import { initSearchService } from './ipc/search'
 import { registerMcpHandlers, getMcpService } from './ipc/mcp'
 import { registerTransferHandlers } from './ipc/transfer'
 import { registerStorageHandlers } from './ipc/storage'
@@ -418,7 +422,7 @@ function registerIpcHandlers(): void {
   registerContextHandlers(getContextDir(), getBundledContextDir())
 
   // 5. Search (needs settings for API keys)
-  registerSearchHandlers(getCurrentSettings)
+  initSearchService(getCurrentSettings)
 
   // 6. MCP connections (registers each server's tools in the tool registry)
   // Sign-in tokens live next to settings.json (so portable mode keeps them together).
@@ -537,6 +541,43 @@ function registerIpcHandlers(): void {
   })
 }
 
+// ─── Background tasks ────────────────────────────────────────────────────────
+
+/**
+ * The background tasks' entry, built beside this file (a second entry in
+ * electron.vite.config.ts), run as a worker thread for searches and as a
+ * utility process for documents.
+ */
+const taskWorkerPath = join(__dirname, 'taskWorker.js')
+
+/**
+ * The documents lane's runner: a utility process (see workers/background.ts
+ * for why not a thread). Messages wait until the process has started.
+ */
+function documentProcessChannel(): TaskChannel {
+  const child = utilityProcess.fork(taskWorkerPath, [], { serviceName: `${APP_NAME} documents`, stdio: 'pipe' })
+  // Its logs (e.g. why a file couldn't be read) go to the app's own log.
+  child.stdout?.on('data', (data: Buffer) => process.stdout.write(`[documents] ${data}`))
+  child.stderr?.on('data', (data: Buffer) => process.stderr.write(`[documents] ${data}`))
+  let started = false
+  const queued: unknown[] = []
+  child.once('spawn', () => {
+    started = true
+    for (const message of queued.splice(0)) child.postMessage(message)
+  })
+  return {
+    post: (message) => {
+      if (started) child.postMessage(message)
+      else queued.push(message)
+    },
+    onMessage: (listener) => { child.on('message', listener) },
+    onExit: (listener) => {
+      child.once('exit', (code) => listener(new Error(`The document process stopped unexpectedly (exit code ${code}).`)))
+    },
+    stop: () => { child.kill() }
+  }
+}
+
 // ─── App Lifecycle ───────────────────────────────────────────────────────────
 
 /**
@@ -556,7 +597,10 @@ function registerAttachmentProtocol(): void {
 
 app.whenReady().then(() => {
   if (!gotLock) return
-  useWorkerThreads(createTaskWorker)
+  useBackgroundRunners({
+    search: () => channelFromWorker(new Worker(taskWorkerPath, { name: 'red-ledger-search' })),
+    documents: documentProcessChannel
+  })
   try {
     registerIpcHandlers()
   } catch (err) {

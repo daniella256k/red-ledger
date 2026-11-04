@@ -59,6 +59,7 @@ const DEFAULT_SETTINGS: Settings = {
   orgSite: '',
   searchToolsEnabled: true,
   offlineMode: false,
+  autoCompact: true,
   lastWorkspacePath: null,
   providerSectionExpanded: true,
   searchSectionExpanded: true,
@@ -482,6 +483,7 @@ export function sanitizeSettings(settings: Partial<Settings> | undefined): Setti
       ? s.searchToolsEnabled
       : DEFAULT_SETTINGS.searchToolsEnabled,
     offlineMode: typeof s.offlineMode === 'boolean' ? s.offlineMode : DEFAULT_SETTINGS.offlineMode,
+    autoCompact: typeof s.autoCompact === 'boolean' ? s.autoCompact : DEFAULT_SETTINGS.autoCompact,
     lastWorkspacePath: typeof s.lastWorkspacePath === 'string'
       ? s.lastWorkspacePath
       : null,

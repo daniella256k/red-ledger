@@ -1,5 +1,5 @@
 import { create } from 'zustand'
-import type { Attachment, Conversation, CreateMessageInput, Message, SelectBranchOptions } from '@/types'
+import type { Attachment, Conversation, Message, SelectBranchOptions } from '@/types'
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
 import { useContextProfileStore } from './contextProfileStore'
@@ -50,7 +50,6 @@ interface ConversationState {
   setConversationProfile: (id: string, profileId: string) => Promise<void>
   setActiveConversation: (id: string | null) => Promise<void>
   loadMessages: (conversationId: string) => Promise<void>
-  addMessage: (data: CreateMessageInput) => Promise<Message>
   touchConversation: (id: string, updatedAt?: number) => void
   /** Shows another version of a message (see RedLedgerAPI.selectBranch). */
   selectBranch: (messageId: string, options?: SelectBranchOptions) => Promise<void>
@@ -275,34 +274,6 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
     } catch (err) {
       set({ isLoadingMessages: false })
       notify({ type: 'error', message: formatError(err) })
-    }
-  },
-
-  addMessage: async (data) => {
-    if (!window.redLedger) throw new Error('API not available')
-    try {
-      const message = await window.redLedger.createMessage(data)
-      const updatedAt = message.createdAt
-      // A message placed under a chosen parent (an edit) starts a new branch,
-      // so the branch on screen is reloaded rather than appended to.
-      const branch = data.parentId !== undefined && get().activeConversationId === data.conversationId
-        ? await window.redLedger.listMessages(data.conversationId)
-        : null
-      set((state) => ({
-        messages: state.activeConversationId !== data.conversationId
-          ? state.messages
-          : branch ?? [...state.messages, message],
-        conversations: sortConversationsByPriority(
-          state.conversations.map((c) =>
-            c.id === data.conversationId ? { ...c, updatedAt } : c
-          )
-        )
-      }))
-
-      return message
-    } catch (err) {
-      notify({ type: 'error', message: formatError(err) })
-      throw err
     }
   },
 

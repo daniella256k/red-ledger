@@ -22,6 +22,7 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 - Per-chat info popover (model, request settings, counts) from the chat header.
 - Context meter under the message box: a small bar showing how much of the model's context window the chat's last reply used (hover for the numbers). See [Context Meter](#context-meter).
 - Compact: the Compact button left of the context meter has the model summarize the chat so far. The chat continues from the summary; earlier messages stay on screen but are no longer sent.
+- Auto-compact (Settings, Advanced; on by default): when a reply fills 95% or more of the model's context window, the chat is compacted right after it, with a notice saying so, so the next message doesn't overflow. It only runs for models whose window size is known, never after a reply you stopped or that failed, and it can be stopped like any reply.
 - Undo file changes: every reply's workspace file changes can be undone from that reply's actions (Undo file changes), which puts each file back the way it was before the reply.
 - API keys are saved encrypted with the OS keychain, or read from an environment variable when entered as `${env:NAME}`.
 
@@ -56,6 +57,7 @@ npm run build
 | --- | --- |
 | `npm run dev` | Start Electron + Vite dev mode |
 | `npm run build` | Production build |
+| `npm run check:build` | Checks the build in `out/`: every bundle parses, and background tasks run (CI runs it after every build) |
 | `npm run preview` | Preview production build |
 | `npm run typecheck` | TypeScript checks |
 | `npm run lint` | ESLint |
@@ -125,7 +127,7 @@ A reply's file changes can be undone from the reply (see File history under [Dat
 
 Tools self-register via the tool registry. Strict mode shows a native confirmation dialog before each operation. Tool errors are caught and returned in the result so the LLM can self-correct without crashing the stream. Pressing Stop ends the whole turn: no further tool calls or model requests run, even if it is pressed while a tool is working.
 
-Heavy work runs in background worker threads, not the main process: workspace searches (`grep_files`), pulling text out of PDFs, Word files and spreadsheets (for `read_file` and attachments), and paging through text files too large to load whole. A big search or a slow PDF doesn't hold up other chats or the window. A task that runs too long (1 minute for a search, 3 for documents) is stopped.
+Heavy work runs in the background, not the main process: workspace searches (`grep_files`) in a worker thread, and pulling text out of PDFs, Word files and spreadsheets (for `read_file` and attachments) plus paging through text files too large to load whole in a separate utility process, so a parser that crashes on a bad file can't take the app with it. A big search or a slow PDF doesn't hold up other chats or the window. A task that runs too long (1 minute for a search, 3 for documents) is stopped.
 
 Later turns send the model its earlier tool calls with their full results, in the standard tool-message format, so it can rely on what it already fetched or read. Only if a chat would overflow a model's known context window are the oldest results shortened (with a note to the model and a notice in the chat).
 

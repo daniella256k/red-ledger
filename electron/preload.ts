@@ -45,9 +45,6 @@ const api: RedLedgerAPI = {
   readFile: (relativePath: string) =>
     ipcRenderer.invoke('fs:readFile', relativePath),
 
-  writeFile: (relativePath: string, content: string, append?: boolean) =>
-    ipcRenderer.invoke('fs:writeFile', relativePath, content, append),
-
   listFiles: (relativePath?: string) =>
     ipcRenderer.invoke('fs:listFiles', relativePath),
 
@@ -108,9 +105,6 @@ const api: RedLedgerAPI = {
   listMessages: (conversationId: string) =>
     ipcRenderer.invoke('db:listMessages', conversationId),
 
-  createMessage: (data) =>
-    ipcRenderer.invoke('db:createMessage', data),
-
 
   selectBranch: (conversationId: string, messageId: string, options) =>
     ipcRenderer.invoke('db:selectBranch', conversationId, messageId, options),
@@ -163,11 +157,6 @@ const api: RedLedgerAPI = {
 
   getKeyStorage: () =>
     ipcRenderer.invoke('settings:keyStorage'),
-
-  // ─── Search ──────────────────────────────────────────────────────────────
-
-  webSearch: (query: string, numResults?: number) =>
-    ipcRenderer.invoke('search:web', query, numResults),
 
   // ─── MCP Connections ─────────────────────────────────────────────────────
 

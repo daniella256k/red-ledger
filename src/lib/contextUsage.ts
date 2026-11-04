@@ -3,6 +3,13 @@ import type { CacheUsage, ContextUsage } from '@/types'
 /** Share of the context window at which the meter turns red. */
 export const CONTEXT_WARNING_RATIO = 0.8
 
+/**
+ * Share of the context window a reply may fill before the chat is compacted
+ * by itself (Settings, Auto-compact). High enough that it only happens when
+ * the next reply would likely not fit, so a chat is never summarized early.
+ */
+export const AUTO_COMPACT_RATIO = 0.95
+
 /** Compact token count: 950, 12.4k, 128k, 1.05M. */
 export function formatTokenCount(tokens: number): string {
   if (tokens < 1000) return String(Math.round(tokens))

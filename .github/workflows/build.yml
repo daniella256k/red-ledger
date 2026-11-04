@@ -23,7 +23,7 @@ concurrency:
 # Dependabot (.github/dependabot.yml) proposes updates to these pins.
 jobs:
   check:
-    name: Lint, typecheck, test
+    name: Lint, typecheck, test, build
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -50,6 +50,14 @@ jobs:
 
       - name: Test
         run: npm test
+
+      # Builds the app and checks the bundles themselves: each must parse, and
+      # the background worker must start and run tasks (see scripts/check-build.mjs).
+      - name: Build app
+        run: npm run build
+
+      - name: Check build output
+        run: npm run check:build
 
   package:
     name: Package (${{ matrix.platform }})
@@ -100,6 +108,10 @@ jobs:
 
       - name: Build app
         run: npm run build
+
+      # The same bundle check, on each platform's own build.
+      - name: Check build output
+        run: npm run check:build
 
       - name: Package
         run: npx electron-builder ${{ matrix.builder-args }} --publish never

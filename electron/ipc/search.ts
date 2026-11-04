@@ -1,11 +1,9 @@
-import { handleIpc } from './typedIpc'
-import { assertString, assertOptionalNumber } from './validate'
 import { SearchService } from '../services/SearchService'
 import type { Settings } from '../../src/types'
 
 /**
- * Thin IPC adapter for web search.
- * All business logic lives in SearchService.
+ * The web search service the search and fetch tools use. The page has no
+ * search channel of its own: searches run only as the assistant's tool calls.
  */
 
 let service: SearchService
@@ -17,12 +15,6 @@ export function getSearchService(): SearchService {
   return service
 }
 
-export function registerSearchHandlers(getSettings: () => Settings): void {
+export function initSearchService(getSettings: () => Settings): void {
   service = new SearchService(getSettings)
-
-  handleIpc('search:web', async (_e, query, numResults) => {
-    assertString(query, 'query')
-    assertOptionalNumber(numResults, 'numResults')
-    return (await service.search(query, numResults)).results
-  })
 }

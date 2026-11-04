@@ -10,7 +10,12 @@ export default defineConfig({
     build: {
       outDir: 'out/main',
       lib: {
-        entry: resolve('electron/main.ts')
+        entry: {
+          main: resolve('electron/main.ts'),
+          // Background tasks' entry (out/main/taskWorker.js), run as a worker
+          // thread and as a utility process; see electron/workers/background.ts.
+          taskWorker: resolve('electron/workers/taskWorker.ts')
+        }
       },
       rolldownOptions: {
         external: ['better-sqlite3']

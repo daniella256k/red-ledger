@@ -5,6 +5,7 @@ import type { LlmService } from './LlmService'
 import { parseStoredToolCalls } from '../../src/lib/storedToolCalls'
 import { THINKING_BLOCK_SEPARATOR } from '../../src/lib/thinking'
 import { DEFAULT_CHAT_TITLE, sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
+import { AUTO_COMPACT_RATIO, contextRatio } from '../../src/lib/contextUsage'
 import type {
   CompactStartResult,
   ContextUsage,
@@ -62,6 +63,11 @@ interface RunningTurn {
   lastChunk: StreamChunk['type'] | null
   /** Tool calls changed since the last update sent. */
   toolCallsChanged: boolean
+  /**
+   * The context the reply's final request used. LlmService sends it only for
+   * a reply that finished normally (not stopped, not failed).
+   */
+  usage: ContextUsage | null
   updateTimer: ReturnType<typeof setTimeout> | null
   persistTimer: ReturnType<typeof setTimeout> | null
   /** Settles once the turn is over and saved. */
@@ -85,6 +91,12 @@ export function toRequestMessages(messages: Message[]): LLMRequest['messages'] {
 
 function errorMessage(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
+}
+
+/** Ends with a period, so another sentence can follow it. */
+function asSentence(text: string): string {
+  const trimmed = text.trim()
+  return /[.!?]$/.test(trimmed) ? trimmed : `${trimmed}.`
 }
 
 /**
@@ -218,7 +230,7 @@ export class TurnService {
    * summary is added as a 'system' message that stands in for everything
    * before it (see LlmService.buildHistory).
    */
-  compact(conversationId: string): CompactStartResult {
+  compact(conversationId: string, options: { auto?: { usedShare: number } } = {}): CompactStartResult {
     this.assertCanStart(conversationId)
     const { conversations, getSettings } = this.deps
 
@@ -240,7 +252,10 @@ export class TurnService {
     }
 
     const turn = this.register(conversationId, 'compact', null)
-    turn.done = this.runCompaction(turn, request)
+    if (options.auto) {
+      this.notice(turn, 'info', `This chat used ${Math.round(options.auto.usedShare * 100)}% of the model's context window, so it is being compacted: the model is summarizing it to continue from.`)
+    }
+    turn.done = this.runCompaction(turn, request, options.auto !== undefined)
     return 'started'
   }
 
@@ -292,6 +307,7 @@ export class TurnService {
       },
       lastChunk: null,
       toolCallsChanged: false,
+      usage: null,
       updateTimer: null,
       persistTimer: null,
       done: Promise.resolve()
@@ -316,17 +332,21 @@ export class TurnService {
     }
   }
 
-  private async runCompaction(turn: RunningTurn, request: LLMRequest): Promise<void> {
+  private async runCompaction(turn: RunningTurn, request: LLMRequest, auto = false): Promise<void> {
     const { conversationId } = turn.live
     try {
       const result = await this.deps.llm.compactConversation(request, turn.live.turnId)
       if (result && !this.closed && this.deps.conversations.getConversation(conversationId)) {
         this.deps.conversations.createMessage({ conversationId, role: 'system', content: result.summary })
         this.recordUsage(conversationId, result.usage)
-        this.notice(turn, 'success', 'Chat compacted. It continues from the summary of the earlier messages.')
+        this.notice(turn, 'success', auto
+          ? 'Chat compacted automatically. Replies from now on see the summary in place of the earlier messages.'
+          : 'Chat compacted. It continues from the summary of the earlier messages.')
       }
     } catch (err) {
-      this.notice(turn, 'error', `Could not compact the chat: ${errorMessage(err)}`)
+      this.notice(turn, 'error', auto
+        ? `Could not compact the chat automatically: ${asSentence(errorMessage(err))} Compact under the message box tries again.`
+        : `Could not compact the chat: ${errorMessage(err)}`)
     } finally {
       this.turns.delete(conversationId)
       this.emitConversation(conversationId)
@@ -385,7 +405,10 @@ export class TurnService {
         break
 
       case 'usage':
-        if (chunk.usage) this.recordUsage(live.conversationId, chunk.usage)
+        if (chunk.usage) {
+          turn.usage = chunk.usage
+          this.recordUsage(live.conversationId, chunk.usage)
+        }
         break
 
       case 'error':
@@ -488,6 +511,31 @@ export class TurnService {
     this.turns.delete(conversationId)
     this.emitConversation(conversationId)
     this.deps.emit({ type: 'finished', turnId: turn.live.turnId, conversationId, kind: 'reply' })
+    this.maybeAutoCompact(conversationId, turn.usage)
+  }
+
+  /**
+   * Auto-compact (Settings): a reply that finished normally and filled
+   * AUTO_COMPACT_RATIO or more of a known context window is followed at once
+   * by a compaction, so the next message starts from a summary instead of
+   * overflowing. It runs as its own turn (shown, and stoppable, like Compact).
+   * Nothing happens when the window is unknown, the reply was stopped or
+   * failed (no usage), or the setting is off.
+   */
+  private maybeAutoCompact(conversationId: string, usage: ContextUsage | null): void {
+    if (this.closed || !usage || !this.deps.getSettings().autoCompact) return
+    const usedShare = contextRatio(usage)
+    if (usedShare === null || usedShare < AUTO_COMPACT_RATIO) return
+    try {
+      this.compact(conversationId, { auto: { usedShare } })
+    } catch (err) {
+      this.deps.emit({
+        type: 'notice',
+        conversationId,
+        level: 'warning',
+        message: `This chat is nearly full, but it could not be compacted automatically: ${errorMessage(err)}`
+      })
+    }
   }
 
   // ─── Chat record ──────────────────────────────────────────────────────────

@@ -331,3 +331,78 @@ describe('TurnService compaction', () => {
     expect(conversations.listMessages(chat.id).map((m) => m.role)).toEqual(['user', 'assistant'])
   })
 })
+
+describe('TurnService auto-compaction', () => {
+  const summary = { summary: 'Summary of the long chat.', usage: { promptTokens: 900, completionTokens: 0, contextLength: 10_000, estimated: true } }
+
+  /** A chat whose reply reports this much context use, with a summary ready to hand back. */
+  function fullChat(used: { promptTokens: number; contextLength: number | null }) {
+    const env = setup()
+    const chat = env.conversations.createConversation({})
+    env.llm.compactions.push(summary)
+    env.llm.scripts.set(chat.id, async ({ sink }) => {
+      sink.send({ type: 'text', content: 'A long answer.' })
+      sink.send({ type: 'usage', usage: { promptTokens: used.promptTokens, completionTokens: 100, contextLength: used.contextLength, estimated: false } })
+    })
+    return { ...env, chat }
+  }
+
+  /** Waits for the reply, then for whatever turn followed it. */
+  async function settle(turns: TurnService, conversationId: string) {
+    await turns.whenIdle(conversationId)
+    await turns.whenIdle(conversationId)
+  }
+
+  it('compacts right after a reply that fills 95% or more of the window', async () => {
+    const { conversations, events, turns, chat } = fullChat({ promptTokens: 9_500, contextLength: 10_000 })
+
+    turns.start({ conversationId: chat.id, kind: 'send', content: 'Keep going' })
+    await settle(turns, chat.id)
+
+    expect(conversations.listMessages(chat.id).map((m) => [m.role, m.content])).toEqual([
+      ['user', 'Keep going'],
+      ['assistant', 'A long answer.'],
+      ['system', 'Summary of the long chat.']
+    ])
+    const kinds = events.flatMap((e) => (e.type === 'started' ? [e.turn.kind] : []))
+    expect(kinds).toEqual(['reply', 'compact'])
+    expect(events).toContainEqual(expect.objectContaining({ type: 'notice', level: 'info', message: expect.stringContaining('96%') }))
+    expect(events).toContainEqual(expect.objectContaining({ type: 'notice', level: 'success', message: expect.stringContaining('automatically') }))
+    // The meter then shows the smaller context the chat continues from.
+    expect(conversations.getConversation(chat.id)?.lastRequest?.usage?.promptTokens).toBe(900)
+  })
+
+  it('leaves a chat below the threshold alone', async () => {
+    const { conversations, turns, chat } = fullChat({ promptTokens: 8_900, contextLength: 10_000 })
+
+    turns.start({ conversationId: chat.id, kind: 'send', content: 'Hi' })
+    await settle(turns, chat.id)
+
+    expect(conversations.listMessages(chat.id).map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('does nothing when the setting is off or the window is unknown', async () => {
+    const off = fullChat({ promptTokens: 9_900, contextLength: 10_000 })
+    off.settings.autoCompact = false
+    off.turns.start({ conversationId: off.chat.id, kind: 'send', content: 'Hi' })
+    await settle(off.turns, off.chat.id)
+    expect(off.conversations.listMessages(off.chat.id).map((m) => m.role)).toEqual(['user', 'assistant'])
+
+    const unknown = fullChat({ promptTokens: 1_000_000, contextLength: null })
+    unknown.turns.start({ conversationId: unknown.chat.id, kind: 'send', content: 'Hi' })
+    await settle(unknown.turns, unknown.chat.id)
+    expect(unknown.conversations.listMessages(unknown.chat.id).map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('does not compact after a reply that was stopped', async () => {
+    const { conversations, llm, turns, chat } = fullChat({ promptTokens: 9_900, contextLength: 10_000 })
+    // A stopped reply gets no usage report from LlmService.
+    llm.scripts.set(chat.id, async ({ sink, stopped }) => { sink.send({ type: 'text', content: 'partial' }); await stopped })
+
+    turns.start({ conversationId: chat.id, kind: 'send', content: 'Hi' })
+    turns.cancel(chat.id)
+    await settle(turns, chat.id)
+
+    expect(conversations.listMessages(chat.id).map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+})
