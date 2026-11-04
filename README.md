@@ -22,7 +22,7 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 - Per-chat info popover (model, request settings, counts) from the chat header.
 - Context meter under the message box: a small bar showing how much of the model's context window the chat's last reply used (hover for the numbers). See [Context Meter](#context-meter).
 - Compact: the Compact button left of the context meter has the model summarize the chat so far. The chat continues from the summary; earlier messages stay on screen but are no longer sent.
-- Auto-compact (Settings, Advanced; on by default): when a reply fills 95% or more of the model's context window, the chat is compacted right after it, with a notice saying so, so the next message doesn't overflow. It only runs for models whose window size is known, never after a reply you stopped or that failed, and it can be stopped like any reply.
+- Auto-compact (Settings, Advanced; on by default): when a reply has used 80% of the model's context window, or leaves fewer than 32k tokens free (whichever comes first; on small windows at most a quarter is kept free), the chat is compacted right after it, with a notice saying so. That's 96k of a 128k window, 205k of 256k, 800k of 1M. It always happens before old tool results start being shortened (85%), so the summary sees the whole chat. It only runs for models whose window size is known, never after a reply you stopped or that failed, and it can be stopped like any reply.
 - Undo file changes: every reply's workspace file changes can be undone from that reply's actions (Undo file changes), which puts each file back the way it was before the reply.
 - API keys are saved encrypted with the OS keychain, or read from an environment variable when entered as `${env:NAME}`.
 

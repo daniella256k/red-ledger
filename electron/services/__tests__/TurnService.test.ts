@@ -353,7 +353,7 @@ describe('TurnService auto-compaction', () => {
     await turns.whenIdle(conversationId)
   }
 
-  it('compacts right after a reply that fills 95% or more of the window', async () => {
+  it('compacts right after a reply that fills most of the window', async () => {
     const { conversations, events, turns, chat } = fullChat({ promptTokens: 9_500, contextLength: 10_000 })
 
     turns.start({ conversationId: chat.id, kind: 'send', content: 'Keep going' })
@@ -373,12 +373,27 @@ describe('TurnService auto-compaction', () => {
   })
 
   it('leaves a chat below the threshold alone', async () => {
-    const { conversations, turns, chat } = fullChat({ promptTokens: 8_900, contextLength: 10_000 })
+    // A 10k window compacts at 7.5k (its reserve is a quarter of it); this reply used 7.1k.
+    const { conversations, turns, chat } = fullChat({ promptTokens: 7_000, contextLength: 10_000 })
 
     turns.start({ conversationId: chat.id, kind: 'send', content: 'Hi' })
     await settle(turns, chat.id)
 
     expect(conversations.listMessages(chat.id).map((m) => m.role)).toEqual(['user', 'assistant'])
+  })
+
+  it('compacts at 80% of a large window, or earlier when fewer than 32k tokens are left', async () => {
+    // 128k: 32k free comes first, at 96k (75%).
+    const mid = fullChat({ promptTokens: 96_000, contextLength: 128_000 })
+    mid.turns.start({ conversationId: mid.chat.id, kind: 'send', content: 'Hi' })
+    await settle(mid.turns, mid.chat.id)
+    expect(mid.conversations.listMessages(mid.chat.id).at(-1)?.role).toBe('system')
+
+    // 1M: 80% comes first; 700k used is not yet there.
+    const large = fullChat({ promptTokens: 700_000, contextLength: 1_000_000 })
+    large.turns.start({ conversationId: large.chat.id, kind: 'send', content: 'Hi' })
+    await settle(large.turns, large.chat.id)
+    expect(large.conversations.listMessages(large.chat.id).at(-1)?.role).toBe('assistant')
   })
 
   it('does nothing when the setting is off or the window is unknown', async () => {

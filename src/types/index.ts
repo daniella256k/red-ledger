@@ -29,7 +29,7 @@ export interface Settings {
   searchToolsEnabled: boolean
   /** Hides every tool that reaches the network (web/wiki/url tools, HTTP MCP servers). */
   offlineMode: boolean
-  /** Compacts a chat by itself once a reply fills AUTO_COMPACT_RATIO of the model's context window. */
+  /** Compacts a chat by itself once a reply uses 80% of the model's context window or leaves under 32k free (autoCompactThreshold). */
   autoCompact: boolean
   lastWorkspacePath: string | null
   providerSectionExpanded: boolean

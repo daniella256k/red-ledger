@@ -1,5 +1,5 @@
 import { INLINE_LABEL_CLASS, SectionToggle, ToggleRow, type SettingsSectionProps } from './controls'
-import { AUTO_COMPACT_RATIO } from '@/lib/contextUsage'
+import { AUTO_COMPACT_FREE_TOKENS, AUTO_COMPACT_RATIO, formatTokenCount } from '@/lib/contextUsage'
 
 export function AdvancedSection({ settings, saveSettings }: SettingsSectionProps) {
   return (
@@ -77,7 +77,7 @@ export function AdvancedSection({ settings, saveSettings }: SettingsSectionProps
 
           <ToggleRow
             label="Auto-compact"
-            help={`When a reply fills ${Math.round(AUTO_COMPACT_RATIO * 100)}% of the model's context window, the chat is compacted right after: the model summarizes it and continues from the summary. Only for models whose window size is known. Compact under the message box does the same any time.`}
+            help={`When a reply uses ${Math.round(AUTO_COMPACT_RATIO * 100)}% of the model's context window, or leaves less than ${formatTokenCount(AUTO_COMPACT_FREE_TOKENS)} tokens free, the chat is compacted right after: the model summarizes it and continues from the summary. Only for models whose window size is known. Compact under the message box does the same any time.`}
             helpLabel="Auto-compact help"
             checked={settings.autoCompact}
             onChange={(checked) => saveSettings({ ...settings, autoCompact: checked })}

@@ -5,7 +5,7 @@ import type { LlmService } from './LlmService'
 import { parseStoredToolCalls } from '../../src/lib/storedToolCalls'
 import { THINKING_BLOCK_SEPARATOR } from '../../src/lib/thinking'
 import { DEFAULT_CHAT_TITLE, sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
-import { AUTO_COMPACT_RATIO, contextRatio } from '../../src/lib/contextUsage'
+import { contextRatio, shouldAutoCompact } from '../../src/lib/contextUsage'
 import type {
   CompactStartResult,
   ContextUsage,
@@ -516,7 +516,8 @@ export class TurnService {
 
   /**
    * Auto-compact (Settings): a reply that finished normally and filled
-   * AUTO_COMPACT_RATIO or more of a known context window is followed at once
+   * 80% of a known context window, or left fewer than 32k tokens free
+   * (see autoCompactThreshold), is followed at once
    * by a compaction, so the next message starts from a summary instead of
    * overflowing. It runs as its own turn (shown, and stoppable, like Compact).
    * Nothing happens when the window is unknown, the reply was stopped or
@@ -524,8 +525,8 @@ export class TurnService {
    */
   private maybeAutoCompact(conversationId: string, usage: ContextUsage | null): void {
     if (this.closed || !usage || !this.deps.getSettings().autoCompact) return
-    const usedShare = contextRatio(usage)
-    if (usedShare === null || usedShare < AUTO_COMPACT_RATIO) return
+    if (!shouldAutoCompact(usage)) return
+    const usedShare = contextRatio(usage) ?? 1
     try {
       this.compact(conversationId, { auto: { usedShare } })
     } catch (err) {

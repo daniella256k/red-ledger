@@ -4,11 +4,41 @@ import type { CacheUsage, ContextUsage } from '@/types'
 export const CONTEXT_WARNING_RATIO = 0.8
 
 /**
- * Share of the context window a reply may fill before the chat is compacted
- * by itself (Settings, Auto-compact). High enough that it only happens when
- * the next reply would likely not fit, so a chat is never summarized early.
+ * Auto-compact (Settings): a chat is compacted by itself once a reply has
+ * used AUTO_COMPACT_RATIO of the model's context window, or left fewer than
+ * AUTO_COMPACT_FREE_TOKENS free, whichever comes first. The free-token rule
+ * matters on 128k-class windows, where 20% isn't enough room for a long
+ * reply with its thinking; the share rule on large ones.
+ *
+ * Both stay below the 85% at which LlmService starts shortening old tool
+ * results (CONTEXT_FILL_LIMIT), so a chat is summarized while its whole
+ * history still fits in the summary request, instead of quietly losing old
+ * results turn by turn.
  */
-export const AUTO_COMPACT_RATIO = 0.95
+export const AUTO_COMPACT_RATIO = 0.8
+export const AUTO_COMPACT_FREE_TOKENS = 32_000
+/**
+ * On small windows (local models) 32k may be most of the window, so the
+ * reserve is at most this share of it: an 8k window compacts at 6k, not
+ * after every reply.
+ */
+const AUTO_COMPACT_MAX_RESERVE_SHARE = 0.25
+
+/**
+ * Tokens at which a chat with this context window is compacted: 80% of it,
+ * or earlier so that 32k stay free (at most a quarter of the window).
+ * Always 75-80% of the window: 96k of 128k, 205k of 256k, 800k of 1M.
+ */
+export function autoCompactThreshold(contextLength: number): number {
+  const reserve = Math.min(AUTO_COMPACT_FREE_TOKENS, contextLength * AUTO_COMPACT_MAX_RESERVE_SHARE)
+  return Math.min(contextLength * AUTO_COMPACT_RATIO, contextLength - reserve)
+}
+
+/** Whether a reply's context use calls for auto-compaction; never when the window is unknown. */
+export function shouldAutoCompact(usage: ContextUsage): boolean {
+  if (!usage.contextLength || usage.contextLength <= 0) return false
+  return contextTokensUsed(usage) >= autoCompactThreshold(usage.contextLength)
+}
 
 /** Compact token count: 950, 12.4k, 128k, 1.05M. */
 export function formatTokenCount(tokens: number): string {
