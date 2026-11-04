@@ -1,735 +1,84 @@
-import { useState, useRef, useCallback, useEffect } from 'react'
-import { resolveConversationProfile, useConversationStore, useSettingsStore, useUIStore } from '@/store'
+import { useCallback } from 'react'
+import { useConversationStore, useTurnStore } from '@/store'
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
-import { DEFAULT_CHAT_TITLE, sanitizeGeneratedChatTitle } from '@/lib/chatTitle'
-import { parseStoredToolCalls } from '@/lib/storedToolCalls'
-import { THINKING_BLOCK_SEPARATOR } from '@/lib/thinking'
-import type {
-  StreamChunk,
-  ToolCall,
-  LLMRequest,
-  Message,
-  Attachment,
-  ProviderName,
-  ConversationRequestInfo,
-  ContextUsage
-} from '@/types'
-
-const STREAM_THROTTLE_MS = 50
-/**
- * Database writes of the in-progress reply are spaced further apart than UI
- * updates: each write rewrites the whole message, and the final content is
- * saved when the stream ends anyway. This only bounds what a crash loses.
- */
-const PERSIST_THROTTLE_MS = 1000
-/** Tools that change workspace files; their results trigger a file tree reload. */
-const WORKSPACE_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'append_file', 'write_pdf', 'move_file'])
-const THINKING_ACTIVE_WINDOW_MS = 1500
-const AUTO_TITLE_PLACEHOLDER = DEFAULT_CHAT_TITLE
-const AUTO_TITLE_DELAY_MS = 500
-const AUTO_TITLE_MAX_TOKENS = 24
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms)
-  })
-}
-
-function isUntitledConversationTitle(title: string | undefined | null): boolean {
-  if (!title) return false
-  return title.trim().toLowerCase() === AUTO_TITLE_PLACEHOLDER.toLowerCase()
-}
-
-/** A prompt to save at the start of a turn. */
-interface TurnPrompt {
-  content: string
-  attachments?: Attachment[]
-  /** Set for an edit: the parent of the message being edited, so the new version sits beside it. */
-  parentId?: string | null
-}
+import type { Attachment, TurnStartRequest } from '@/types'
 
 /**
- * Save a snapshot of the request settings on the conversation so the chat
- * info popover can show what was actually sent. Best-effort: failures are
- * ignored because this is display-only metadata.
- */
-function findConversation(conversationId: string) {
-  return useConversationStore.getState().conversations
-    .find((conversation) => conversation.id === conversationId)
-}
-
-function storeLastRequest(conversationId: string, lastRequest: ConversationRequestInfo): void {
-  useConversationStore.setState((state) => ({
-    conversations: state.conversations.map((conversation) =>
-      conversation.id === conversationId
-        ? { ...conversation, lastRequest }
-        : conversation
-    )
-  }))
-}
-
-function recordRequestInfo(
-  conversationId: string,
-  info: Omit<ConversationRequestInfo, 'contextProfile' | 'usage'>
-): void {
-  void (async () => {
-    let contextProfile: string | null = null
-    try {
-      // Name the profile the prompt was actually built from (the chat's own).
-      const profileState = await window.redLedger.listContextProfiles()
-      const profileId = findConversation(conversationId)?.profileId
-      contextProfile = resolveConversationProfile(profileId, profileState).profile?.name ?? null
-    } catch {
-      // Profile name is optional.
-    }
-
-    // Keep showing the previous reply's context use until this one reports its own.
-    const usage = findConversation(conversationId)?.lastRequest?.usage ?? null
-    const lastRequest: ConversationRequestInfo = { ...info, contextProfile, usage }
-    try {
-      await window.redLedger.updateConversation(conversationId, { lastRequest })
-      storeLastRequest(conversationId, lastRequest)
-    } catch {
-      // Display-only metadata; never interrupt the chat for it.
-    }
-  })()
-}
-
-/** A chat's messages in the shape an LLM request carries them. */
-function toRequestMessages(conversationMessages: Message[]): LLMRequest['messages'] {
-  return conversationMessages.map((m) => ({
-    role: m.role,
-    content: m.content,
-    timestamp: m.timestamp,
-    ...(m.role === 'user' && m.attachments && m.attachments.length > 0
-      ? { attachments: m.attachments }
-      : {}),
-    ...(m.role === 'assistant' && m.toolCalls
-      ? { toolCalls: parseStoredToolCalls(m.toolCalls) }
-      : {}),
-    ...(m.role === 'assistant' && m.thinking ? { thinking: m.thinking } : {})
-  }))
-}
-
-/** Save the finished reply's context use for the chat's context meter. Best-effort, like recordRequestInfo. */
-function recordContextUsage(conversationId: string, usage: ContextUsage): void {
-  const previous = findConversation(conversationId)?.lastRequest
-  if (!previous) return
-
-  const lastRequest: ConversationRequestInfo = { ...previous, usage }
-  storeLastRequest(conversationId, lastRequest)
-  void window.redLedger.updateConversation(conversationId, { lastRequest }).catch(() => {
-    // Display-only metadata; never interrupt the chat for it.
-  })
-}
-
-/**
- * React hook that manages the LLM streaming lifecycle.
+ * The chat on screen's turns: starting a reply (send, retry, edit) or a
+ * compaction, stopping it, and whether one is running. The main process runs
+ * each turn and saves it as it goes (see TurnEvent), so switching chats or
+ * reloading the page leaves it running, and other chats can reply meanwhile.
  *
- * Flow: user sends message -> save to DB -> create a persisted assistant
- * placeholder -> stream chunks into that message -> on done/cancel, finalize
- * the persisted message so chat switches do not orphan the stream.
- *
- * Streaming content updates are throttled to avoid excessive re-renders.
+ * Each value is selected on its own, so a streaming reply re-renders only
+ * what shows its text, not everything that asks whether a chat is busy.
  */
 export function useStreaming() {
-  // The chat a reply (or compaction) is running in. Only one runs at a time,
-  // and its Stop button shows in that chat only.
-  const [streamingConversationId, setStreamingConversationId] = useState<string | null>(null)
-  const isStreaming = streamingConversationId !== null
-  const [isReceivingThinking, setIsReceivingThinking] = useState(false)
-  const [streamingMessageId, setStreamingMessageId] = useState<string | null>(null)
+  const activeConversationId = useConversationStore((s) => s.activeConversationId)
+  const isStreaming = useTurnStore((s) => !!activeConversationId && !!s.turns[activeConversationId])
+  const isCompacting = useTurnStore((s) => !!activeConversationId && s.turns[activeConversationId]?.kind === 'compact')
+  const streamingMessageId = useTurnStore((s) =>
+    (activeConversationId ? s.turns[activeConversationId]?.messageId : null) ?? null
+  )
+  const isReceivingThinking = useTurnStore((s) =>
+    !!activeConversationId && s.turns[activeConversationId]?.phase === 'thinking'
+  )
 
-  const cleanupRef = useRef<(() => void) | null>(null)
-  const compactCancelRef = useRef<(() => void) | null>(null)
-  const [isCompacting, setIsCompacting] = useState(false)
-  const tempMessageIdRef = useRef<string | null>(null)
-  const tempConversationIdRef = useRef<string | null>(null)
-  const contentRef = useRef('')
-  const thinkingRef = useRef('')
-  const toolCallsRef = useRef<ToolCall[]>([])
-  const lastStreamChunkTypeRef = useRef<StreamChunk['type'] | null>(null)
-  const throttleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const thinkingActivityTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const titleGenerationInFlightRef = useRef(new Set<string>())
-  const persistenceErrorNotifiedRef = useRef(false)
-
-  const clearThinkingActivity = useCallback(() => {
-    setIsReceivingThinking(false)
-    if (thinkingActivityTimerRef.current) {
-      clearTimeout(thinkingActivityTimerRef.current)
-      thinkingActivityTimerRef.current = null
-    }
-  }, [])
-
-  const markThinkingActivity = useCallback(() => {
-    setIsReceivingThinking(true)
-    if (thinkingActivityTimerRef.current) {
-      clearTimeout(thinkingActivityTimerRef.current)
-    }
-    thinkingActivityTimerRef.current = setTimeout(() => {
-      thinkingActivityTimerRef.current = null
-      setIsReceivingThinking(false)
-    }, THINKING_ACTIVE_WINDOW_MS)
-  }, [])
-
-  const reportPersistenceError = useCallback((err: unknown) => {
-    if (persistenceErrorNotifiedRef.current) return
-
-    persistenceErrorNotifiedRef.current = true
-    notify({
-      type: 'error',
-      message: formatError(err)
-    })
-  }, [])
-
-  const buildStreamingMessageUpdate = useCallback((): Partial<Message> => ({
-    content: contentRef.current,
-    thinking: thinkingRef.current || undefined,
-    toolCalls: toolCallsRef.current.length > 0
-      ? JSON.stringify(toolCallsRef.current)
-      : undefined
-  }), [])
-
-  const clearPersistTimer = useCallback(() => {
-    if (persistTimerRef.current) {
-      clearTimeout(persistTimerRef.current)
-      persistTimerRef.current = null
-    }
-  }, [])
-
-  // Must be cleared before the stream's refs are reset, or it would save an empty message.
-  const schedulePersist = useCallback((messageId: string) => {
-    if (persistTimerRef.current) return
-    persistTimerRef.current = setTimeout(() => {
-      persistTimerRef.current = null
-      void window.redLedger.updateMessage(messageId, buildStreamingMessageUpdate()).catch((err) => {
-        reportPersistenceError(err)
-      })
-    }, PERSIST_THROTTLE_MS)
-  }, [buildStreamingMessageUpdate, reportPersistenceError])
-
-  const finalizeTempMessage = useCallback(async (tempId: string, conversationId: string) => {
-    const finalContent = contentRef.current
-    const hasAnyOutput = Boolean(
-      finalContent
-      || thinkingRef.current
-      || toolCallsRef.current.length > 0
-    )
-
-    const clearTempRefsIfCurrent = () => {
-      if (tempMessageIdRef.current === tempId) {
-        tempMessageIdRef.current = null
-        setStreamingMessageId(null)
-      }
-      if (tempConversationIdRef.current === conversationId) {
-        tempConversationIdRef.current = null
-      }
-    }
-
+  /** Starts a reply and shows the branch it is on: the prompt and the empty reply. */
+  const start = useCallback(async (request: TurnStartRequest) => {
     try {
-      if (!hasAnyOutput) {
-        // Drop the empty reply; a retry's earlier reply comes back on screen.
-        const branch = await window.redLedger.deleteMessageBranch(conversationId, tempId)
-        useConversationStore.setState((state) => ({
-          messages: state.activeConversationId === conversationId
-            ? branch
-            : state.messages.filter((m) => m.id !== tempId)
-        }))
-        return
+      const messages = await window.redLedger.startTurn(request)
+      if (useConversationStore.getState().activeConversationId === request.conversationId) {
+        useConversationStore.setState({ messages })
       }
-
-      // A reply with only reasoning or tool calls is saved with empty text;
-      // the bubble shows a note instead, so nothing UI-only reaches the model.
-      const finalUpdate = buildStreamingMessageUpdate()
-
-      useConversationStore.getState().updateMessage(tempId, finalUpdate)
-      await window.redLedger.updateMessage(tempId, finalUpdate)
-      useConversationStore.getState().touchConversation(conversationId)
+      useConversationStore.getState().touchConversation(request.conversationId)
     } catch (err) {
-      reportPersistenceError(err)
-    } finally {
-      clearTempRefsIfCurrent()
-      persistenceErrorNotifiedRef.current = false
-    }
-  }, [buildStreamingMessageUpdate, reportPersistenceError])
-
-  const maybeGenerateConversationTitle = useCallback((
-    conversationId: string,
-    provider: ProviderName,
-    model: string
-  ) => {
-    if (titleGenerationInFlightRef.current.has(conversationId)) return
-
-    titleGenerationInFlightRef.current.add(conversationId)
-
-    void (async () => {
-      try {
-        await delay(AUTO_TITLE_DELAY_MS)
-
-        const conversation = await window.redLedger.getConversation(conversationId)
-        if (!conversation || !isUntitledConversationTitle(conversation.title)) {
-          return
-        }
-
-        const persistedMessages = await window.redLedger.listMessages(conversationId)
-        const firstUserMessage = persistedMessages.find((message) => message.role === 'user')
-        const firstPrompt = firstUserMessage?.content.trim() || ''
-        if (!firstPrompt) return
-
-        const generatedTitle = await window.redLedger.generateTitle({
-          prompt: firstPrompt,
-          provider,
-          model,
-          maxTokens: AUTO_TITLE_MAX_TOKENS
-        })
-        const sanitizedTitle = sanitizeGeneratedChatTitle(generatedTitle)
-        if (!sanitizedTitle || sanitizedTitle === AUTO_TITLE_PLACEHOLDER) return
-
-        const conversationBeforeRename = await window.redLedger.getConversation(conversationId)
-        if (!conversationBeforeRename || !isUntitledConversationTitle(conversationBeforeRename.title)) {
-          return
-        }
-
-        await useConversationStore.getState().renameConversation(conversationId, sanitizedTitle)
-      } catch {
-        // Keep placeholder title if generation fails.
-      } finally {
-        titleGenerationInFlightRef.current.delete(conversationId)
-      }
-    })()
-  }, [])
-
-  const cancel = useCallback(() => {
-    if (compactCancelRef.current) {
-      compactCancelRef.current()
-      compactCancelRef.current = null
-      return
-    }
-    const tempId = tempMessageIdRef.current
-    const tempConversationId = tempConversationIdRef.current
-
-    clearPersistTimer()
-    if (cleanupRef.current) {
-      cleanupRef.current()
-      cleanupRef.current = null
-    }
-    if (throttleRef.current) {
-      clearTimeout(throttleRef.current)
-      throttleRef.current = null
-    }
-
-    if (tempId && tempConversationId) {
-      void finalizeTempMessage(tempId, tempConversationId)
-    } else if (tempId) {
-      useConversationStore.setState((state) => ({
-        messages: state.messages.filter((m) => m.id !== tempId)
-      }))
-      tempMessageIdRef.current = null
-      tempConversationIdRef.current = null
-      setStreamingMessageId(null)
-    }
-
-    setStreamingConversationId(null)
-    clearThinkingActivity()
-    contentRef.current = ''
-    thinkingRef.current = ''
-    toolCallsRef.current = []
-    lastStreamChunkTypeRef.current = null
-    setStreamingMessageId(null)
-    persistenceErrorNotifiedRef.current = false
-  }, [clearPersistTimer, clearThinkingActivity, finalizeTempMessage])
-
-  /**
-   * Runs one turn: saves the prompt (if any), then streams a reply to the
-   * branch on screen. With no prompt it answers the user message the branch
-   * already ends at, which is how a retry adds another reply.
-   */
-  const startTurn = useCallback(async (prompt: TurnPrompt | null) => {
-    const store = useConversationStore.getState()
-    const conversationId = store.activeConversationId
-    const activeConversation = store.conversations.find((c) => c.id === conversationId) || null
-    const currentSettings = useSettingsStore.getState().settings
-    if (!conversationId || !currentSettings) return
-    const workspacePath = useUIStore.getState().workspacePath
-
-    setStreamingConversationId(conversationId)
-    clearThinkingActivity()
-    contentRef.current = ''
-    thinkingRef.current = ''
-    toolCallsRef.current = []
-    lastStreamChunkTypeRef.current = null
-    persistenceErrorNotifiedRef.current = false
-
-    try {
-      const configuredProvider = currentSettings.activeProvider
-      const configuredModel = currentSettings.providers[configuredProvider].selectedModel
-        ?? currentSettings.defaultModel
-      let isFirstMessage = store.messages.length === 0
-      if (isFirstMessage) {
-        const persistedMessages = await window.redLedger.listMessages(conversationId)
-        isFirstMessage = persistedMessages.length === 0
-      }
-
-      const lockedProvider = isFirstMessage
-        ? configuredProvider
-        : (activeConversation?.provider || configuredProvider)
-      const lockedModel = isFirstMessage
-        ? configuredModel
-        : (activeConversation?.model || configuredModel)
-
-      if (isFirstMessage) {
-        await window.redLedger.updateConversation(conversationId, {
-          provider: lockedProvider,
-          model: lockedModel,
-          workspacePath
-        })
-
-        useConversationStore.setState((state) => ({
-          conversations: state.conversations.map((conversation) =>
-            conversation.id === conversationId
-              ? {
-                ...conversation,
-                provider: lockedProvider,
-                model: lockedModel,
-                workspacePath
-              }
-              : conversation
-          )
-        }))
-      }
-
-      // 1. Save user message to DB (an edit places it beside the original)
-      if (prompt) {
-        await store.addMessage({
-          conversationId,
-          role: 'user',
-          content: prompt.content,
-          attachments: prompt.attachments,
-          ...(prompt.parentId !== undefined ? { parentId: prompt.parentId } : {})
-        })
-      }
-
-      // 2. Build the message history for the LLM request
-      const conversationMessages = await window.redLedger.listMessages(conversationId)
-      const messages = toRequestMessages(conversationMessages)
-
-      const request: LLMRequest = {
-        conversationId,
-        messages,
-        model: lockedModel,
-        provider: lockedProvider,
-        ...(currentSettings.temperatureEnabled ? { temperature: currentSettings.temperature } : {}),
-        ...(currentSettings.maxTokensEnabled ? { maxTokens: currentSettings.maxTokens } : {})
-      }
-
-      recordRequestInfo(conversationId, {
-        sentAt: new Date().toISOString(),
-        provider: lockedProvider,
-        model: lockedModel,
-        temperature: request.temperature ?? null,
-        maxTokens: request.maxTokens ?? null,
-        reasoningEnabled: currentSettings.reasoningEnabled,
-        searchToolsEnabled: currentSettings.searchToolsEnabled
-      })
-
-      // 3. Create a persisted assistant placeholder so chat switches do not orphan the stream.
-      const tempMessage = await store.addMessage({
-        conversationId,
-        role: 'assistant',
-        content: ''
-      })
-      const tempId = tempMessage.id
-      tempMessageIdRef.current = tempId
-      tempConversationIdRef.current = conversationId
-      setStreamingMessageId(tempId)
-
-      // Helper: flush accumulated content to the temp message in the store
-      const flushToStore = () => {
-        useConversationStore.getState().updateMessage(tempId, buildStreamingMessageUpdate())
-        schedulePersist(tempId)
-      }
-
-      // Helper: throttled store update for text chunks
-      const scheduleFlush = () => {
-        if (!throttleRef.current) {
-          throttleRef.current = setTimeout(() => {
-            throttleRef.current = null
-            flushToStore()
-          }, STREAM_THROTTLE_MS)
-        }
-      }
-
-      // 4. Start the stream
-      const cleanup = window.redLedger.sendMessage({ ...request, replyMessageId: tempId }, (chunk: StreamChunk) => {
-        switch (chunk.type) {
-          case 'thinking': {
-            const incomingThinking = chunk.content || ''
-            const isResumedThinking = Boolean(
-              incomingThinking &&
-              thinkingRef.current &&
-              lastStreamChunkTypeRef.current &&
-              lastStreamChunkTypeRef.current !== 'thinking'
-            )
-            if (isResumedThinking) {
-              thinkingRef.current += THINKING_BLOCK_SEPARATOR
-            }
-            thinkingRef.current += incomingThinking
-            markThinkingActivity()
-            scheduleFlush()
-            lastStreamChunkTypeRef.current = 'thinking'
-            break
-          }
-
-          case 'text': {
-            // Thinking ends as soon as we receive the first non-thinking output chunk.
-            clearThinkingActivity()
-            contentRef.current += chunk.content || ''
-            scheduleFlush()
-            lastStreamChunkTypeRef.current = 'text'
-            break
-          }
-
-          case 'tool_call': {
-            // Tool activity is non-thinking output; hide thinking indicator immediately.
-            clearThinkingActivity()
-            if (chunk.toolCall) {
-              // Stamp the current text length so the UI can interleave tool calls
-              const stamped = { ...chunk.toolCall, contentOffset: contentRef.current.length }
-              toolCallsRef.current = [...toolCallsRef.current, stamped]
-              flushToStore()
-            }
-            lastStreamChunkTypeRef.current = 'tool_call'
-            break
-          }
-
-          case 'tool_result': {
-            // Tool activity is non-thinking output; hide thinking indicator immediately.
-            clearThinkingActivity()
-            if (chunk.toolCall) {
-              toolCallsRef.current = toolCallsRef.current.map((tc) =>
-                tc.id === chunk.toolCall!.id
-                  ? { ...chunk.toolCall!, contentOffset: tc.contentOffset }
-                  : tc
-              )
-              flushToStore()
-              if (WORKSPACE_WRITE_TOOLS.has(chunk.toolCall.name)) {
-                useUIStore.getState().bumpFileTree()
-              }
-            }
-            lastStreamChunkTypeRef.current = 'tool_result'
-            break
-          }
-
-          case 'notice': {
-            if (chunk.content) {
-              notify({ type: 'warning', message: chunk.content })
-            }
-            break
-          }
-
-          case 'usage': {
-            if (chunk.usage) {
-              recordContextUsage(conversationId, chunk.usage)
-            }
-            break
-          }
-
-          case 'error': {
-            clearThinkingActivity()
-            notify({
-              type: 'error',
-              message: chunk.error || 'Streaming error'
-            })
-            lastStreamChunkTypeRef.current = 'error'
-            break
-          }
-
-          case 'done': {
-            clearThinkingActivity()
-            // Cancel any pending throttled flush
-            if (throttleRef.current) {
-              clearTimeout(throttleRef.current)
-              throttleRef.current = null
-            }
-
-            clearPersistTimer()
-            cleanup()
-            void finalizeTempMessage(tempId, conversationId)
-
-            setStreamingConversationId(null)
-            contentRef.current = ''
-            thinkingRef.current = ''
-            toolCallsRef.current = []
-            lastStreamChunkTypeRef.current = null
-            cleanupRef.current = null
-            break
-          }
-        }
-      })
-
-      cleanupRef.current = cleanup
-      maybeGenerateConversationTitle(conversationId, lockedProvider, lockedModel)
-
-    } catch (err) {
-      clearPersistTimer()
-      if (tempMessageIdRef.current && tempConversationIdRef.current) {
-        await finalizeTempMessage(tempMessageIdRef.current, tempConversationIdRef.current)
-      } else if (tempMessageIdRef.current) {
-        const tempId = tempMessageIdRef.current
-        useConversationStore.setState((state) => ({
-          messages: state.messages.filter((m) => m.id !== tempId)
-        }))
-        tempMessageIdRef.current = null
-        tempConversationIdRef.current = null
-        setStreamingMessageId(null)
-      }
-      setStreamingConversationId(null)
-      clearThinkingActivity()
-      contentRef.current = ''
-      thinkingRef.current = ''
-      toolCallsRef.current = []
-      lastStreamChunkTypeRef.current = null
-      persistenceErrorNotifiedRef.current = false
-      notify({
-        type: 'error',
-        message: formatError(err)
-      })
-    }
-  }, [
-    buildStreamingMessageUpdate,
-    clearPersistTimer,
-    clearThinkingActivity,
-    finalizeTempMessage,
-    markThinkingActivity,
-    maybeGenerateConversationTitle,
-    schedulePersist
-  ])
-
-  useEffect(() => {
-    const titleGenerationInFlight = titleGenerationInFlightRef.current
-
-    return () => {
-      if (cleanupRef.current) {
-        cleanupRef.current()
-        cleanupRef.current = null
-      }
-      if (throttleRef.current) {
-        clearTimeout(throttleRef.current)
-        throttleRef.current = null
-      }
-      if (persistTimerRef.current) {
-        clearTimeout(persistTimerRef.current)
-        persistTimerRef.current = null
-      }
-      if (thinkingActivityTimerRef.current) {
-        clearTimeout(thinkingActivityTimerRef.current)
-        thinkingActivityTimerRef.current = null
-      }
-      titleGenerationInFlight.clear()
+      notify({ type: 'error', message: formatError(err) })
     }
   }, [])
 
-  const sendMessage = useCallback((content: string, attachments?: Attachment[]) => (
-    startTurn({ content, attachments })
-  ), [startTurn])
+  const sendMessage = useCallback(async (content: string, attachments?: Attachment[]) => {
+    // Read at call time: a New Chat draft becomes a chat just before its first send.
+    const conversationId = useConversationStore.getState().activeConversationId
+    if (!conversationId) return
+    await start({ conversationId, kind: 'send', content, attachments })
+  }, [start])
 
   /** Asks again: a new reply to this user message, kept beside the earlier ones. */
   const retry = useCallback(async (userMessageId: string) => {
-    if (isStreaming) return
-
-    const store = useConversationStore.getState()
-    const userMessage = store.messages.find((m) => m.id === userMessageId && m.role === 'user')
-    if (!userMessage) return
-
-    // Show the branch ending at the prompt, so the new reply goes beside the old ones.
-    try {
-      await store.selectBranch(userMessage.id, { exact: true })
-    } catch {
-      return // The store already showed the error.
-    }
-    await startTurn(null)
-  }, [isStreaming, startTurn])
+    if (!activeConversationId || isStreaming) return
+    await start({ conversationId: activeConversationId, kind: 'retry', userMessageId })
+  }, [activeConversationId, isStreaming, start])
 
   /** Sends an edited copy of this user message as a new version; the original stays. */
   const editMessage = useCallback(async (userMessageId: string, content: string) => {
-    if (isStreaming) return
-
-    const store = useConversationStore.getState()
-    const userMessage = store.messages.find((m) => m.id === userMessageId && m.role === 'user')
-    if (!userMessage) return
-
-    const nextContent = content.trim()
-    const hasAttachments = Boolean(userMessage.attachments && userMessage.attachments.length > 0)
-    if (!nextContent && !hasAttachments) return
-
-    await startTurn({ content: nextContent, attachments: userMessage.attachments, parentId: userMessage.parentId })
-  }, [isStreaming, startTurn])
+    if (!activeConversationId || isStreaming) return
+    await start({ conversationId: activeConversationId, kind: 'edit', userMessageId, content })
+  }, [activeConversationId, isStreaming, start])
 
   /**
    * Compacts the chat: the model summarizes the branch on screen, and the
-   * summary is added after it as a 'system' message. From then on requests
-   * send the summary in place of everything before it (see LlmService).
+   * summary is added after it. From then on requests send the summary in
+   * place of everything before it.
    */
   const compact = useCallback(async () => {
-    if (isStreaming) return
-
-    const store = useConversationStore.getState()
-    const conversationId = store.activeConversationId
-    const conversation = store.conversations.find((c) => c.id === conversationId)
-    const currentSettings = useSettingsStore.getState().settings
-    if (!conversationId || !conversation || !currentSettings) return
-
-    setStreamingConversationId(conversationId)
-    setIsCompacting(true)
+    if (!activeConversationId || isStreaming) return
     try {
-      const conversationMessages = await window.redLedger.listMessages(conversationId)
-      const sinceSummary = conversationMessages.slice(
-        conversationMessages.map((m) => m.role).lastIndexOf('system') + 1
-      )
-      if (!sinceSummary.some((m) => m.role === 'assistant')) {
-        notify({ type: 'info', message: 'Nothing new to compact yet.' })
-        return
-      }
-
-      const provider = conversation.provider || currentSettings.activeProvider
-      const request: LLMRequest = {
-        conversationId,
-        messages: toRequestMessages(conversationMessages),
-        model: conversation.model
-          || currentSettings.providers[provider].selectedModel
-          || currentSettings.defaultModel,
-        provider,
-        ...(currentSettings.temperatureEnabled ? { temperature: currentSettings.temperature } : {}),
-        ...(currentSettings.maxTokensEnabled ? { maxTokens: currentSettings.maxTokens } : {})
-      }
-
-      const { result, cancel: cancelCompaction } = window.redLedger.compactChat(request)
-      compactCancelRef.current = cancelCompaction
-      const compaction = await result
-      if (!compaction) return
-
-      await useConversationStore.getState().addMessage({
-        conversationId,
-        role: 'system',
-        content: compaction.summary
-      })
-      recordContextUsage(conversationId, compaction.usage)
-      notify({ type: 'success', message: 'Chat compacted. It continues from the summary of the earlier messages.' })
+      const result = await window.redLedger.compactChat(activeConversationId)
+      if (result === 'nothing_to_compact') notify({ type: 'info', message: 'Nothing new to compact yet.' })
     } catch (err) {
       notify({ type: 'error', message: `Could not compact the chat: ${formatError(err)}` })
-    } finally {
-      compactCancelRef.current = null
-      setIsCompacting(false)
-      setStreamingConversationId(null)
     }
-  }, [isStreaming])
+  }, [activeConversationId, isStreaming])
+
+  /** Stops the chat on screen's turn; what it wrote so far is kept. */
+  const cancel = useCallback(() => {
+    if (!activeConversationId) return
+    void window.redLedger.cancelTurn(activeConversationId).catch(() => {})
+  }, [activeConversationId])
 
   return {
     isStreaming,
-    streamingConversationId,
     isCompacting,
     compact,
     isReceivingThinking,

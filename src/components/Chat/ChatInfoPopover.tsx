@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Info } from 'lucide-react'
 import { resolveConversationProfile, useContextProfileStore, useConversationStore } from '@/store'
-import { contextRatio, describeContextUsage } from '@/lib/contextUsage'
+import { contextRatio, describeCacheUsage, describeContextUsage } from '@/lib/contextUsage'
 import type { Conversation, ContextUsage, Message, ProviderName } from '@/types'
 
 const PROVIDER_LABELS: Record<ProviderName, string> = {
@@ -167,6 +167,9 @@ export function ChatInfoPopover({ conversation }: { conversation: Conversation }
                 <InfoRow label="Web search" value={lastRequest.searchToolsEnabled ? 'On' : 'Off'} />
                 {lastRequest.usage && (
                   <InfoRow label="Context used" value={describeContextRow(lastRequest.usage)} />
+                )}
+                {lastRequest.usage?.cache && (
+                  <InfoRow label="Prompt cache" value={describeCacheUsage(lastRequest.usage.cache)} />
                 )}
               </>
             )}

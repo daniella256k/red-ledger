@@ -2,15 +2,16 @@
  * Central IPC contract — single source of truth for all IPC channels.
  *
  * Both the main-process handlers and the preload API derive from these types.
- * Streaming channels (llm:sendMessage) are excluded — they use an event-based
- * pattern that doesn't fit invoke/handle.
+ * Events the main process sends on its own (turn:event, mcp:status,
+ * menu:action) don't fit invoke/handle; their payloads are typed in src/types.
  */
 import type {
   Conversation, Message, Settings, FileNode, SearchResult,
-  Attachment, AttachmentParseResult, LLMRequest, StreamChunk, ContextProfile, TitleGenerationRequest,
+  Attachment, AttachmentParseResult, ContextProfile,
   McpServerStatus, McpSignInResult,
   StorageOverview, ChatStorageInfo, StoredImageInfo, RemoveImageResult, CompactResult,
-  CreateMessageInput, SelectBranchOptions, FileUndoResult, ChatCompaction
+  CreateMessageInput, SelectBranchOptions, FileUndoResult,
+  TurnStartRequest, CompactStartResult, LiveTurn
 } from '../../src/types'
 
 export type ChatExportFormat = 'markdown' | 'xml'
@@ -56,7 +57,6 @@ export interface IpcContract {
   // Messages
   'db:listMessages':            { params: [conversationId: string];                    result: Message[] }
   'db:createMessage':           { params: [data: CreateMessageData];                   result: Message }
-  'db:updateMessage':           { params: [id: string, data: Partial<Message>];        result: void }
   'db:selectBranch':            { params: [conversationId: string, messageId: string, options?: SelectBranchOptions]; result: Message[] }
   'db:deleteMessageBranch':     { params: [conversationId: string, messageId: string]; result: Message[] }
 
@@ -92,11 +92,14 @@ export interface IpcContract {
   'mcp:cancelSignIn':           { params: [serverId: string];                          result: void }
   'mcp:signOut':                { params: [serverId: string];                          result: void }
 
-  // LLM (non-streaming)
+  // LLM
   'llm:listModels':             { params: [provider: string];                          result: string[] }
-  'llm:cancelStream':           { params: [channel: string];                           result: void }
-  'llm:generateTitle':          { params: [request: TitleGenerationRequest];           result: string | null }
-  'llm:compact':                { params: [request: LLMRequest, channel: string]; result: ChatCompaction | null }
+
+  // Turns (run in the main process; followed through turn:event)
+  'turn:start':                 { params: [request: TurnStartRequest];                 result: Message[] }
+  'turn:compact':               { params: [conversationId: string];                    result: CompactStartResult }
+  'turn:cancel':                { params: [conversationId: string];                    result: void }
+  'turn:listActive':            { params: [];                                          result: LiveTurn[] }
 
   // File history (undo a reply's file changes)
   'fileHistory:replies':        { params: [conversationId: string];                    result: string[] }
@@ -119,12 +122,6 @@ export interface IpcContract {
   // Chat import/export
   'chat:export':                { params: [conversationId: string, format: ChatExportFormat]; result: ChatExportResult }
   'chat:import':                { params: [];                                          result: ChatImportResult }
-}
-
-// ─── Streaming contract (event-based, not invoke/handle) ────────────────────
-
-export interface IpcStreamChannels {
-  'llm:sendMessage': { params: [request: LLMRequest, channel: string]; chunk: StreamChunk }
 }
 
 // ─── Derived helper types ───────────────────────────────────────────────────

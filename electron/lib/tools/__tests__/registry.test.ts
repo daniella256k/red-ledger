@@ -85,3 +85,24 @@ describe('tool registry', () => {
     expect(formatToolResultForModel('no_formatter', undefined)).toBe('null')
   })
 })
+
+describe('tool order', () => {
+  it('keeps built-in tools first and MCP tools sorted, however they were registered', async () => {
+    const { registerTool: register, unregisterTool, getToolDefinitions: definitions } = await import('../registry')
+    const tool = (name: string) => ({
+      definition: { type: 'function' as const, function: { name, description: name, parameters: { type: 'object' as const } } },
+      execute: async () => ({})
+    })
+    register(tool('zeta_server__search'))
+    register(tool('order_builtin'))
+    register(tool('alpha_server__read'))
+    const before = definitions().map((d) => d.function.name).filter((n) => ['zeta_server__search', 'order_builtin', 'alpha_server__read'].includes(n))
+    expect(before).toEqual(['order_builtin', 'alpha_server__read', 'zeta_server__search'])
+
+    // A reconnecting server re-registers its tools; the order stays the same.
+    unregisterTool('alpha_server__read')
+    register(tool('alpha_server__read'))
+    const after = definitions().map((d) => d.function.name).filter((n) => before.includes(n))
+    expect(after).toEqual(before)
+  })
+})

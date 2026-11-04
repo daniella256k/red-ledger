@@ -1,7 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { defaultRangeExtractor, useVirtualizer, type Range } from '@tanstack/react-virtual'
 import { Plus, Trash2, Pencil, Check, X, Star, Search } from 'lucide-react'
-import { useConversationStore } from '@/store'
+import { useConversationStore, useTurnStore } from '@/store'
 import { cn, formatTimestamp } from '@/lib/utils'
 import { DEFAULT_CHAT_TITLE } from '@/lib/chatTitle'
 import type { Conversation } from '@/types'
@@ -27,6 +27,10 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
   const renameConversation = useConversationStore((s) => s.renameConversation)
   const setConversationPinned = useConversationStore((s) => s.setConversationPinned)
   const setActiveConversation = useConversationStore((s) => s.setActiveConversation)
+  // Chats with a reply or compaction running. Selected as one string, so the
+  // list re-renders when a chat starts or stops working, not on every update.
+  const workingChatIds = useTurnStore((s) => Object.keys(s.turns).sort().join('\n'))
+  const workingChats = useMemo(() => new Set(workingChatIds ? workingChatIds.split('\n') : []), [workingChatIds])
 
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
@@ -195,6 +199,11 @@ export function ConversationList({ compactNewChatButton = false }: ConversationL
       {/* Action Buttons (visible on hover) */}
       {renamingId !== conv.id && (
         <>
+          {workingChats.has(conv.id) && (
+            <div className="ml-1 flex shrink-0 items-center group-hover:hidden" title="Working">
+              <span className="loading loading-spinner size-3 shrink-0 text-rca-red/70" />
+            </div>
+          )}
           {conv.isPinned && (
             <div className="ml-1 flex shrink-0 items-center text-amber-600/80 group-hover:hidden pointer-events-none">
               <Star size={12} className="fill-current" />

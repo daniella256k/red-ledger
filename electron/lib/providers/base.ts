@@ -90,6 +90,12 @@ export interface ProviderSendOptions {
   maxTokens?: number
   reasoningEnabled?: boolean
   extraBody?: Record<string, unknown>
+  /**
+   * Stable id for the chat. Servers that route by it send the chat's requests
+   * to a machine whose prompt cache already holds the chat so far, and it
+   * marks requests worth caching at all (a title request has none).
+   */
+  cacheKey?: string
   onChunk: (chunk: ProviderChunk) => void
 }
 
@@ -101,14 +107,29 @@ export interface AbortHandle {
 export const TRUNCATED_REPLY_NOTICE =
   'The reply was cut off because it reached the max tokens limit. Raise or turn off Max Tokens in Settings for longer replies.'
 
-/** A 'usage' chunk for counts the provider reported; LlmService fills in the context window. */
-export function reportedUsageChunk(promptTokens: unknown, completionTokens: unknown): StreamChunk | null {
+function countOrUndefined(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
+}
+
+/**
+ * A 'usage' chunk for counts the provider reported; LlmService fills in the
+ * context window. Prompt cache counts are kept only when the provider sent them.
+ */
+export function reportedUsageChunk(
+  promptTokens: unknown,
+  completionTokens: unknown,
+  cache: { cachedTokens?: unknown; cacheWriteTokens?: unknown } = {}
+): StreamChunk | null {
   if (typeof promptTokens !== 'number' || !Number.isFinite(promptTokens) || promptTokens <= 0) return null
+  const cachedTokens = countOrUndefined(cache.cachedTokens)
+  const cacheWriteTokens = countOrUndefined(cache.cacheWriteTokens)
   const usage: ContextUsage = {
     promptTokens,
     completionTokens: typeof completionTokens === 'number' && Number.isFinite(completionTokens) ? completionTokens : 0,
     contextLength: null,
-    estimated: false
+    estimated: false,
+    ...(cachedTokens !== undefined ? { cachedTokens } : {}),
+    ...(cacheWriteTokens !== undefined ? { cacheWriteTokens } : {})
   }
   return { type: 'usage', usage }
 }

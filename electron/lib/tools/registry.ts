@@ -2,6 +2,7 @@ import type { BrowserWindow } from 'electron'
 import type { ToolDefinition } from '../providers/base'
 import type { ToolCall } from '../../../src/types'
 import type { WorkspaceService } from '../../services/WorkspaceService'
+import { parseMcpToolName } from '../../../src/lib/mcpConfig'
 
 /**
  * Tool registry — maps tool names to definitions + executors.
@@ -42,8 +43,21 @@ export function unregisterTool(name: string): void {
   tools.delete(name)
 }
 
+/**
+ * Every tool's definition, in an order that only changes when the set of
+ * tools does: built-in tools as registered, then MCP tools by name. Tools go
+ * first in every request, so a reconnecting MCP server re-registering its
+ * tools must not reshuffle them, which would make the provider's prompt
+ * cache miss from the very start.
+ */
 export function getToolDefinitions(): ToolDefinition[] {
-  return [...tools.values()].map((e) => e.definition)
+  const builtIn: ToolDefinition[] = []
+  const mcp: ToolDefinition[] = []
+  for (const [name, entry] of tools) {
+    (parseMcpToolName(name) ? mcp : builtIn).push(entry.definition)
+  }
+  mcp.sort((a, b) => (a.function.name < b.function.name ? -1 : a.function.name > b.function.name ? 1 : 0))
+  return [...builtIn, ...mcp]
 }
 
 function isErrorResult(result: unknown): boolean {

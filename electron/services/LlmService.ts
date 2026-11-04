@@ -24,7 +24,8 @@ import type {
   Attachment,
   ImageAttachment,
   TitleGenerationRequest,
-  ContextUsage
+  ContextUsage,
+  CacheUsage
 } from '../../src/types'
 
 // Side-effect imports: each provider self-registers when loaded
@@ -311,6 +312,22 @@ export function compactionPrompt(): string {
   return lines.join('\n')
 }
 
+/**
+ * Adds one request's prompt cache counts to the turn's. Requests whose
+ * provider said nothing about its cache leave the total as it was, so a
+ * provider without caching reports no cache use at all (null).
+ */
+export function addCacheUsage(total: CacheUsage | null, usage: ContextUsage): CacheUsage | null {
+  if (usage.cachedTokens === undefined && usage.cacheWriteTokens === undefined) return total
+  const base = total ?? { requests: 0, promptTokens: 0, readTokens: 0, writeTokens: 0 }
+  return {
+    requests: base.requests + 1,
+    promptTokens: base.promptTokens + usage.promptTokens,
+    readTokens: base.readTokens + (usage.cachedTokens ?? 0),
+    writeTokens: base.writeTokens + (usage.cacheWriteTokens ?? 0)
+  }
+}
+
 /** Rough tokens-per-character ratio for text when the provider reports no usage. */
 const ESTIMATED_CHARS_PER_TOKEN = 4
 /** Rough flat cost per image part; real costs vary by provider and image size. */
@@ -569,6 +586,8 @@ export class LlmService {
     const availableToolNames = new Set(tools.map((tool) => tool.function.name))
     let totalToolCalls = 0
     let roundsAfterToolLimit = 0
+    // Prompt cache use over the turn's requests, when the provider reports it.
+    let cache: CacheUsage | null = null
 
     // Tracked from the start so Stop ends the turn at any point: during the
     // context window lookup below, between rounds, and while tools run.
@@ -607,6 +626,8 @@ export class LlmService {
             temperature: request.temperature,
             maxTokens: request.maxTokens ?? (settings.maxTokensEnabled ? settings.maxTokens : undefined),
             reasoningEnabled: settings.reasoningEnabled,
+            // Every round resends the chat so far; the provider can serve that prefix from its cache.
+            cacheKey: request.conversationId,
             onChunk: (chunk: ProviderChunk) => {
               switch (chunk.type) {
                 case 'thinking':
@@ -654,11 +675,13 @@ export class LlmService {
         })
 
         stream.handle = null
+        const roundUsage = reportedUsage as ContextUsage | null
+        if (roundUsage) cache = addCacheUsage(cache, roundUsage)
 
         if (streamDone === 'done' && !stream.cancelled) {
           // The final round's request holds the whole turn, so it is the turn's peak context use.
-          const usage = reportedUsage ?? estimateUsage(messages, tools, textAccumulated)
-          sink.send({ type: 'usage', usage: { ...usage, contextLength } })
+          const usage = roundUsage ?? estimateUsage(messages, tools, textAccumulated)
+          sink.send({ type: 'usage', usage: { ...usage, contextLength, ...(cache ? { cache } : {}) } })
         }
 
         if (streamDone === 'error' || streamDone === 'done' || stream.cancelled) {
@@ -767,13 +790,6 @@ export class LlmService {
     }
   }
 
-  /** Stops every reply still running for a chat, e.g. before it is deleted. */
-  cancelConversationStreams(conversationId: string): void {
-    for (const [channel, stream] of this.activeStreams) {
-      if (stream.conversationId === conversationId) this.cancelStream(channel)
-    }
-  }
-
   /**
    * The conversation as the model sees it: the system prompt, then each
    * message. A compaction summary (a 'system' message in the chat) stands in
@@ -866,6 +882,8 @@ export class LlmService {
           temperature: request.temperature,
           maxTokens: request.maxTokens ?? (settings.maxTokensEnabled ? settings.maxTokens : undefined),
           reasoningEnabled: settings.reasoningEnabled,
+          // The same history the chat's replies sent, so it can be read from the cache.
+          cacheKey: request.conversationId,
           onChunk: (chunk: ProviderChunk) => {
             if (chunk.type === 'text') text += chunk.content || ''
             else if (chunk.type === 'error') resolve({ error: chunk.error || 'The summary request failed.' })

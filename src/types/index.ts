@@ -136,6 +136,27 @@ export interface ContextUsage {
   contextLength: number | null
   /** True when the provider reported no usage and the counts are estimated from text length. */
   estimated: boolean
+  /** Of promptTokens, how many the provider read from its prompt cache (when it says). */
+  cachedTokens?: number
+  /** Tokens the provider wrote to its prompt cache for later requests (when it says). */
+  cacheWriteTokens?: number
+  /** Prompt cache use over every request of the reply, when the provider reports it. */
+  cache?: CacheUsage
+}
+
+/**
+ * How much of a reply's input came from the provider's prompt cache. A reply
+ * that calls tools makes several requests, each resending the chat so far;
+ * a cached prefix is cheaper and faster to process.
+ */
+export interface CacheUsage {
+  requests: number
+  /** Input tokens across those requests. */
+  promptTokens: number
+  /** Of those, read from the cache. */
+  readTokens: number
+  /** Written to the cache, for later requests to read. */
+  writeTokens: number
 }
 
 // ─── Messages ────────────────────────────────────────────────────────────────
@@ -206,8 +227,6 @@ export interface ToolCall {
 
 export interface LLMRequest {
   conversationId: string
-  /** The reply being written; its workspace file changes are recorded under it for undo. */
-  replyMessageId?: string
   messages: LLMRequestMessage[]
   model: string
   provider: ProviderName
@@ -215,12 +234,62 @@ export interface LLMRequest {
   maxTokens?: number
 }
 
-/** A finished compaction: the summary, and the context the chat continues from. */
-export interface ChatCompaction {
-  summary: string
-  /** Estimated: the system prompt, the summary and the tool definitions. */
-  usage: ContextUsage
+// ─── Turns ───────────────────────────────────────────────────────────────────
+//
+// The main process runs each turn (a reply, or a compaction) from start to
+// finish and saves it as it goes, so it carries on while you look at other
+// chats, survives a page reload, and several chats can reply at once. The
+// page asks for turns and follows them through turn events.
+
+/** What to reply to: a new message, another answer to one, or an edited copy of one. */
+export type TurnStartRequest =
+  | { conversationId: string; kind: 'send'; content: string; attachments?: Attachment[] }
+  | { conversationId: string; kind: 'retry'; userMessageId: string }
+  | { conversationId: string; kind: 'edit'; userMessageId: string; content: string }
+
+export type TurnKind = 'reply' | 'compact'
+
+/** What a running turn is doing: waiting on the model, thinking, writing, or calling tools. */
+export type TurnPhase = 'waiting' | 'thinking' | 'text' | 'tools'
+
+/** A running turn, as far as it has got. */
+export interface LiveTurn {
+  turnId: string
+  conversationId: string
+  kind: TurnKind
+  /** The reply being written; null for a compaction, which adds its summary at the end. */
+  messageId: string | null
+  /** Goes up with every update, so an older one is never applied over a newer one. */
+  seq: number
+  content: string
+  thinking: string
+  toolCalls: ToolCall[]
+  phase: TurnPhase
 }
+
+export type TurnEvent =
+  | { type: 'started'; turn: LiveTurn }
+  /** The turn so far; toolCalls is left out when they haven't changed since the last update. */
+  | {
+    type: 'update'
+    turnId: string
+    conversationId: string
+    seq: number
+    content: string
+    thinking: string
+    phase: TurnPhase
+    toolCalls?: ToolCall[]
+  }
+  | { type: 'notice'; conversationId: string; level: Toast['type']; message: string }
+  /** The chat's saved record changed: title, request info, context use, or when it was updated. */
+  | { type: 'conversation'; conversation: Conversation }
+  /** A tool changed workspace files. */
+  | { type: 'filesChanged'; conversationId: string }
+  /** The turn is over and everything it wrote is saved. */
+  | { type: 'finished'; turnId: string; conversationId: string; kind: TurnKind }
+
+/** What asking for a compaction did: started, or nothing new since the last summary. */
+export type CompactStartResult = 'started' | 'nothing_to_compact'
 
 /** What undoing a reply's file changes did. */
 export interface FileUndoResult {
@@ -497,22 +566,26 @@ export interface RedLedgerAPI {
   // Messages (listMessages returns the branch on screen, first message first)
   listMessages(conversationId: string): Promise<Message[]>
   createMessage(data: CreateMessageInput): Promise<Message>
-  updateMessage(id: string, data: Partial<Message>): Promise<void>
   /** Shows the branch through this message: its newest reply chain, or exactly up to it. */
   selectBranch(conversationId: string, messageId: string, options?: SelectBranchOptions): Promise<Message[]>
   /** Deletes a message and everything after it on any branch; returns the branch now on screen. */
   deleteMessageBranch(conversationId: string, messageId: string): Promise<Message[]>
 
-  // LLM Streaming
-  sendMessage(request: LLMRequest, onStream: (chunk: StreamChunk) => void): () => void
-  listModels(provider: string): Promise<string[]>
-  generateTitle(request: TitleGenerationRequest): Promise<string | null>
-
+  // Turns (see TurnEvent)
   /**
-   * Summarizes the chat so far (the branch in `request.messages`) to stand in
-   * for it. The result is null when cancelled.
+   * Starts a reply in a chat and returns the branch now on screen (with your
+   * message and the empty reply). Fails if the chat is already replying.
    */
-  compactChat(request: LLMRequest): { result: Promise<ChatCompaction | null>; cancel: () => void }
+  startTurn(request: TurnStartRequest): Promise<Message[]>
+  /** Has the model summarize the chat so far, to stand in for it from then on. */
+  compactChat(conversationId: string): Promise<CompactStartResult>
+  /** Stops the chat's running turn, if it has one. */
+  cancelTurn(conversationId: string): Promise<void>
+  /** Every running turn, as far as it has got (for catching up after a reload). */
+  listActiveTurns(): Promise<LiveTurn[]>
+  onTurnEvent(handler: (event: TurnEvent) => void): () => void
+
+  listModels(provider: string): Promise<string[]>
 
   // File history
   /** Replies in a chat whose workspace file changes can be undone. */

@@ -14,7 +14,8 @@ import { registerDbHandlers, getConversationService } from './ipc/db'
 import { registerContextHandlers, getContextService } from './ipc/context'
 import { registerSettingsHandlers, getCurrentSettings } from './ipc/settings'
 import { registerFsHandlers, getWorkspaceService } from './ipc/fs'
-import { cancelConversationStreams, registerLlmHandlers } from './ipc/llm'
+import { registerLlmHandlers } from './ipc/llm'
+import { cancelAllTurns, cancelConversationTurn, registerTurnHandlers, shutdownTurns } from './ipc/turns'
 import { registerSearchHandlers } from './ipc/search'
 import { registerMcpHandlers, getMcpService } from './ipc/mcp'
 import { registerTransferHandlers } from './ipc/transfer'
@@ -385,7 +386,7 @@ function registerIpcHandlers(): void {
   registerDbHandlers(dbPath, {
     getDefaultProfileId: () => getContextService().getActiveProfileId()
   }, {
-    beforeDeleteConversation: cancelConversationStreams
+    beforeDeleteConversation: cancelConversationTurn
   })
 
   // 2. Settings (wires workspace path side effect)
@@ -431,6 +432,13 @@ function registerIpcHandlers(): void {
       getConversationService().getConversation(conversationId)?.profileId
     ),
     getAttachmentBlob: (blobId) => getConversationService().getAttachmentBlob(blobId)
+  })
+
+  // 7a. Chat turns: replies and compactions run here in the main process,
+  // so they carry on across chat switches and page reloads, several at once.
+  registerTurnHandlers({
+    getSettings: getCurrentSettings,
+    getWindow: () => mainWindow
   })
 
   // 8. Chat import/export
@@ -564,6 +572,10 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') {
     app.quit()
+  } else {
+    // macOS keeps the app open without a window. Running turns stop, since
+    // there is no window to ask about file changes and Strict Mode requests.
+    cancelAllTurns()
   }
 })
 
@@ -573,6 +585,8 @@ app.on('before-quit', (event) => {
   // Close MCP connections (and their child processes) first, then quit for real.
   if (!mcpShutdownStarted) {
     mcpShutdownStarted = true
+    // Running turns stop and save what they wrote while the database is open.
+    shutdownTurns()
     let mcpService: ReturnType<typeof getMcpService> | null = null
     try {
       mcpService = getMcpService()

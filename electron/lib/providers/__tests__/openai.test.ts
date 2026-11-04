@@ -161,3 +161,86 @@ describe('reasoning echo', () => {
     expect(new ReasoningCollector().echo()).toBeNull()
   })
 })
+
+describe('prompt caching', () => {
+  const USAGE = (usage: Record<string, unknown>) => ({ choices: [], usage })
+
+  it('sends OpenAI a prompt_cache_key for chat requests only', async () => {
+    const openai = () => new OpenAIProvider('key', 'https://api.openai.com/v1', { promptCacheKey: true })
+    const chat = await stream(openai(), [STOP], { cacheKey: 'chat-1' })
+    expect(chat.body.prompt_cache_key).toBe('chat-1')
+
+    vi.restoreAllMocks()
+    const title = await stream(openai(), [STOP])
+    expect(title.body).not.toHaveProperty('prompt_cache_key')
+
+    vi.restoreAllMocks()
+    const compatible = await stream(new OpenAIProvider('', 'http://localhost:8080/v1'), [STOP], { cacheKey: 'chat-1' })
+    expect(compatible.body).not.toHaveProperty('prompt_cache_key')
+  })
+
+  it('routes OpenRouter chats by session, and asks Anthropic models to cache', async () => {
+    const claude = await stream(new OpenRouterProvider('key'), [STOP], { model: 'anthropic/claude-sonnet-5.5', cacheKey: 'chat-1' })
+    expect(claude.body.session_id).toBe('chat-1')
+    expect(claude.body.cache_control).toEqual({ type: 'ephemeral' })
+
+    vi.restoreAllMocks()
+    const gpt = await stream(new OpenRouterProvider('key'), [STOP], { model: 'openai/gpt-5.5', cacheKey: 'chat-1' })
+    expect(gpt.body.session_id).toBe('chat-1')
+    expect(gpt.body).not.toHaveProperty('cache_control')
+
+    vi.restoreAllMocks()
+    const title = await stream(new OpenRouterProvider('key'), [STOP], { model: 'anthropic/claude-sonnet-5.5' })
+    expect(title.body).not.toHaveProperty('session_id')
+    expect(title.body).not.toHaveProperty('cache_control')
+  })
+
+  it('retries without the caching fields when a server rejects them', async () => {
+    const rejected = Object.assign(new axios.AxiosError('Request failed with status code 400'), {
+      response: { status: 400, data: Readable.from([JSON.stringify({ error: { message: 'Unknown field cache_control' } })]) }
+    })
+    const post = vi.spyOn(axios, 'post').mockRejectedValueOnce(rejected).mockResolvedValueOnce(sse(STOP))
+    const chunks: ProviderChunk[] = []
+
+    await new Promise<void>((resolve) => {
+      new OpenRouterProvider('key').sendStreaming({
+        messages: [{ role: 'user', content: 'hi' }],
+        model: 'anthropic/claude-sonnet-5.5',
+        tools: [],
+        cacheKey: 'chat-1',
+        onChunk: (chunk) => {
+          chunks.push(chunk)
+          if (chunk.type === 'done') resolve()
+        }
+      })
+    })
+
+    const retryBody = post.mock.calls[1][1] as Record<string, unknown>
+    expect(retryBody).not.toHaveProperty('cache_control')
+    expect(retryBody).not.toHaveProperty('session_id')
+    expect(chunks).toContainEqual({ type: 'text', content: 'Hi' })
+  })
+
+  it('reads cache reads and writes from the usage report', async () => {
+    const reported = await stream(new OpenRouterProvider('key'), [STOP, USAGE({
+      prompt_tokens: 5000,
+      completion_tokens: 20,
+      prompt_tokens_details: { cached_tokens: 4200, cache_write_tokens: 700 }
+    })])
+    expect(reported.chunks).toContainEqual({
+      type: 'usage',
+      usage: { promptTokens: 5000, completionTokens: 20, contextLength: null, estimated: false, cachedTokens: 4200, cacheWriteTokens: 700 }
+    })
+
+    vi.restoreAllMocks()
+    const deepseek = await stream(new OpenAIProvider('key', 'https://api.deepseek.com/v1'), [STOP, USAGE({
+      prompt_tokens: 900, completion_tokens: 5, prompt_cache_hit_tokens: 640
+    })])
+    expect(deepseek.chunks).toContainEqual(expect.objectContaining({ type: 'usage', usage: expect.objectContaining({ cachedTokens: 640 }) }))
+
+    vi.restoreAllMocks()
+    const silent = await stream(new OpenAIProvider('key', 'http://localhost:8080/v1'), [STOP, USAGE({ prompt_tokens: 900, completion_tokens: 5 })])
+    const usage = silent.chunks.find((c) => c.type === 'usage')
+    expect(usage && 'usage' in usage ? usage.usage : null).not.toHaveProperty('cachedTokens')
+  })
+})

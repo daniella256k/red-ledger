@@ -52,7 +52,6 @@ interface ConversationState {
   loadMessages: (conversationId: string) => Promise<void>
   addMessage: (data: CreateMessageInput) => Promise<Message>
   touchConversation: (id: string, updatedAt?: number) => void
-  updateMessage: (id: string, data: Partial<Message>) => void
   /** Shows another version of a message (see RedLedgerAPI.selectBranch). */
   selectBranch: (messageId: string, options?: SelectBranchOptions) => Promise<void>
   /** Deletes a version of a message and everything after it. */
@@ -313,15 +312,6 @@ export const useConversationStore = create<ConversationState>((set, get) => ({
         state.conversations.map((c) =>
           c.id === id ? { ...c, updatedAt } : c
         )
-      )
-    }))
-  },
-
-  // Local-only update (for streaming content accumulation)
-  updateMessage: (id, data) => {
-    set((state) => ({
-      messages: state.messages.map((m) =>
-        m.id === id ? { ...m, ...data } : m
       )
     }))
   },

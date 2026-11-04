@@ -1,5 +1,5 @@
-import { useRef, useEffect, useCallback, useState } from 'react'
-import { useConversationStore, useUIStore } from '@/store'
+import { useRef, useEffect, useCallback, useMemo, useState } from 'react'
+import { useConversationStore, useTurnStore, useUIStore } from '@/store'
 import { formatError } from '@/lib/errors'
 import { notify } from '@/lib/notify'
 import type { Message } from '@/types'
@@ -38,6 +38,23 @@ export function MessageList({
   const selectBranch = useConversationStore((s) => s.selectBranch)
   const deleteMessageBranch = useConversationStore((s) => s.deleteMessageBranch)
   const activeConversationId = useConversationStore((s) => s.activeConversationId)
+  // The reply being written in this chat, as far as it has got. The saved
+  // message lags behind it, so the live text is shown in its place.
+  const liveTurn = useTurnStore((s) => (activeConversationId ? s.turns[activeConversationId] : undefined))
+  const liveToolCalls = liveTurn?.toolCalls
+  const liveToolCallsJson = useMemo(
+    () => (liveToolCalls && liveToolCalls.length > 0 ? JSON.stringify(liveToolCalls) : undefined),
+    [liveToolCalls]
+  )
+  const withLiveReply = useCallback((message: Message): Message => {
+    if (!liveTurn || message.id !== liveTurn.messageId) return message
+    return {
+      ...message,
+      content: liveTurn.content,
+      thinking: liveTurn.thinking || undefined,
+      toolCalls: liveToolCallsJson
+    }
+  }, [liveTurn, liveToolCallsJson])
   // Replies whose workspace file changes can still be undone.
   const [undoableReplies, setUndoableReplies] = useState<ReadonlySet<string>>(new Set())
   const scrollContainerRef = useRef<HTMLDivElement>(null)
@@ -206,7 +223,7 @@ export function MessageList({
           return (
             <MessageBubble
               key={message.id}
-              message={message}
+              message={withLiveReply(message)}
               isStreaming={messageIsStreaming}
               isReceivingThinking={isReceivingThinking && messageIsStreaming}
               onRetry={canBranch ? () => onRetry(message.id) : undefined}

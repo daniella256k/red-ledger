@@ -9,7 +9,8 @@ No accounts, no cloud sync, no telemetry. Settings and chat data stay on your ma
 - Multi-provider chat with streaming: OpenAI, OpenRouter, Ollama, LM Studio, and any custom OpenAI-compatible server (llama.cpp, vLLM, Jan, a self-hosted gateway).
 - Tool calling for local file ops + web/wiki/url tools (up to 75 tool calls per turn, with check-in nudges to the model at 25, 40, and 50).
 - Workspace jail for file safety, with optional strict confirmation mode.
-- Each chat remembers its workspace folder and switches back to it when reopened. A reply in progress keeps working in its own chat's folder even if you switch to another chat.
+- Each chat remembers its workspace folder and switches back to it when reopened.
+- Replies run in the background: a chat keeps replying (in its own folder) while you read or write in other chats, and several chats can reply at once. A reply survives View → Reload, and quitting mid-reply keeps what it wrote. A spinner in the chat list marks the chats that are working.
 - Context profiles: sets of 3 context files (`system`, `user`, `org`) injected into every run. Each chat remembers its own profile, picked in the Context panel.
 - MCP connections: add stdio or Streamable HTTP MCP servers in Settings; their tools join the built-in ones.
 - Text file attachments of any kind: plain text, code, config, and markup (`.py`, `.yaml`, `.json`, `.xml`, `.css`, `Dockerfile`, ...) are detected by content, no renaming needed. PDF and Word (`.doc`, `.docx`) text extraction included.
@@ -70,6 +71,7 @@ Unpackaged runs (`npm run dev`, `npm run preview`) use their own profile folder,
 - LM Studio uses its OpenAI-compatible endpoints (`/v1`), which support tools.
 - Custom (OpenAI-compatible) takes any base URL up to the `/v1` path (default `http://localhost:8080/v1`, llama.cpp's server). The API key is optional and only sent when set.
 - A reply cut off by the Max Tokens limit shows a warning instead of passing as a complete answer.
+- Prompt caching: a reply that calls tools resends the whole chat with every request, and providers can serve the part they have seen from a cache (cheaper and faster). Through OpenRouter every chat request carries the chat's id as `session_id`, so it keeps reaching the same provider's cache, and Anthropic models are asked to cache (`cache_control`, kept 5 minutes). OpenAI gets the chat's id as `prompt_cache_key`. OpenAI, DeepSeek, Grok, Moonshot and Gemini 2.5+ cache on their own. Requests start with the same tools and history every time so the cached part keeps matching. When the provider reports it, the context meter's tooltip and the chat info popover show how much of the last reply's input came from the cache.
 
 ## Context Meter
 
@@ -140,6 +142,7 @@ red-ledger/
 |   |   |-- ConversationService.ts   # SQLite chats, message tree, image store, full-text search
 |   |   |-- DocumentTextService.ts   # PDF/Word/spreadsheet text extraction dispatch
 |   |   |-- LlmService.ts            # Streaming, tool loop, context usage
+|   |   |-- TurnService.ts           # Runs each chat turn (reply or compaction) and saves it as it streams
 |   |   |-- McpService.ts            # MCP connections; registers <server>__<tool> tools
 |   |   |-- PdfAttachmentService.ts
 |   |   |-- PdfRenderService.ts      # Markdown -> PDF for write_pdf

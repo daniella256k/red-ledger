@@ -123,11 +123,7 @@ export function ChatInput({ streaming }: ChatInputProps) {
   const settings = useSettingsStore((s) => s.settings)
   const workspacePath = useUIStore((s) => s.workspacePath)
   const addToast = useUIStore((s) => s.addToast)
-  const { isStreaming, streamingConversationId, isCompacting, compact, sendMessage, cancel } = streaming
-  // One reply runs at a time. Its Stop button shows only in its own chat;
-  // other chats can be read and typed in, and send once it finishes.
-  const isBusyHere = isStreaming && streamingConversationId === activeConversationId
-  const isBusyElsewhere = isStreaming && !isBusyHere
+  const { isStreaming, isCompacting, compact, sendMessage, cancel } = streaming
   // Something to compact: a reply since the chat's last summary (or since it began).
   const canCompact = useConversationStore((s) => {
     const sinceSummary = s.messages.slice(s.messages.map((m) => m.role).lastIndexOf('system') + 1)
@@ -143,7 +139,7 @@ export function ChatInput({ streaming }: ChatInputProps) {
 
   const handlePaste = useCallback((event: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const imageFiles = getClipboardImageFiles(event)
-    if (imageFiles.length === 0 || !settings || isBusyHere) return
+    if (imageFiles.length === 0 || !settings || isStreaming) return
 
     const timestamp = Date.now()
 
@@ -164,7 +160,7 @@ export function ChatInput({ streaming }: ChatInputProps) {
         })
       }
     })()
-  }, [addToast, isBusyHere, onAddAttachments, settings])
+  }, [addToast, isStreaming, onAddAttachments, settings])
 
   const handleSend = useCallback(async () => {
     const content = input.trim()
@@ -246,18 +242,18 @@ export function ChatInput({ streaming }: ChatInputProps) {
           placeholder={
             isDisabled
               ? 'Loading settings...'
-              : isBusyHere
+              : isStreaming
                 ? 'Waiting for response...'
                 : activeConversationId
                   ? 'Type a message... (Enter to send)'
                   : 'Start a new conversation... (Enter to send)'
           }
-          disabled={isDisabled || isBusyHere}
+          disabled={isDisabled || isStreaming}
           rows={1}
           className="textarea flex-1 resize-none overflow-y-hidden text-sm min-h-[40px] max-h-[200px] leading-relaxed focus:outline-hidden focus:border-weathered"
         />
 
-        {isBusyHere ? (
+        {isStreaming ? (
           <button
             onClick={cancel}
             className="btn btn-error btn-sm h-10 w-10 min-w-[40px] p-0 shrink-0"
@@ -277,9 +273,9 @@ export function ChatInput({ streaming }: ChatInputProps) {
             </button>
             <button
               onClick={handleSend}
-              disabled={isDisabled || isBusyElsewhere || (!input.trim() && attachments.length === 0)}
+              disabled={isDisabled || (!input.trim() && attachments.length === 0)}
               className="btn btn-primary btn-sm h-10 w-10 min-w-[40px] p-0 shrink-0"
-              title={isBusyElsewhere ? 'A reply is running in another chat. Send when it finishes.' : 'Send'}
+              title="Send"
             >
               <Send size={16} />
             </button>
@@ -289,14 +285,11 @@ export function ChatInput({ streaming }: ChatInputProps) {
 
       {(isStreaming || contextUsage || canCompact) && (
         <div className="flex items-center gap-2 mt-2 text-xs text-soft-charcoal/40">
-          {isBusyHere && (
+          {isStreaming && (
             <>
               <span className="loading loading-dots loading-xs text-rca-red" />
               <span>{isCompacting ? 'Summarizing the chat...' : 'Generating response...'}</span>
             </>
-          )}
-          {isBusyElsewhere && (
-            <span>{isCompacting ? 'Another chat is being compacted.' : 'A reply is running in another chat.'}</span>
           )}
           <div className="ml-auto flex items-center gap-3">
             {canCompact && !isStreaming && (

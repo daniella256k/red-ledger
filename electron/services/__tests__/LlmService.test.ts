@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { LlmService, MAX_TOOL_CALLS, buildPastReplyMessages, needsReasoningReplay, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext, formatMessageTime, dropOldestToFit } from '../LlmService'
+import { LlmService, MAX_TOOL_CALLS, addCacheUsage, buildPastReplyMessages, needsReasoningReplay, buildToolCallBudgetNotice, estimateUsage, fitToolResultsToContext, formatMessageTime, dropOldestToFit } from '../LlmService'
 import { parseStoredToolCalls } from '../../../src/lib/storedToolCalls'
 import { sanitizeSettings } from '../SettingsService'
 import { BaseLLMProvider, readContextLength, reportedUsageChunk } from '../../lib/providers/base'
@@ -537,38 +537,6 @@ describe('LlmService cancellation', () => {
     expect(chunks[chunks.length - 1].type).toBe('done')
   })
 
-  it('stops the running reply of a chat by its id, as when the chat is deleted', async () => {
-    let rounds = 0
-    class ToolCallingProvider extends BaseLLMProvider {
-      sendStreaming(options: ProviderSendOptions) {
-        rounds++
-        queueMicrotask(() => {
-          options.onChunk({ type: 'tool_call', toolCall: { id: `a-${rounds}`, name: 'noop', arguments: {} } })
-          options.onChunk({ type: 'done' })
-        })
-        return { abort: () => {} }
-      }
-      async listModels() { return [] }
-    }
-    registerProvider({ name: 'openai', displayName: 'Tools', defaultBaseUrl: '', factory: () => new ToolCallingProvider('', '') })
-
-    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
-    const chunks: StreamChunk[] = []
-    await service.orchestrateStream(
-      { conversationId: 'doomed', model: 'test', provider: 'openai', messages: [{ role: 'user', content: 'go', timestamp: 't' }] },
-      'stream-doomed',
-      { send: (chunk) => chunks.push(chunk) },
-      async (tc) => {
-        service.cancelConversationStreams('other-chat')
-        service.cancelConversationStreams('doomed')
-        return { ...tc, result: { ok: true } }
-      }
-    )
-
-    expect(rounds).toBe(1)
-    expect(chunks[chunks.length - 1].type).toBe('done')
-  })
-
   it('stops when cancelled while the context window is still being looked up', async () => {
     let requests = 0
     let releaseLookup: (value: number | null) => void = () => {}
@@ -952,5 +920,60 @@ describe('LlmService compaction', () => {
     expect(dropOldestToFit(messages, [], 8_000)).toBe(2)
     expect(messages.map((m) => m.role)).toEqual(['system', 'user'])
     expect(dropOldestToFit(messages, [], null)).toBe(0)
+  })
+})
+
+describe('LlmService prompt cache use', () => {
+  it('adds up cache reads and writes over a turn, and reports nothing for providers that say nothing', () => {
+    const base = { completionTokens: 1, contextLength: null, estimated: false }
+    let total = addCacheUsage(null, { ...base, promptTokens: 1000, cacheWriteTokens: 900 })
+    total = addCacheUsage(total, { ...base, promptTokens: 1500, cachedTokens: 900, cacheWriteTokens: 500 })
+    expect(total).toEqual({ requests: 2, promptTokens: 2500, readTokens: 900, writeTokens: 1400 })
+
+    expect(addCacheUsage(null, { ...base, promptTokens: 1000 })).toBeNull()
+    expect(addCacheUsage(total, { ...base, promptTokens: 1000 })).toBe(total)
+  })
+
+  it('sends the chat id as the cache key and reports the turn cache use with its final usage', async () => {
+    const keys: Array<string | undefined> = []
+    let round = 0
+    class CachingProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        keys.push(options.cacheKey)
+        round += 1
+        const current = round
+        queueMicrotask(() => {
+          if (current === 1) {
+            options.onChunk({ type: 'tool_call', toolCall: { id: 'c1', name: 'noop_cache', arguments: {} } })
+            options.onChunk(reportedUsageChunk(2000, 10, { cachedTokens: 0, cacheWriteTokens: 1800 })!)
+          } else {
+            options.onChunk({ type: 'text', content: 'Done.' })
+            options.onChunk(reportedUsageChunk(2100, 5, { cachedTokens: 1800 })!)
+          }
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+    }
+    registerProvider({ name: 'openai', displayName: 'Caching', defaultBaseUrl: '', factory: () => new CachingProvider('', '') })
+    registerTool({
+      definition: { type: 'function', function: { name: 'noop_cache', description: 'Does nothing', parameters: { type: 'object' } } },
+      execute: async () => ({ ok: true })
+    })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    const chunks: StreamChunk[] = []
+    await service.orchestrateStream(
+      { conversationId: 'chat-7', model: 'cache-test', provider: 'openai', messages: [{ role: 'user', content: 'go', timestamp: 't' }] },
+      'stream-cache',
+      { send: (chunk) => chunks.push(chunk) },
+      async (tc) => ({ ...tc, result: { ok: true } })
+    )
+
+    expect(keys).toEqual(['chat-7', 'chat-7'])
+    const usage = chunks.find((c) => c.type === 'usage')?.usage
+    expect(usage).toMatchObject({ promptTokens: 2100, cachedTokens: 1800 })
+    expect(usage?.cache).toEqual({ requests: 2, promptTokens: 4100, readTokens: 1800, writeTokens: 1800 })
   })
 })

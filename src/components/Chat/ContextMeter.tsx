@@ -2,6 +2,7 @@ import {
   CONTEXT_WARNING_RATIO,
   contextRatio,
   contextTokensUsed,
+  describeCacheUsage,
   formatTokenCount
 } from '@/lib/contextUsage'
 import type { ContextUsage } from '@/types'
@@ -12,7 +13,10 @@ function buildTooltip(usage: ContextUsage, ratio: number | null): string {
   const fill = usage.contextLength && ratio !== null
     ? `${used} of ${formatTokenCount(usage.contextLength)} tokens used (${Math.round(ratio * 100)}%)`
     : `${used} tokens used (context limit unknown)`
-  return usage.estimated ? `${fill}\nEstimated` : fill
+  const lines = [fill]
+  if (usage.estimated) lines.push('Estimated')
+  if (usage.cache) lines.push(describeCacheUsage(usage.cache))
+  return lines.join('\n')
 }
 
 /**

@@ -154,7 +154,15 @@ function computeBackoffMs(attempt: number): number {
 }
 
 /** Optional request fields some OpenAI-compatible servers reject with a 400. */
-const OPTIONAL_BODY_FIELDS = ['reasoning_effort', 'reasoning', 'stream_options']
+const OPTIONAL_BODY_FIELDS = [
+  'reasoning_effort',
+  'reasoning',
+  'stream_options',
+  // Prompt caching hints (see buildCacheControls).
+  'prompt_cache_key',
+  'session_id',
+  'cache_control'
+]
 
 function removeOptionalControls(body: Record<string, unknown>): Record<string, unknown> | null {
   let changed = false
@@ -216,6 +224,12 @@ export interface OpenAIProviderOptions {
    * servers get longer, since a large prompt can take minutes to process on CPU.
    */
   streamTimeoutMs?: number
+  /**
+   * Send the chat's id as `prompt_cache_key`, which OpenAI uses to route a
+   * chat's requests to the machine that has its prompt cached. Only for
+   * OpenAI itself: other servers don't know the field.
+   */
+  promptCacheKey?: boolean
 }
 
 /** Matches Ollama and LM Studio's native mode. */
@@ -224,11 +238,23 @@ export const LOCAL_SERVER_STREAM_TIMEOUT_MS = 300_000
 export class OpenAIProvider extends BaseLLMProvider {
   private readonly maxTokensField: NonNullable<OpenAIProviderOptions['maxTokensField']>
   private readonly streamTimeoutMs: number
+  private readonly promptCacheKey: boolean
 
   constructor(apiKey: string, baseUrl: string = 'https://api.openai.com/v1', options: OpenAIProviderOptions = {}) {
     super(apiKey, baseUrl)
     this.maxTokensField = options.maxTokensField ?? 'max_tokens'
     this.streamTimeoutMs = options.streamTimeoutMs ?? 120_000
+    this.promptCacheKey = options.promptCacheKey === true
+  }
+
+  /**
+   * Request fields that help the server reuse its prompt cache for a chat.
+   * Requests without a cache key (chat titles) get none. A server that
+   * rejects them is retried without them.
+   */
+  protected buildCacheControls(_model: string, cacheKey: string | undefined): Record<string, unknown> | undefined {
+    if (!cacheKey || !this.promptCacheKey) return undefined
+    return { prompt_cache_key: cacheKey }
   }
 
   protected getAuthHeaders(): Record<string, string> {
@@ -261,7 +287,7 @@ export class OpenAIProvider extends BaseLLMProvider {
   }
 
   private async _stream(options: ProviderSendOptions, controller: AbortController): Promise<void> {
-    const { messages, model, tools, temperature, maxTokens, reasoningEnabled, extraBody, onChunk } = options
+    const { messages, model, tools, temperature, maxTokens, reasoningEnabled, extraBody, cacheKey, onChunk } = options
 
     const body: Record<string, unknown> = {
       model,
@@ -276,6 +302,11 @@ export class OpenAIProvider extends BaseLLMProvider {
     const reasoningControls = this.buildReasoningControls(reasoningEnabled)
     if (reasoningControls) {
       Object.assign(body, reasoningControls)
+    }
+
+    const cacheControls = this.buildCacheControls(model, cacheKey)
+    if (cacheControls) {
+      Object.assign(body, cacheControls)
     }
 
     if (extraBody && typeof extraBody === 'object') {
@@ -424,7 +455,13 @@ export class OpenAIProvider extends BaseLLMProvider {
 
           // With include_usage the last chunk carries usage and an empty choices array.
           if (data.usage) {
-            const usageChunk = reportedUsageChunk(data.usage.prompt_tokens, data.usage.completion_tokens)
+            // Prompt cache counts: OpenAI and OpenRouter use prompt_tokens_details;
+            // DeepSeek's own API reports prompt_cache_hit_tokens.
+            const details = data.usage.prompt_tokens_details
+            const usageChunk = reportedUsageChunk(data.usage.prompt_tokens, data.usage.completion_tokens, {
+              cachedTokens: details?.cached_tokens ?? data.usage.prompt_cache_hit_tokens,
+              cacheWriteTokens: details?.cache_write_tokens
+            })
             if (usageChunk) onChunk(usageChunk)
           }
 
@@ -562,5 +599,5 @@ registerProvider({
   name: 'openai',
   displayName: 'OpenAI',
   defaultBaseUrl: 'https://api.openai.com/v1',
-  factory: (settings) => new OpenAIProvider(settings.apiKey, settings.baseUrl, { maxTokensField: 'max_completion_tokens' })
+  factory: (settings) => new OpenAIProvider(settings.apiKey, settings.baseUrl, { maxTokensField: 'max_completion_tokens', promptCacheKey: true })
 })

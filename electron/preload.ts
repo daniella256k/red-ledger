@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AttachmentParseResult, McpServerStatus, MenuAction, RedLedgerAPI, StreamChunk } from '../src/types'
+import type { AttachmentParseResult, McpServerStatus, MenuAction, RedLedgerAPI, TurnEvent } from '../src/types'
 
 function getFileName(value: unknown): string {
   if (!value || typeof value !== 'object') return 'Unknown file'
@@ -111,8 +111,6 @@ const api: RedLedgerAPI = {
   createMessage: (data) =>
     ipcRenderer.invoke('db:createMessage', data),
 
-  updateMessage: (id: string, data) =>
-    ipcRenderer.invoke('db:updateMessage', id, data),
 
   selectBranch: (conversationId: string, messageId: string, options) =>
     ipcRenderer.invoke('db:selectBranch', conversationId, messageId, options),
@@ -120,50 +118,32 @@ const api: RedLedgerAPI = {
   deleteMessageBranch: (conversationId: string, messageId: string) =>
     ipcRenderer.invoke('db:deleteMessageBranch', conversationId, messageId),
 
-  // ─── LLM Streaming ──────────────────────────────────────────────────────
+  // ─── Turns ───────────────────────────────────────────────────────────────
 
-  sendMessage: (request, onStream) => {
-    // Generate a unique channel ID to prevent collisions between concurrent streams
-    const channel = `llm:stream:${Date.now()}-${Math.random().toString(36).slice(2)}`
+  startTurn: (request) =>
+    ipcRenderer.invoke('turn:start', request),
 
-    const handler = (_event: Electron.IpcRendererEvent, chunk: unknown) => {
-      onStream(chunk as Parameters<typeof onStream>[0])
+  compactChat: (conversationId) =>
+    ipcRenderer.invoke('turn:compact', conversationId),
+
+  cancelTurn: (conversationId) =>
+    ipcRenderer.invoke('turn:cancel', conversationId),
+
+  listActiveTurns: () =>
+    ipcRenderer.invoke('turn:listActive'),
+
+  onTurnEvent: (handler) => {
+    const listener = (_event: Electron.IpcRendererEvent, turnEvent: unknown) => {
+      if (turnEvent && typeof turnEvent === 'object') handler(turnEvent as TurnEvent)
     }
-
-    ipcRenderer.on(channel, handler)
-    void ipcRenderer.invoke('llm:sendMessage', request, channel).catch((err) => {
-      ipcRenderer.removeListener(channel, handler)
-      const message = err instanceof Error ? err.message : String(err)
-      onStream({ type: 'error', error: message } as StreamChunk)
-      onStream({ type: 'done' } as StreamChunk)
-    })
-
-    // Return cleanup function
+    ipcRenderer.on('turn:event', listener)
     return () => {
-      ipcRenderer.removeListener(channel, handler)
-      ipcRenderer.invoke('llm:cancelStream', channel).catch(() => {
-        // Stream may already be finished
-      })
+      ipcRenderer.removeListener('turn:event', listener)
     }
   },
 
   listModels: (provider: string) =>
     ipcRenderer.invoke('llm:listModels', provider),
-
-  generateTitle: (request) =>
-    ipcRenderer.invoke('llm:generateTitle', request),
-
-  compactChat: (request) => {
-    const channel = `llm:compact:${Date.now()}-${Math.random().toString(36).slice(2)}`
-    return {
-      result: ipcRenderer.invoke('llm:compact', request, channel),
-      cancel: () => {
-        ipcRenderer.invoke('llm:cancelStream', channel).catch(() => {
-          // Already finished
-        })
-      }
-    }
-  },
 
   // ─── File history ────────────────────────────────────────────────────────
 

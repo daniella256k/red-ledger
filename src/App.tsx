@@ -2,7 +2,7 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import { Layout } from './components/Layout'
 import { Toaster } from './components/ui/Toast'
 import { ExportChatModal } from './components/Chat/ExportChatModal'
-import { useConversationStore, useSettingsStore, useUIStore } from './store'
+import { initTurnEvents, useConversationStore, useSettingsStore, useUIStore } from './store'
 import { DARK_THEME, LIGHT_THEME, useDarkMode } from './hooks/useDarkMode'
 import { notify } from './lib/notify'
 import { formatError } from './lib/errors'
@@ -27,6 +27,11 @@ export default function App() {
   useEffect(() => {
     loadSettings()
   }, [loadSettings])
+
+  // Follow the chats' running turns, including any still running from before a reload.
+  useEffect(() => {
+    initTurnEvents()
+  }, [])
 
   // Keep <html> and the page URL on the active theme, so the page behind the
   // app matches and View > Reload boots straight into it (see theme-boot.js).

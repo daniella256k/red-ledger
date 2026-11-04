@@ -1,4 +1,4 @@
-import type { ContextUsage } from '@/types'
+import type { CacheUsage, ContextUsage } from '@/types'
 
 /** Share of the context window at which the meter turns red. */
 export const CONTEXT_WARNING_RATIO = 0.8
@@ -29,4 +29,20 @@ export function describeContextUsage(usage: ContextUsage): string {
   return usage.contextLength
     ? `${used} / ${formatTokenCount(usage.contextLength)} tokens`
     : `${used} tokens`
+}
+
+/**
+ * How much of a reply's input the provider read from its prompt cache:
+ * "48.2k of 61k input tokens from cache (79%) across 5 requests".
+ */
+export function describeCacheUsage(cache: CacheUsage): string {
+  const across = cache.requests > 1 ? ` across ${cache.requests} requests` : ''
+  if (cache.readTokens > 0) {
+    const share = cache.promptTokens > 0 ? Math.round((cache.readTokens / cache.promptTokens) * 100) : 0
+    return `${formatTokenCount(cache.readTokens)} of ${formatTokenCount(cache.promptTokens)} input tokens from cache (${share}%)${across}`
+  }
+  if (cache.writeTokens > 0) {
+    return `${formatTokenCount(cache.writeTokens)} tokens cached for the next request${across}`
+  }
+  return `Nothing read from cache${across}`
 }
