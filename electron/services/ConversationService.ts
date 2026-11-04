@@ -115,6 +115,14 @@ export interface AttachmentBlob {
   data: Buffer
 }
 
+/** The database was made by a newer version of the app, so this one won't open it. */
+export class DatabaseVersionError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'DatabaseVersionError'
+  }
+}
+
 /** Page counts behind the database's size on disk. */
 export interface DatabasePageStats {
   pageSize: number
@@ -148,13 +156,65 @@ export class ConversationService {
 
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('foreign_keys = ON')
-    this.createTables()
+    try {
+      this.migrate()
+    } catch (err) {
+      this.db.close()
+      throw err
+    }
+    this.messageSearchIndexed = !!this.db
+      .prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'messages_fts'")
+      .get()
     this.fileHistory = new FileHistoryStore(this.db)
   }
 
   // ─── Schema ───────────────────────────────────────────────────────────────
 
-  private createTables(): void {
+  /**
+   * Schema changes, oldest first. A database records how many it has had in
+   * SQLite's user_version, so each runs once; a new change goes at the end
+   * and is never edited after release. Each step also checks before it
+   * changes anything, because databases from before 1.9 had every step
+   * applied with no version recorded (they start at 0).
+   */
+  private readonly migrations: Array<{ name: string; run: () => void }> = [
+    { name: 'base tables', run: () => this.createBaseTables() },
+    { name: 'drop the provider CHECK constraint', run: () => this.migrateConversationProviderConstraintIfNeeded() },
+    { name: 'request info and context profile columns', run: () => this.addColumnsMissingAfterProviderMigration() },
+    { name: 'list indexes', run: () => this.createListIndexes() },
+    { name: 'message search index', run: () => { this.ensureMessageSearchIndex() } },
+    { name: 'images out of message text', run: () => this.moveInlineImagesToAttachmentStore() },
+    { name: 'message tree', run: () => this.addMessageTree() },
+    { name: 'file history', run: () => FileHistoryStore.createSchema(this.db) }
+  ]
+
+  /** The schema version this build writes (see `migrations`). */
+  get schemaVersion(): number {
+    return this.migrations.length
+  }
+
+  private migrate(): void {
+    const current = this.db.pragma('user_version', { simple: true }) as number
+    if (current > this.migrations.length) {
+      throw new DatabaseVersionError(
+        `This chat database was last opened by a newer version of Red Ledger (schema ${current}; this version knows ${this.migrations.length}). `
+          + 'Update Red Ledger to open it. Nothing was changed.'
+      )
+    }
+
+    for (let version = current + 1; version <= this.migrations.length; version++) {
+      const migration = this.migrations[version - 1]
+      try {
+        migration.run()
+      } catch (err) {
+        throw new Error(`Database upgrade step ${version} (${migration.name}) failed: ${err instanceof Error ? err.message : String(err)}`, { cause: err })
+      }
+      // Recorded after each step, so an interrupted upgrade resumes where it stopped.
+      this.db.pragma(`user_version = ${version}`)
+    }
+  }
+
+  private createBaseTables(): void {
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS conversations (
         id TEXT PRIMARY KEY,
@@ -203,23 +263,15 @@ export class ConversationService {
     if (!conversationColumns.some((column) => column.name === 'is_pinned')) {
       this.db.exec('ALTER TABLE conversations ADD COLUMN is_pinned INTEGER NOT NULL DEFAULT 0')
     }
+  }
 
-    this.migrateConversationProviderConstraintIfNeeded()
-
-    this.addColumnsMissingAfterProviderMigration()
-
+  private createListIndexes(): void {
     this.db.exec(
       `CREATE INDEX IF NOT EXISTS idx_messages_conversation ON messages(conversation_id);
        CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC);
        CREATE INDEX IF NOT EXISTS idx_conversations_pinned_updated ON conversations(is_pinned DESC, updated_at DESC);
        CREATE INDEX IF NOT EXISTS idx_message_blobs_blob ON message_blobs(blob_id);`
     )
-
-    this.messageSearchIndexed = this.ensureMessageSearchIndex()
-
-    this.moveInlineImagesToAttachmentStore()
-
-    this.addMessageTree()
   }
 
   /**

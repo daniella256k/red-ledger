@@ -187,6 +187,9 @@ export function summarizeToolResult(toolCall: ToolCall): string {
   if (Array.isArray(result)) return toolCall.name === 'list_files' ? plural(countNodes(result), 'item') : 'done'
 
   switch (toolCall.name) {
+    case 'list_files':
+      // A listing cut off at its entry limit: { entries, truncated, note }.
+      return `${plural(countNodes((result as { entries?: unknown }).entries), 'item')} (more not listed)`
     case 'fetch_url': {
       const content = typeof result.content === 'string' ? result.content : ''
       return `${formatCount(content.length)} chars`

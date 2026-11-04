@@ -1,7 +1,9 @@
 import { readFileSync } from 'fs'
 import { createRequire } from 'module'
 
-const require = createRequire(import.meta.url)
+// Not named `require`: the bundler's CommonJS shim declares that name in the
+// worker chunk this file is built into, and a second declaration won't parse.
+const requireModule = createRequire(import.meta.url)
 export const PDF_EMPTY_TEXT_NOTICE = '[No extractable text found in PDF.]'
 
 interface CanvasGeometryModule {
@@ -31,7 +33,7 @@ function ensurePdfGlobals(): void {
 
   if (runtime.DOMMatrix === undefined || runtime.DOMPoint === undefined || runtime.DOMRect === undefined) {
     try {
-      const geometry = require('@napi-rs/canvas/geometry') as CanvasGeometryModule
+      const geometry = requireModule('@napi-rs/canvas/geometry') as CanvasGeometryModule
       if (runtime.DOMMatrix === undefined) runtime.DOMMatrix = geometry.DOMMatrix
       if (runtime.DOMPoint === undefined) runtime.DOMPoint = geometry.DOMPoint
       if (runtime.DOMRect === undefined) runtime.DOMRect = geometry.DOMRect

@@ -65,9 +65,14 @@ function toRelativeKey(workspaceRoot: string, fullPath: string): string {
 export class FileHistoryStore {
   private db: Database.Database
 
+  /** Expects the schema in place (ConversationService's migrations call createSchema). */
   constructor(db: Database.Database) {
     this.db = db
-    this.db.exec(`
+  }
+
+  /** The file history tables. Safe to run again: everything is created only if missing. */
+  static createSchema(db: Database.Database): void {
+    db.exec(`
       -- File contents a reply replaced, once per distinct content, gzipped.
       CREATE TABLE IF NOT EXISTS file_versions (
         id TEXT PRIMARY KEY,

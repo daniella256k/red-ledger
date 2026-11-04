@@ -2,7 +2,7 @@ import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
 import type { DialogAdapter } from '../../services/WorkspaceService'
 import { numberArg, requireObjectArgs, requireStringArg } from './args'
-import { READ_FILE_MAX_LINES, sliceFileContent } from './fileSlice'
+import { READ_FILE_MAX_LINES } from './fileSlice'
 
 function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
   if (!win) return null
@@ -15,7 +15,7 @@ registerTool({
     function: {
       name: 'read_file',
       description: 'Read a file in the user\'s workspace. For PDF and Word files, returns the extracted text; for spreadsheets (.xlsx, .xls, .ods, ...), returns each sheet as CSV with its cell range (hyperlinked cells as [text](url)), followed by its formulas. '
-        + `Small files come back whole. Files over ${READ_FILE_MAX_LINES} lines come back one page at a time with truncated: true and next_offset; call again with that offset to continue. `
+        + `Small files come back whole. Files over ${READ_FILE_MAX_LINES} lines come back one page at a time with truncated: true and next_offset; call again with that offset to continue. Files of any size can be paged this way. Binary files (images, archives, executables) are refused with code UNSUPPORTED_FILE. `
         + 'Pass offset/limit to read a specific range: those lines are prefixed with "N | " (the prefix is not part of the file, so leave it out of edit_file strings). total_lines is always included. In Strict Mode the user is asked first; if they decline, the result is an error with code USER_DENIED.',
       parameters: {
         type: 'object',
@@ -46,7 +46,6 @@ registerTool({
     const limit = input.limit === undefined || input.limit === null
       ? undefined
       : numberArg(input, 'limit', 'read_file', { integer: true, min: 1, max: READ_FILE_MAX_LINES })
-    const content = await workspace.readFile(dialogForWindow(win), path)
-    return { path, ...sliceFileContent(content, { offset, limit }) }
+    return { path, ...await workspace.readFileSlice(dialogForWindow(win), path, { offset, limit }) }
   }
 })

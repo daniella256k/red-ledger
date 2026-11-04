@@ -52,6 +52,12 @@ export function FileTreeItem({ node, depth }: FileTreeItemProps) {
       {isDirectory && isOpen && node.children && (
         <FileTree nodes={node.children} depth={depth + 1} />
       )}
+      {isDirectory && isOpen && node.truncated && (
+        // One level in, lined up with the icons of the files that would be there.
+        <div className="text-[11px] text-soft-charcoal/40 italic py-1" style={{ paddingLeft: 42 }}>
+          Too many files to list them all here
+        </div>
+      )}
     </>
   )
 }

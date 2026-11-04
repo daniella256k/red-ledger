@@ -2,11 +2,11 @@ import { app, BrowserWindow, dialog, Menu, protocol, screen, shell } from 'elect
 import type { MenuItemConstructorOptions } from 'electron'
 import { dirname, join } from 'path'
 import { readFileSync } from 'fs'
-import {
-  COMMON_TEXT_EXTENSIONS,
-  IMAGE_MIME_BY_EXTENSION,
-  parseAttachmentPaths
-} from './services/AttachmentService'
+import { COMMON_TEXT_EXTENSIONS, IMAGE_MIME_BY_EXTENSION } from './services/AttachmentService'
+import { runInBackground, stopBackgroundWorkers, useWorkerThreads } from './workers/background'
+// Bundled as its own file by electron-vite; workspace searches and document
+// parsing run there instead of on this thread.
+import createTaskWorker from './workers/taskWorker?nodeWorker'
 import { EXTRACTED_DOCUMENT_EXTENSIONS } from './services/DocumentTextService'
 import { APP_NAME } from '../src/lib/appInfo'
 import { resolveSettingsPath, resolveDbPath } from './services/SettingsService'
@@ -509,7 +509,7 @@ function registerIpcHandlers(): void {
 
     if (result.canceled || result.filePaths.length === 0) return []
 
-    const { attachments, failed } = await parseAttachmentPaths(result.filePaths)
+    const { attachments, failed } = await runInBackground('parseAttachments', { filePaths: result.filePaths })
 
     if (failed.length > 0) {
       await dialog.showMessageBox(mainWindow, {
@@ -533,7 +533,7 @@ function registerIpcHandlers(): void {
     if (validFilePaths.length === 0) {
       return { attachments: [], failed: [] }
     }
-    return parseAttachmentPaths(validFilePaths)
+    return runInBackground('parseAttachments', { filePaths: validFilePaths })
   })
 }
 
@@ -556,7 +556,16 @@ function registerAttachmentProtocol(): void {
 
 app.whenReady().then(() => {
   if (!gotLock) return
-  registerIpcHandlers()
+  useWorkerThreads(createTaskWorker)
+  try {
+    registerIpcHandlers()
+  } catch (err) {
+    // Most likely the chat database: made by a newer version, or an upgrade
+    // step failed. Say so plainly instead of opening a window that can't work.
+    dialog.showErrorBox(`${APP_NAME} could not start`, err instanceof Error ? err.message : String(err))
+    app.exit(1)
+    return
+  }
   registerAttachmentProtocol()
 
   createWindow()
@@ -587,6 +596,7 @@ app.on('before-quit', (event) => {
     mcpShutdownStarted = true
     // Running turns stop and save what they wrote while the database is open.
     shutdownTurns()
+    stopBackgroundWorkers()
     let mcpService: ReturnType<typeof getMcpService> | null = null
     try {
       mcpService = getMcpService()

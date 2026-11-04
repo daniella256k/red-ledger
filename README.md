@@ -87,7 +87,7 @@ When a chat gets long, **Compact** (left of the meter) asks the model for a summ
 - Settings: `settings.json`
 - API keys: `api-keys.json` next to `settings.json`, encrypted with the OS keychain (DPAPI on Windows), so `settings.json` holds them blank. Keys saved as plain text by earlier versions move there on first launch. A key entered as `${env:NAME}` (e.g. `${env:OPENAI_API_KEY}`) is kept as written and read from the environment instead. Without a keychain (some Linux setups) keys stay in `settings.json`. The keychain is tied to your OS account, so a copied profile or portable folder needs its keys entered again.
 - File history: before a reply first changes a workspace file, its previous content is kept in `conversations.db` (gzipped, stored once per distinct content; files over 25 MB are not kept). Undo file changes on the reply restores those files and deletes files the reply created, after a confirmation that lists each file and warns about files changed since. History is deleted with its reply or chat. Nothing is written next to your files.
-- Conversations/messages: `conversations.db` (SQLite, WAL)
+- Conversations/messages: `conversations.db` (SQLite, WAL). The database records its schema version (SQLite `user_version`); each upgrade step runs once, and a database from a newer Red Ledger is refused with a message rather than opened.
 - Messages form a tree: each one records the message it follows, so a retry or edit adds a sibling instead of replacing anything. A chat shows one branch at a time and remembers which.
 - Images are stored once each, as raw bytes keyed by their SHA-256, and shared by every message (and fork) that uses them. Text attachments stay inside their message.
 - Deleting chats or images leaves free space inside the file; Settings → Storage → Compact database gives it back to the disk and clears the deleted data from the file for good.
@@ -102,14 +102,14 @@ The LLM can invoke these tools during a conversation:
 
 | Tool | Description |
 |------|-------------|
-| `read_file` | Read a file from the workspace |
+| `read_file` | Read a file from the workspace, a page at a time (any size; binary files are refused) |
 | `write_file` | Write or overwrite a workspace file |
 | `write_pdf` | Render markdown content and write a PDF file |
 | `append_file` | Append content to a workspace file |
 | `edit_file` | Exact-match find-and-replace inside a workspace file |
 | `move_file` | Move or rename a file within the workspace (never overwrites) |
 | `grep_files` | Search workspace file contents (literal or regex, respects `.gitignore`) |
-| `list_files` | List the workspace directory tree |
+| `list_files` | List the workspace directory tree (up to 1,000 entries, top levels first) |
 | `web_search` | Search the web (Tavily or SerpAPI) |
 | `org_search` | Search the web (Tavily or SerpAPI) using optional site specification (Org Site in settings) |
 | `wiki_search` | Search Wikipedia for article summaries |
@@ -124,6 +124,8 @@ Remote servers that require an account show a Sign in button: Red Ledger registe
 A reply's file changes can be undone from the reply (see File history under [Data + Storage](#data--storage)). Offline Mode (Settings) hides every tool that reaches the network: web/org/wiki search, `fetch_url`, and HTTP MCP connections.
 
 Tools self-register via the tool registry. Strict mode shows a native confirmation dialog before each operation. Tool errors are caught and returned in the result so the LLM can self-correct without crashing the stream. Pressing Stop ends the whole turn: no further tool calls or model requests run, even if it is pressed while a tool is working.
+
+Heavy work runs in background worker threads, not the main process: workspace searches (`grep_files`), pulling text out of PDFs, Word files and spreadsheets (for `read_file` and attachments), and paging through text files too large to load whole. A big search or a slow PDF doesn't hold up other chats or the window. A task that runs too long (1 minute for a search, 3 for documents) is stopped.
 
 Later turns send the model its earlier tool calls with their full results, in the standard tool-message format, so it can rely on what it already fetched or read. Only if a chat would overflow a model's known context window are the oldest results shortened (with a note to the model and a notice in the chat).
 

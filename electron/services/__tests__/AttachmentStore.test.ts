@@ -158,6 +158,8 @@ describe('moving inline images into the attachment store', () => {
       { kind: 'image', name: 'broken.png', mimeType: 'image/png', dataUrl: 'not a data url' },
       { kind: 'text', name: 'notes.txt', content: 'mentions "dataUrl" in passing' }
     ]), message.id)
+    // Databases from before 1.9 recorded no schema version, so they upgrade from the start.
+    rawDb(legacy).pragma('user_version = 0')
     legacy.close()
     services.splice(services.indexOf(legacy), 1)
 
@@ -179,6 +181,7 @@ describe('moving inline images into the attachment store', () => {
     const chat = service.createConversation({})
     const attachments = [{ kind: 'text' as const, name: 'a', content: '"dataUrl"' }]
     service.createMessage({ conversationId: chat.id, role: 'user', content: 'x', attachments })
+    rawDb(service).pragma('user_version = 0')
     service.close()
     services.splice(services.indexOf(service), 1)
 

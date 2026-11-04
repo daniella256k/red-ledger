@@ -72,7 +72,7 @@ registerTool({
 
     await workspace.confirmSearch(dialogForWindow(win), pattern, path)
 
-    const matches = workspace.grepFiles({
+    const matches = await workspace.searchFiles({
       pattern,
       isRegex,
       caseSensitive,

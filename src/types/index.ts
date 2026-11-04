@@ -338,6 +338,8 @@ export interface FileNode {
   path: string       // Relative to workspace root, forward slashes
   type: 'file' | 'directory'
   children?: FileNode[]
+  /** A folder whose contents were not all listed (too many files); list it on its own to see more. */
+  truncated?: boolean
 }
 
 // ─── Search ──────────────────────────────────────────────────────────────────

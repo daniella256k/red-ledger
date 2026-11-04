@@ -51,3 +51,30 @@ describe('sliceFileContent', () => {
     expect(slice.note).toContain('too long')
   })
 })
+
+describe('sliceTextFile', () => {
+  it('gives the same pages as sliceFileContent, reading the file line by line', async () => {
+    const { mkdtempSync, rmSync, writeFileSync } = await import('fs')
+    const { join } = await import('path')
+    const { tmpdir } = await import('os')
+    const { sliceTextFile } = await import('../fileSlice')
+    const dir = mkdtempSync(join(tmpdir(), 'rl-slice-'))
+    try {
+      const cases: Array<[string, { offset?: number; limit?: number }]> = [
+        [makeLines(READ_FILE_MAX_LINES + 500), {}],
+        [makeLines(10), { offset: 4, limit: 3 }],
+        [makeLines(10), { offset: 8 }],
+        [makeLines(3), { offset: 10 }],
+        ['x'.repeat(READ_FILE_MAX_CHARS * 2), {}],
+        ['a\r\nb\r\nc\r\n', { offset: 2 }]
+      ]
+      for (const [i, [text, options]] of cases.entries()) {
+        const file = join(dir, `case${i}.txt`)
+        writeFileSync(file, text)
+        expect(await sliceTextFile(file, options)).toEqual(sliceFileContent(text, options))
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+})

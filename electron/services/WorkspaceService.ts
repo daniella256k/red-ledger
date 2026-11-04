@@ -1,189 +1,59 @@
 import { basename, dirname, resolve } from 'path'
-import { Script, createContext } from 'vm'
 import { existsSync, readFileSync, writeFileSync, appendFileSync, readdirSync, statSync, lstatSync, mkdirSync, renameSync } from 'fs'
 import { resolveWorkspacePath, PathJailError } from './pathJail'
 import { loadGitignoreRules, isIgnoredByGitignore, type GitignoreRule } from './gitignore'
-import { DocumentExtractionError, extractDocumentText, isExtractedDocument } from './DocumentTextService'
+import { closeSync, openSync, readSync } from 'fs'
+import { DocumentExtractionError, isExtractedDocument } from './DocumentTextService'
+import { runInBackground } from '../workers/background'
+import { decodeText, looksLikeText } from './AttachmentService'
+import { sliceFileContent, type FileSlice, type SliceOptions } from '../lib/tools/fileSlice'
+import { ALWAYS_SKIPPED, grepWorkspace, type GrepMatch, type GrepOptions } from './grep'
 import type { FileChangeRecorder } from './FileHistoryService'
 import type { FileNode, Settings } from '../../src/types'
 
 // Re-export so IPC handlers can use the error type
 export { PathJailError } from './pathJail'
+// Search helpers live in grep.ts (so a worker thread can run them); re-exported for callers here.
+export {
+  buildGlobMatcher,
+  buildGrepMatcher,
+  excerptAroundMatch,
+  DEFAULT_GREP_CONTEXT_CHARS,
+  GREP_REGEX_BUDGET_MS,
+  type GrepMatch,
+  type GrepOptions
+} from './grep'
 
-const SKIP_PATTERNS = new Set([
-  'node_modules',
-  '.git',
-  '.DS_Store',
-  'Thumbs.db'
-])
+/** Most entries the sidebar's file tree lists; list_files uses a smaller budget for the model. */
+export const FILE_TREE_MAX_ENTRIES = 10_000
 
-export interface GrepMatch {
-  path: string
-  line: number
-  column: number
-  text: string
-}
+/** Text files up to this size are read whole by read_file; larger ones are paged line by line. */
+export const READ_FILE_LOAD_BYTES = 8 * 1024 * 1024
+/** The file viewer shows at most this much of a text file. */
+export const VIEWER_MAX_BYTES = 2 * 1024 * 1024
+/** How much of a file's start is checked for NUL bytes to tell binary files apart. */
+const BINARY_PROBE_BYTES = 4096
 
-function escapeRegex(value: string): string {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-}
-
-export const DEFAULT_GREP_CONTEXT_CHARS = 200
-
-/**
- * The part of a matched line shown in grep results: the whole line when it is
- * short, otherwise a window centered on the match so long prose lines still
- * show the sentence that matched.
- */
-export function excerptAroundMatch(line: string, column: number, contextChars = DEFAULT_GREP_CONTEXT_CHARS): string {
-  if (line.length <= contextChars * 2) return line
-
-  const start = Math.max(0, column - contextChars)
-  const end = Math.min(line.length, column + contextChars)
-  return `${start > 0 ? '...' : ''}${line.slice(start, end)}${end < line.length ? '...' : ''}`
-}
-
-/** A grep regex as JavaScript source and flags, checked to compile. */
-function parseGrepRegex(pattern: string, caseSensitive: boolean): { source: string; flags: string } {
-  // JavaScript regexes have no inline flags; accept a leading (?i) anyway
-  // since models (and people) reach for it out of habit.
-  let source = pattern
-  let ignoreCase = !caseSensitive
-  if (source.startsWith('(?i)')) {
-    source = source.slice(4)
-    ignoreCase = true
-  }
-
-  const flags = ignoreCase ? 'i' : ''
+/** The first `length` bytes of a file. */
+function readHead(fullPath: string, length: number): Buffer {
+  const buffer = Buffer.alloc(length)
+  if (length === 0) return buffer
+  const fd = openSync(fullPath, 'r')
   try {
-    new RegExp(source, flags)
-  } catch (err) {
-    throw new PathJailError(
-      'INVALID_INPUT',
-      `Invalid regex pattern: ${err instanceof Error ? err.message : String(err)}. `
-        + 'Patterns use JavaScript regex syntax, which has no inline flags like (?i) or (?s) mid-pattern; '
-        + 'use case_sensitive: false for case-insensitive search.'
-    )
-  }
-  return { source, flags }
-}
-
-/** Longest one grep_files call may spend running a regex, across all files. */
-export const GREP_REGEX_BUDGET_MS = 5_000
-
-/** Finds up to `limit` matching lines in a file: [line index, column] pairs. */
-type LineScanner = (lines: string[], limit: number) => Array<[number, number]>
-
-/**
- * Runs a regex over each file's lines inside a VM context with a time limit,
- * since a pattern like (a+)+$ can backtrack for minutes on one line and the
- * search runs on the main process thread. Plain-text searches don't need it.
- */
-function createRegexScanner(pattern: string, caseSensitive: boolean, budgetMs: number): LineScanner {
-  const context = createContext(parseGrepRegex(pattern, caseSensitive))
-  new Script(`
-    const re = new RegExp(source, flags)
-    function scan(lines, limit) {
-      const found = []
-      for (let i = 0; i < lines.length && found.length < limit; i++) {
-        const m = re.exec(lines[i])
-        if (m) found.push([i, m.index])
-      }
-      return found
-    }
-  `).runInContext(context)
-  const run = new Script('scan(lines, limit)')
-  const deadline = Date.now() + budgetMs
-
-  return (lines, limit) => {
-    context.lines = lines
-    context.limit = limit
-    try {
-      return run.runInContext(context, { timeout: Math.max(1, deadline - Date.now()) }) as Array<[number, number]>
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === 'ERR_SCRIPT_EXECUTION_TIMEOUT') {
-        throw new PathJailError(
-          'TIMEOUT',
-          `The regex took longer than ${budgetMs / 1000} s and was stopped. `
-            + 'Simplify it: avoid nested quantifiers like (a+)+ or (.*)*, or search for literal text instead.'
-        )
-      }
-      throw err
-    } finally {
-      context.lines = undefined
-    }
+    const read = readSync(fd, buffer, 0, length, 0)
+    return buffer.subarray(0, read)
+  } finally {
+    closeSync(fd)
   }
 }
 
-function createLineScanner(matcher: (line: string) => number): LineScanner {
-  return (lines, limit) => {
-    const found: Array<[number, number]> = []
-    for (let i = 0; i < lines.length && found.length < limit; i++) {
-      const column = matcher(lines[i])
-      if (column !== -1) found.push([i, column])
-    }
-    return found
-  }
+/** Binary, judged like attachments: NUL bytes or many control characters near the start (UTF-16 with a BOM is text). */
+function isBinary(head: Buffer): boolean {
+  return !looksLikeText(head.subarray(0, BINARY_PROBE_BYTES))
 }
 
-export function buildGrepMatcher(
-  pattern: string,
-  isRegex: boolean,
-  caseSensitive: boolean
-): (line: string) => number {
-  if (isRegex) {
-    const { source, flags } = parseGrepRegex(pattern, caseSensitive)
-    const re = new RegExp(source, flags)
-    return (line) => {
-      const m = re.exec(line)
-      return m ? m.index : -1
-    }
-  }
-
-  if (caseSensitive) {
-    return (line) => line.indexOf(pattern)
-  }
-
-  const needle = pattern.toLowerCase()
-  return (line) => line.toLowerCase().indexOf(needle)
-}
-
-export function buildGlobMatcher(glob: string): (relativePath: string) => boolean {
-  const trimmed = glob.trim()
-  if (!trimmed) return () => true
-
-  const isPathAware = trimmed.includes('/')
-
-  let compiled = ''
-  let i = 0
-  while (i < trimmed.length) {
-    const ch = trimmed[i]
-    const next = trimmed[i + 1]
-    const after = trimmed[i + 2]
-
-    if (ch === '*' && next === '*' && after === '/') {
-      // **/ — zero or more directory segments (matches "" or "a/" or "a/b/")
-      compiled += '(?:.*/)?'
-      i += 3
-    } else if (ch === '*' && next === '*') {
-      // ** — match across directories
-      compiled += '.*'
-      i += 2
-    } else if (ch === '*') {
-      compiled += '[^/]*'
-      i += 1
-    } else if (ch === '?') {
-      compiled += '[^/]'
-      i += 1
-    } else {
-      compiled += escapeRegex(ch)
-      i += 1
-    }
-  }
-
-  const pattern = isPathAware ? `^${compiled}$` : `(?:^|/)${compiled}$`
-  const re = new RegExp(pattern)
-  return (relativePath) => re.test(relativePath)
+function formatMegabytes(bytes: number): string {
+  return `${Number((bytes / (1024 * 1024)).toFixed(1))} MB`
 }
 
 /**
@@ -345,46 +215,99 @@ export class WorkspaceService {
     return fullPath
   }
 
-  async readFile(dialog: DialogAdapter | null, relativePath: string): Promise<string> {
+  /** Strict Mode: the assistant asks before reading a file. */
+  private async confirmRead(dialog: DialogAdapter | null, relativePath: string): Promise<void> {
+    if (!dialog || !this.getSettings().strictMode) return
+    const confirmed = await dialog.showMessageBox({
+      type: 'question',
+      buttons: ['Deny', 'Allow'],
+      defaultId: 0,
+      title: 'File Read Request',
+      message: `The assistant wants to read: ${relativePath}`,
+      detail: 'Do you want to allow this file read?'
+    })
+    if (confirmed.response === 0) {
+      throw new PathJailError('USER_DENIED', 'User denied file read')
+    }
+  }
+
+  /** A workspace file that exists and is a file, as a full path. */
+  private resolveReadableFile(relativePath: string): string {
     if (!this.workspacePath) {
       throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
     }
-
     const fullPath = resolveWorkspacePath(this.workspacePath, relativePath)
-
-    // Strict mode check
-    if (dialog) {
-      const settings = this.getSettings()
-      if (settings.strictMode) {
-        const confirmed = await dialog.showMessageBox({
-          type: 'question',
-          buttons: ['Deny', 'Allow'],
-          defaultId: 0,
-          title: 'File Read Request',
-          message: `The assistant wants to read: ${relativePath}`,
-          detail: 'Do you want to allow this file read?'
-        })
-        if (confirmed.response === 0) {
-          throw new PathJailError('USER_DENIED', 'User denied file read')
-        }
-      }
-    }
-
     if (!existsSync(fullPath)) {
       throw new PathJailError('FILE_NOT_FOUND', `File not found: ${relativePath}`)
     }
+    if (statSync(fullPath).isDirectory()) {
+      throw new PathJailError('UNSUPPORTED_FILE', `"${relativePath}" is a folder. Use list_files to see what is in it.`)
+    }
+    return fullPath
+  }
 
+  /** The text of a PDF, Word file or spreadsheet (pulled out in a worker), or null for other files. */
+  private async documentText(fullPath: string, relativePath: string): Promise<string | null> {
     try {
-      const documentText = await extractDocumentText(fullPath)
-      if (documentText !== null) return documentText
+      return await runInBackground('extractDocument', { filePath: fullPath })
     } catch (err) {
       if (err instanceof DocumentExtractionError) {
         throw new Error(`Could not extract text from ${relativePath}: ${err.message}`, { cause: err })
       }
       throw err
     }
+  }
 
-    return readFileSync(fullPath, 'utf-8')
+  /**
+   * A file's text for the file viewer: documents as their extracted text,
+   * other files as UTF-8. A text file over VIEWER_MAX_BYTES shows its start
+   * with a note, so a huge log can't stall the window (the viewer never
+   * saves, so nothing is lost). Binary files are refused.
+   */
+  async readFile(dialog: DialogAdapter | null, relativePath: string): Promise<string> {
+    const fullPath = this.resolveReadableFile(relativePath)
+    await this.confirmRead(dialog, relativePath)
+
+    const documentText = await this.documentText(fullPath, relativePath)
+    if (documentText !== null) return documentText
+
+    const size = statSync(fullPath).size
+    const head = readHead(fullPath, Math.min(size, VIEWER_MAX_BYTES))
+    if (isBinary(head)) {
+      throw new PathJailError('UNSUPPORTED_FILE', `"${relativePath}" is a binary file, so it can't be shown as text.`)
+    }
+    if (size <= VIEWER_MAX_BYTES) return decodeText(head)
+
+    // Cut at the last full line, so no character or line is shown half.
+    const text = new TextDecoder('utf-8').decode(head)
+    const lastNewline = text.lastIndexOf('\n')
+    const shown = lastNewline > 0 ? text.slice(0, lastNewline + 1) : text
+    return `${shown}\n[Showing the first ${formatMegabytes(VIEWER_MAX_BYTES)} of ${formatMegabytes(size)}. Open the file in another app to see the rest.]\n`
+  }
+
+  /**
+   * A page of a file for the read_file tool (see fileSlice.ts). Documents are
+   * paged from their extracted text. Text files up to READ_FILE_LOAD_BYTES
+   * are read whole; larger ones are paged by a worker that reads them line
+   * by line, so any size works without loading it all. Binary files are
+   * refused, since their bytes as text would only waste the model's context.
+   */
+  async readFileSlice(dialog: DialogAdapter | null, relativePath: string, options: SliceOptions = {}): Promise<FileSlice> {
+    const fullPath = this.resolveReadableFile(relativePath)
+    await this.confirmRead(dialog, relativePath)
+
+    const documentText = await this.documentText(fullPath, relativePath)
+    if (documentText !== null) return sliceFileContent(documentText, options)
+
+    const size = statSync(fullPath).size
+    if (isBinary(readHead(fullPath, BINARY_PROBE_BYTES))) {
+      throw new PathJailError(
+        'UNSUPPORTED_FILE',
+        `"${relativePath}" is a binary file. read_file reads text files, PDFs, Word files and spreadsheets.`
+      )
+    }
+    if (size <= READ_FILE_LOAD_BYTES) return sliceFileContent(decodeText(readFileSync(fullPath)), options)
+    return runInBackground('sliceTextFile', { filePath: fullPath, options })
   }
 
   /**
@@ -555,227 +478,125 @@ export class WorkspaceService {
     }
   }
 
-  grepFiles(options: {
-    pattern: string
-    isRegex?: boolean
-    caseSensitive?: boolean
-    path?: string
-    glob?: string
-    maxResults?: number
-    contextChars?: number
-    /** Override for tests; defaults to GREP_REGEX_BUDGET_MS. */
-    regexBudgetMs?: number
-  }): GrepMatch[] {
+  /** Searches the workspace's files (see grep.ts). */
+  grepFiles(options: GrepOptions): GrepMatch[] {
     if (!this.workspacePath) {
       throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
     }
+    return grepWorkspace(this.workspacePath, options)
+  }
 
-    const targetDir = options.path
-      ? resolveWorkspacePath(this.workspacePath, options.path)
-      : this.workspacePath
+  /** Searches the workspace's files in a worker thread, so a big search doesn't hold up the app. */
+  async searchFiles(options: GrepOptions): Promise<GrepMatch[]> {
+    if (!this.workspacePath) {
+      throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
+    }
+    return runInBackground('grep', { workspaceRoot: this.workspacePath, options })
+  }
 
+  /** The workspace tree (or a folder's) for the sidebar, up to FILE_TREE_MAX_ENTRIES entries. */
+  listFiles(relativePath?: string, options: { includeHidden?: boolean; maxEntries?: number } = {}): FileNode[] {
+    return this.listFileTree(relativePath, options).nodes
+  }
+
+  /**
+   * The tree under a folder, breadth first: every entry of a folder before
+   * anything inside its subfolders, so a large workspace still shows its top
+   * levels whole. Stops after `maxEntries`; folders not reached are marked
+   * truncated (with no children), and so is a folder listed only in part.
+   * Skips node_modules, .git, symlinks and .gitignore'd files, and dotfiles
+   * unless asked for. Unreadable folders show as empty.
+   */
+  listFileTree(
+    relativePath?: string,
+    options: { includeHidden?: boolean; maxEntries?: number } = {}
+  ): { nodes: FileNode[]; truncated: boolean; entries: number } {
+    if (!this.workspacePath) {
+      throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
+    }
+    const rootPath = this.workspacePath
+    const targetDir = relativePath ? resolveWorkspacePath(rootPath, relativePath) : rootPath
     if (!existsSync(targetDir) || !statSync(targetDir).isDirectory()) {
       throw new PathJailError('FILE_NOT_FOUND', 'Directory not found')
     }
 
-    const caseSensitive = options.caseSensitive !== false
-    const scanner = options.isRegex === true
-      ? createRegexScanner(options.pattern, caseSensitive, options.regexBudgetMs ?? GREP_REGEX_BUDGET_MS)
-      : createLineScanner(buildGrepMatcher(options.pattern, false, caseSensitive))
-    const globMatcher = options.glob ? buildGlobMatcher(options.glob) : null
-    const maxResults = Math.max(1, Math.min(options.maxResults ?? 200, 1000))
-    const contextChars = Math.max(20, Math.min(options.contextChars ?? DEFAULT_GREP_CONTEXT_CHARS, 1000))
-    const matches: GrepMatch[] = []
+    const includeHidden = options.includeHidden === true
+    const maxEntries = Math.max(1, options.maxEntries ?? FILE_TREE_MAX_ENTRIES)
+    const gitignoreRules = loadGitignoreRules(rootPath)
+    const nodes: FileNode[] = []
+    const queue: Array<{ dirPath: string; into: FileNode[]; node: FileNode | null }> = [{ dirPath: targetDir, into: nodes, node: null }]
+    let entries = 0
+    let truncated = false
 
-    this.walkForGrep(
-      targetDir,
-      this.workspacePath,
-      matches,
-      maxResults,
-      scanner,
-      globMatcher,
-      contextChars
-    )
+    for (let next = 0; next < queue.length; next++) {
+      const folder = queue[next]
+      if (entries >= maxEntries) {
+        // Not reached: the folder shows without contents, marked as not listed.
+        if (folder.node) {
+          folder.node.truncated = true
+          delete folder.node.children
+        }
+        truncated = true
+        continue
+      }
 
-    return matches
+      const listed = this.readFolder(folder.dirPath, rootPath, gitignoreRules, includeHidden)
+      for (const { node, fullPath } of listed) {
+        if (entries >= maxEntries) {
+          if (folder.node) folder.node.truncated = true
+          truncated = true
+          break
+        }
+        folder.into.push(node)
+        entries += 1
+        if (node.type === 'directory') queue.push({ dirPath: fullPath, into: node.children!, node })
+      }
+    }
+
+    return { nodes, truncated, entries }
   }
 
-  private walkForGrep(
+  /** One folder's entries, filtered and sorted (folders first, then by name). */
+  private readFolder(
     dirPath: string,
     rootPath: string,
-    matches: GrepMatch[],
-    maxResults: number,
-    scanner: LineScanner,
-    globMatcher: ((relativePath: string) => boolean) | null,
-    contextChars: number,
-    gitignoreRules?: GitignoreRule[]
-  ): void {
-    if (matches.length >= maxResults) return
-
-    if (gitignoreRules === undefined) {
-      gitignoreRules = loadGitignoreRules(rootPath)
-    }
-
-    let entries
+    gitignoreRules: GitignoreRule[],
+    includeHidden: boolean
+  ): Array<{ node: FileNode; fullPath: string }> {
+    let dirEntries
     try {
-      entries = readdirSync(dirPath, { withFileTypes: true })
+      dirEntries = readdirSync(dirPath, { withFileTypes: true })
     } catch {
-      return
+      return []
     }
 
-    for (const entry of entries) {
-      if (matches.length >= maxResults) return
-      if (entry.name.startsWith('.') || SKIP_PATTERNS.has(entry.name)) continue
+    const listed: Array<{ node: FileNode; fullPath: string }> = []
+    for (const entry of dirEntries) {
+      // Skip common ignore patterns always, and dotfiles unless asked for
+      if (ALWAYS_SKIPPED.has(entry.name) || (!includeHidden && entry.name.startsWith('.'))) continue
 
       const fullPath = resolve(dirPath, entry.name)
-
       try {
-        const stat = lstatSync(fullPath)
-        if (stat.isSymbolicLink()) continue
+        if (lstatSync(fullPath).isSymbolicLink()) continue
       } catch {
         continue
       }
 
-      const relativePath = fullPath
-        .slice(rootPath.length + 1)
-        .replace(/\\/g, '/')
-
+      const relativePath = fullPath.slice(rootPath.length + 1).replace(/\\/g, '/')
       const isDir = entry.isDirectory()
-
       if (isIgnoredByGitignore(relativePath, isDir, gitignoreRules)) continue
 
-      if (isDir) {
-        this.walkForGrep(fullPath, rootPath, matches, maxResults, scanner, globMatcher, contextChars, gitignoreRules)
-        continue
-      }
-
-      if (globMatcher && !globMatcher(relativePath)) continue
-
-      this.grepOneFile(fullPath, relativePath, scanner, matches, maxResults, contextChars)
-    }
-  }
-
-  private grepOneFile(
-    fullPath: string,
-    relativePath: string,
-    scanner: LineScanner,
-    matches: GrepMatch[],
-    maxResults: number,
-    contextChars: number
-  ): void {
-    let stat
-    try {
-      stat = statSync(fullPath)
-    } catch {
-      return
-    }
-    if (stat.size > 2_000_000) return
-
-    let raw: Buffer
-    try {
-      raw = readFileSync(fullPath)
-    } catch {
-      return
-    }
-
-    const probeLength = Math.min(raw.length, 4096)
-    for (let i = 0; i < probeLength; i++) {
-      if (raw[i] === 0) return
-    }
-
-    const text = raw.toString('utf-8')
-    const lines = text.split(/\r?\n/)
-    const perFileCap = 30
-
-    for (const [lineIndex, column] of scanner(lines, Math.min(perFileCap, maxResults - matches.length))) {
-      matches.push({
-        path: relativePath,
-        line: lineIndex + 1,
-        column: column + 1,
-        text: excerptAroundMatch(lines[lineIndex], column, contextChars)
+      listed.push({
+        fullPath,
+        node: isDir
+          ? { name: entry.name, path: relativePath, type: 'directory', children: [] }
+          : { name: entry.name, path: relativePath, type: 'file' }
       })
     }
-  }
 
-  listFiles(relativePath?: string, options: { includeHidden?: boolean } = {}): FileNode[] {
-    if (!this.workspacePath) {
-      throw new PathJailError('WORKSPACE_NOT_SET', 'No workspace directory selected')
-    }
-
-    const targetDir = relativePath
-      ? resolveWorkspacePath(this.workspacePath, relativePath)
-      : this.workspacePath
-
-    if (!existsSync(targetDir) || !statSync(targetDir).isDirectory()) {
-      throw new PathJailError('FILE_NOT_FOUND', 'Directory not found')
-    }
-
-    return this.listDirectory(targetDir, this.workspacePath, undefined, options.includeHidden === true)
-  }
-
-  // ─── Directory Listing ────────────────────────────────────────────────────
-
-  private listDirectory(
-    dirPath: string,
-    rootPath: string,
-    gitignoreRules?: GitignoreRule[],
-    includeHidden = false
-  ): FileNode[] {
-    const entries = readdirSync(dirPath, { withFileTypes: true })
-    const nodes: FileNode[] = []
-
-    // Load gitignore rules at the top-level call
-    if (gitignoreRules === undefined) {
-      gitignoreRules = loadGitignoreRules(rootPath)
-    }
-
-    for (const entry of entries) {
-      // Skip common ignore patterns always, and dotfiles unless asked for
-      if (SKIP_PATTERNS.has(entry.name) || (!includeHidden && entry.name.startsWith('.'))) {
-        continue
-      }
-
-      const fullPath = resolve(dirPath, entry.name)
-
-      // Skip symlinks
-      try {
-        const stat = lstatSync(fullPath)
-        if (stat.isSymbolicLink()) continue
-      } catch {
-        continue
-      }
-
-      const relativePath = fullPath
-        .slice(rootPath.length + 1)
-        .replace(/\\/g, '/')
-
-      const isDir = entry.isDirectory()
-
-      // Check gitignore rules
-      if (isIgnoredByGitignore(relativePath, isDir, gitignoreRules)) {
-        continue
-      }
-
-      if (isDir) {
-        nodes.push({
-          name: entry.name,
-          path: relativePath,
-          type: 'directory',
-          children: this.listDirectory(fullPath, rootPath, gitignoreRules, includeHidden)
-        })
-      } else {
-        nodes.push({
-          name: entry.name,
-          path: relativePath,
-          type: 'file'
-        })
-      }
-    }
-
-    // Sort: directories first, then alphabetical
-    return nodes.sort((a, b) => {
-      if (a.type !== b.type) return a.type === 'directory' ? -1 : 1
-      return a.name.localeCompare(b.name)
+    return listed.sort((a, b) => {
+      if (a.node.type !== b.node.type) return a.node.type === 'directory' ? -1 : 1
+      return a.node.name.localeCompare(b.node.name)
     })
   }
 }

@@ -47,11 +47,16 @@ export const COMMON_TEXT_EXTENSIONS = [
 ]
 
 export const MAX_TEXT_ATTACHMENT_BYTES = 5 * 1024 * 1024
+/** Larger images are refused: providers reject them anyway, and each is held in memory as base64. */
+export const MAX_IMAGE_ATTACHMENT_BYTES = 20 * 1024 * 1024
 const SNIFF_BYTES = 8192
 /** Share of control characters above which a buffer is treated as binary. */
 const MAX_CONTROL_CHAR_RATIO = 0.1
 
-export class AttachmentError extends Error {}
+export class AttachmentError extends Error {
+  // Set by hand: errors from the worker thread are matched by name, which bundling can't change.
+  override name = 'AttachmentError'
+}
 
 function hasUtf16Bom(buffer: Buffer): 'le' | 'be' | null {
   if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return 'le'
@@ -100,6 +105,9 @@ export async function parseAttachmentFile(filePath: string): Promise<Attachment>
   const imageMime = IMAGE_MIME_BY_EXTENSION[extension]
 
   if (imageMime) {
+    if (statSync(filePath).size > MAX_IMAGE_ATTACHMENT_BYTES) {
+      throw new AttachmentError('too large')
+    }
     const base64Image = readFileSync(filePath).toString('base64')
     return {
       kind: 'image',

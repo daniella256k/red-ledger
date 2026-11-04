@@ -309,3 +309,94 @@ describe('WorkspaceService.grepFiles', () => {
     await expect(service.confirmSearch(null, 'password')).resolves.toBeUndefined()
   })
 })
+
+describe('WorkspaceService reading and listing limits', () => {
+  let workspaceRoot: string
+  let service: WorkspaceService
+
+  beforeEach(() => {
+    workspaceRoot = mkdtempSync(join(tmpdir(), 'red-ledger-limits-'))
+    service = new WorkspaceService(() => BASE_SETTINGS)
+    service.setWorkspacePath(workspaceRoot)
+  })
+
+  afterEach(() => {
+    rmSync(workspaceRoot, { recursive: true, force: true })
+  })
+
+  it('lists breadth first within the entry budget, marking what it did not reach', () => {
+    for (const folder of ['a', 'b']) {
+      mkdirSync(join(workspaceRoot, folder, 'deep'), { recursive: true })
+      for (let i = 0; i < 5; i++) writeFileSync(join(workspaceRoot, folder, `f${i}.txt`), '')
+      writeFileSync(join(workspaceRoot, folder, 'deep', 'x.txt'), '')
+    }
+    writeFileSync(join(workspaceRoot, 'top.txt'), '')
+
+    const tree = service.listFileTree(undefined, { maxEntries: 10 })
+    expect(tree.truncated).toBe(true)
+    expect(tree.entries).toBe(10)
+    // Top level whole, then a's contents, then b's only in part.
+    expect(tree.nodes.map((n) => n.name)).toEqual(['a', 'b', 'top.txt'])
+    const [a, b] = tree.nodes
+    expect(a.children?.map((n) => n.name)).toEqual(['deep', 'f0.txt', 'f1.txt', 'f2.txt', 'f3.txt', 'f4.txt'])
+    expect(a.truncated).toBeUndefined()
+    expect(b.truncated).toBe(true)
+    expect(b.children?.map((n) => n.name)).toEqual(['deep'])
+    // Folders never reached show without contents.
+    expect(a.children?.[0]).toMatchObject({ name: 'deep', truncated: true })
+    expect(a.children?.[0].children).toBeUndefined()
+
+    const whole = service.listFileTree()
+    expect(whole.truncated).toBe(false)
+    expect(whole.entries).toBe(17)
+  })
+
+  it('pages a large text file without loading it whole, matching a small file read', async () => {
+    const lines = Array.from({ length: 400_000 }, (_, i) => `row ${i + 1} ${'x'.repeat(20)}`)
+    writeFileSync(join(workspaceRoot, 'big.log'), lines.join('\n') + '\n')
+
+    const first = await service.readFileSlice(null, 'big.log')
+    expect(first).toMatchObject({ total_lines: 400_000, truncated: true, start_line: 1, next_offset: 2001 })
+    expect(first.content.split('\n')[0]).toBe(lines[0])
+
+    const later = await service.readFileSlice(null, 'big.log', { offset: 399_999, limit: 5 })
+    expect(later.content).toBe(`399999 | ${lines[399_998]}\n400000 | ${lines[399_999]}`)
+    expect(later.truncated).toBe(false)
+  })
+
+  it('refuses binary files and folders, and reads UTF-16 text', async () => {
+    writeFileSync(join(workspaceRoot, 'image.bin'), Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x00, 0x00, 0x01]))
+    mkdirSync(join(workspaceRoot, 'folder'))
+    writeFileSync(join(workspaceRoot, 'wide.txt'), Buffer.concat([Buffer.from([0xff, 0xfe]), Buffer.from('héllo\n', 'utf16le')]))
+
+    await expect(service.readFileSlice(null, 'image.bin')).rejects.toMatchObject({ code: 'UNSUPPORTED_FILE' })
+    await expect(service.readFileSlice(null, 'folder')).rejects.toMatchObject({ code: 'UNSUPPORTED_FILE' })
+    expect((await service.readFileSlice(null, 'wide.txt')).content).toBe('héllo\n')
+  })
+
+  it('shows the viewer the start of a huge file with a note', async () => {
+    writeFileSync(join(workspaceRoot, 'huge.txt'), 'line of text\n'.repeat(300_000))
+
+    const shown = await service.readFile(null, 'huge.txt')
+    expect(shown.length).toBeLessThan(2.2 * 1024 * 1024)
+    expect(shown.startsWith('line of text\n')).toBe(true)
+    expect(shown).toMatch(/\[Showing the first 2 MB of 3\.\d MB\./)
+    // Cut at a line end, never in the middle of a line.
+    expect(shown.split('\n[Showing')[0].endsWith('line of text\n')).toBe(true)
+  })
+
+  it('asks in Strict Mode before the assistant reads, and not for the viewer', async () => {
+    writeFileSync(join(workspaceRoot, 'notes.md'), 'hi\n')
+    const strict = new WorkspaceService(() => ({ ...BASE_SETTINGS, strictMode: true }))
+    strict.setWorkspacePath(workspaceRoot)
+    const dialog: DialogAdapter = { showMessageBox: vi.fn(async () => ({ response: 0 })) }
+
+    await expect(strict.readFileSlice(dialog, 'notes.md')).rejects.toMatchObject({ code: 'USER_DENIED' })
+    expect(await strict.readFile(null, 'notes.md')).toBe('hi\n')
+  })
+
+  it('searches in the background with the same results as the direct search', async () => {
+    writeFileSync(join(workspaceRoot, 'a.md'), 'alpha\nbeta needle\n')
+    expect(await service.searchFiles({ pattern: 'needle' })).toEqual(service.grepFiles({ pattern: 'needle' }))
+  })
+})

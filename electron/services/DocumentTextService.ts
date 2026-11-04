@@ -29,7 +29,10 @@ export const EXTRACTED_DOCUMENT_EXTENSIONS = ['pdf', ...WORD_EXTENSIONS, ...SPRE
 /** Input size cap for Word and spreadsheet files; parsing runs in the main process. */
 export const MAX_DOCUMENT_BYTES = 50 * 1024 * 1024
 
-export class DocumentExtractionError extends Error {}
+export class DocumentExtractionError extends Error {
+  // Set by hand: errors from the worker thread are matched by name, which bundling can't change.
+  override name = 'DocumentExtractionError'
+}
 
 type Extractor = (filePath: string) => Promise<string>
 

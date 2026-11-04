@@ -52,10 +52,10 @@ export function registerFsHandlers(getSettings: () => Settings): void {
     return result.filePaths[0]
   })
 
-  handleIpc('fs:readFile', async (event, relativePath) => {
+  // The file viewer: the user opening their own file, so Strict Mode doesn't ask.
+  handleIpc('fs:readFile', async (_event, relativePath) => {
     assertString(relativePath, 'relativePath')
-    const win = BrowserWindow.fromWebContents(event.sender) || null
-    return service.readFile(dialogForWindow(win), relativePath)
+    return service.readFile(null, relativePath)
   })
 
   handleIpc('fs:writeFile', async (event, relativePath, content, append) => {
