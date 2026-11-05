@@ -120,6 +120,31 @@ describe('background tasks', () => {
     expect(FakeChannel.started).toHaveLength(2)
   })
 
+  it('fail only the task that ran too long; the others waiting start again in a fresh runner', async () => {
+    vi.useFakeTimers()
+    // The first runner gets stuck on everything; the next one works.
+    useBackgroundRunners({
+      documents: () => {
+        const channel = new FakeChannel('documents')
+        channel.hang = FakeChannel.started.length === 1
+        return channel
+      }
+    })
+    const root = workspace({ 'big.txt': 'line 1\nline 2\n' })
+
+    const stuck = runInBackground('sliceTextFile', { filePath: join(root, 'big.txt'), options: {} })
+    const failed = expect(stuck).rejects.toMatchObject({ code: 'TIMEOUT' })
+    await vi.advanceTimersByTimeAsync(170_000)
+    // Another chat's read, queued behind the stuck one.
+    const other = runInBackground('sliceTextFile', { filePath: join(root, 'big.txt'), options: { offset: 2 } })
+    await vi.advanceTimersByTimeAsync(11_000)
+
+    await failed
+    await expect(other).resolves.toMatchObject({ content: '2 | line 2' })
+    expect(FakeChannel.started).toHaveLength(2)
+    expect(FakeChannel.started[0].stopped).toBe(true)
+  })
+
   it('fail what was waiting when a runner crashes, then start again', async () => {
     useFakeRunners({ hang: true })
     const root = workspace({})

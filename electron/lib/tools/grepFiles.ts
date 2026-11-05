@@ -1,17 +1,11 @@
-import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import type { DialogAdapter } from '../../services/WorkspaceService'
+import { toolDialog } from './toolDialog'
 import {
   numberArg,
   optionalStringArg,
   requireObjectArgs,
   requireStringArg
 } from './args'
-
-function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
-  if (!win) return null
-  return { showMessageBox: (options) => dialog.showMessageBox(win, options) }
-}
 
 registerTool({
   definition: {
@@ -55,7 +49,7 @@ registerTool({
       }
     }
   },
-  execute: async (args, { win, workspace }) => {
+  execute: async (args, { win, workspace, signal }) => {
     const input = requireObjectArgs(args, 'grep_files')
     const pattern = requireStringArg(input, 'pattern', 'grep_files', { trim: false, allowEmpty: false })
     const path = optionalStringArg(input, 'path', 'grep_files')
@@ -70,7 +64,7 @@ registerTool({
       ? undefined
       : numberArg(input, 'context_chars', 'grep_files', { integer: true, min: 20, max: 1000 })
 
-    await workspace.confirmSearch(dialogForWindow(win), pattern, path)
+    await workspace.confirmSearch(toolDialog(win, signal), pattern, path)
 
     const matches = await workspace.searchFiles({
       pattern,

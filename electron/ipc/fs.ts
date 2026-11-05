@@ -1,7 +1,7 @@
 import { dialog, shell, BrowserWindow } from 'electron'
 import { handleIpc } from './typedIpc'
 import { assertString, assertOptionalString } from './validate'
-import { WorkspaceService, type DialogAdapter } from '../services/WorkspaceService'
+import { WorkspaceService } from '../services/WorkspaceService'
 import type { Settings } from '../../src/types'
 
 /**
@@ -16,17 +16,6 @@ export function getWorkspaceService(): WorkspaceService {
     throw new Error('WorkspaceService not initialized')
   }
   return service
-}
-
-/**
- * Create a DialogAdapter backed by a BrowserWindow.
- * Returns null if no window is available.
- */
-export function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
-  if (!win) return null
-  return {
-    showMessageBox: (options) => dialog.showMessageBox(win, options)
-  }
 }
 
 export function registerFsHandlers(getSettings: () => Settings): void {

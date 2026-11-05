@@ -299,6 +299,8 @@ export interface FileUndoResult {
   undone: string[]
   /** Files that couldn't be: too large to have been kept, or no longer reachable safely. */
   skipped: string[]
+  /** Files whose undo failed (e.g. locked by another app); undoing again tries them again. */
+  failed: string[]
 }
 
 export interface TitleGenerationRequest {

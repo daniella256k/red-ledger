@@ -11,7 +11,7 @@ import type { FileHistoryStore, FileChangeSummary } from '../services/FileHistor
 const ACTION_LABELS: Record<FileChangeSummary['action'], string> = {
   restore: 'restore the previous version',
   delete: 'delete (the reply created it)',
-  unavailable: 'cannot undo (too large to keep, or no longer reachable)'
+  unavailable: 'cannot undo (too large to keep, no longer reachable, or a folder is there now)'
 }
 
 function describe(changes: FileChangeSummary[]): string {
@@ -35,7 +35,7 @@ export function registerFileHistoryHandlers(history: FileHistoryStore): void {
   handleIpc('fileHistory:undo', async (event, messageId) => {
     assertString(messageId, 'messageId')
     const changes = history.describeChanges(messageId)
-    if (changes.length === 0) return { undone: [], skipped: [] }
+    if (changes.length === 0) return { undone: [], skipped: [], failed: [] }
 
     const win = BrowserWindow.fromWebContents(event.sender)
     const options = {

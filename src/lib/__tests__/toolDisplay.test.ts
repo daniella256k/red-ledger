@@ -95,9 +95,9 @@ describe('tool call lines', () => {
 })
 
 describe('bursts', () => {
-  it('counts calls, and mentions successes and failures only when something failed', () => {
+  it('counts calls, and mentions failures only when something failed', () => {
     expect(burstSummaryText([search, fetchCall])).toBe('2 calls')
-    expect(burstSummaryText([search, fetchCall, refused])).toBe('3 calls | 2 ok | 1 failed')
+    expect(burstSummaryText([search, fetchCall, refused])).toBe('3 calls | 1 failed')
     expect(burstSummaryText([search, running])).toBe('2 calls | 1 running')
     expect(countToolStatuses([search, refused, running])).toEqual({ total: 3, ok: 1, failed: 1, running: 1 })
     expect(toolStatus(running)).toBe('running')

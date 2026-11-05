@@ -64,6 +64,18 @@ export interface McpAuthCodec {
   encrypted: boolean
   encode(json: string): string
   decode(data: string): string
+  /**
+   * For a codec that writes plain text: reads data an earlier version saved
+   * encrypted, when that can still be decrypted here (see safeStorageCodec).
+   */
+  decodeEncrypted?(data: string): string
+}
+
+/** How to read a file's data, or null when it is encrypted and can't be decrypted here. */
+export function decoderFor(file: { encrypted?: boolean }, codec: McpAuthCodec): ((data: string) => string) | null {
+  if (!file.encrypted) return PLAIN_TEXT_CODEC.decode
+  if (codec.encrypted) return (data) => codec.decode(data)
+  return codec.decodeEncrypted ? (data) => codec.decodeEncrypted!(data) : null
 }
 
 export const PLAIN_TEXT_CODEC: McpAuthCodec = {
@@ -105,9 +117,10 @@ export function createFileAuthStore(path: string, getCodec: () => McpAuthCodec):
       if (existsSync(path)) {
         const file = JSON.parse(readFileSync(path, 'utf-8')) as { encrypted?: boolean; data?: string }
         if (typeof file.data === 'string') {
-          const codec = file.encrypted ? getCodec() : PLAIN_TEXT_CODEC
-          if (file.encrypted && !codec.encrypted) throw new Error('Encryption is not available')
-          const parsed = JSON.parse(codec.decode(file.data)) as unknown
+          const decode = decoderFor(file, file.encrypted ? getCodec() : PLAIN_TEXT_CODEC)
+          if (!decode) throw new Error('Encryption is not available')
+          // Saved encrypted but read with a plain codec: written plain on the next change.
+          const parsed = JSON.parse(decode(file.data)) as unknown
           if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
             records = parsed as Record<string, McpAuthRecord>
           }

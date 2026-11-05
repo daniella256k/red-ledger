@@ -137,6 +137,58 @@ export function buildToolCallBudgetNotice(previousTotal: number, nextTotal: numb
 
 /** What a past tool call that never returned is replayed with. */
 const UNFINISHED_TOOL_RESULT = { error: 'This tool call did not finish: the reply was stopped while it ran.' }
+/**
+ * A tool still running when the reply was stopped. The turn ends at once
+ * rather than waiting on it; whether it got as far as changing anything is
+ * unknown (file changes it made can still be undone from the reply).
+ */
+const STOPPED_TOOL_RESULT = {
+  error: 'The reply was stopped while this tool was running, so its result is unknown.',
+  code: 'CANCELLED'
+}
+
+interface ActiveStream {
+  /** The current round's provider request; null while tools run. */
+  handle: AbortHandle | null
+  /** Stops the tool loop between rounds, where there is no request to abort. */
+  cancelled: boolean
+  /** Aborted on Stop; tools get its signal so dialogs close and calls end. */
+  controller: AbortController
+  conversationId: string
+}
+
+function newActiveStream(conversationId: string): ActiveStream {
+  return { handle: null, cancelled: false, controller: new AbortController(), conversationId }
+}
+
+/**
+ * Runs one tool call, unless the reply is stopped first: then the call is
+ * left to finish on its own (its tool was told through `signal`) and the
+ * turn gets STOPPED_TOOL_RESULT right away.
+ */
+export async function runToolUntilStopped(
+  toolExecutor: (tc: ToolCall, signal: AbortSignal) => Promise<ToolCall>,
+  tc: ToolCall,
+  signal: AbortSignal
+): Promise<{ toolCall: ToolCall; stopped: boolean }> {
+  if (signal.aborted) return { toolCall: { ...tc, result: STOPPED_TOOL_RESULT }, stopped: true }
+  const running = toolExecutor(tc, signal)
+  // A tool that fails after Stop has nobody waiting on it.
+  running.catch(() => {})
+  let onAbort: (() => void) | undefined
+  const stopped = new Promise<null>((resolve) => {
+    onAbort = () => resolve(null)
+    signal.addEventListener('abort', onAbort, { once: true })
+  })
+  try {
+    const finished = await Promise.race([running, stopped])
+    return finished
+      ? { toolCall: finished, stopped: false }
+      : { toolCall: { ...tc, result: STOPPED_TOOL_RESULT }, stopped: true }
+  } finally {
+    if (onAbort) signal.removeEventListener('abort', onAbort)
+  }
+}
 /** Share of a known context window a request may fill before the oldest tool results are shortened. */
 const CONTEXT_FILL_LIMIT = 0.85
 /** How much of a shortened tool result is kept. */
@@ -393,11 +445,9 @@ export class LlmService {
   private getAttachmentBlob: (blobId: string) => AttachmentBlob | null
   private timeZone: string
   /**
-   * In-flight turns by channel. `handle` is the provider request of the
-   * current round (null while tools run); `cancelled` stops the tool loop
-   * between rounds, where there is no request to abort.
+   * In-flight turns by channel (see ActiveStream).
    */
-  private activeStreams = new Map<string, { handle: AbortHandle | null; cancelled: boolean; conversationId: string }>()
+  private activeStreams = new Map<string, ActiveStream>()
   /** Context windows by provider + base URL + model, so each turn doesn't refetch model listings. */
   private contextLengthCache = new Map<string, { value: number | null; expiresAt: number }>()
 
@@ -577,7 +627,7 @@ export class LlmService {
     request: LLMRequest,
     channel: string,
     sink: StreamSink,
-    toolExecutor: (tc: ToolCall) => Promise<ToolCall>
+    toolExecutor: (tc: ToolCall, signal: AbortSignal) => Promise<ToolCall>
   ): Promise<void> {
     const provider = this.createProvider(request.provider)
     const settings = this.getSettings()
@@ -591,7 +641,7 @@ export class LlmService {
 
     // Tracked from the start so Stop ends the turn at any point: during the
     // context window lookup below, between rounds, and while tools run.
-    const stream = { handle: null as AbortHandle | null, cancelled: false, conversationId: request.conversationId }
+    const stream = newActiveStream(request.conversationId)
     this.activeStreams.set(channel, stream)
 
     try {
@@ -741,10 +791,13 @@ export class LlmService {
 
           const withinBudget = index < remainingBudget
           const startedAt = Date.now()
+          const ran = withinBudget && availableToolNames.has(tc.name)
+            ? await runToolUntilStopped(toolExecutor, tc, stream.controller.signal)
+            : null
           const executed: ToolCall = !withinBudget
             ? { ...tc, round, result: { error: TOOL_LIMIT_REACHED_ERROR, code: 'LIMIT_REACHED' } }
-            : availableToolNames.has(tc.name)
-              ? { ...await toolExecutor(tc), round, durationMs: Date.now() - startedAt }
+            : ran
+              ? { ...ran.toolCall, round, durationMs: Date.now() - startedAt }
               : {
                 round,
                 ...tc,
@@ -855,7 +908,7 @@ export class LlmService {
     const settings = this.getSettings()
 
     // Tracked from the start so Stop also works during the lookup below.
-    const stream = { handle: null as AbortHandle | null, cancelled: false, conversationId: request.conversationId }
+    const stream = newActiveStream(request.conversationId)
     this.activeStreams.set(channel, stream)
     try {
       const contextLength = await this.lookupContextLength(request.provider, request.model)
@@ -909,6 +962,7 @@ export class LlmService {
     const stream = this.activeStreams.get(channel)
     if (!stream) return
     stream.cancelled = true
+    stream.controller.abort()
     stream.handle?.abort()
   }
 

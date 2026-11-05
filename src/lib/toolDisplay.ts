@@ -231,11 +231,11 @@ export function countToolStatuses(toolCalls: ToolCall[]): BurstCounts {
   return counts
 }
 
-/** "14 calls", "14 calls | 13 ok | 1 failed", "5 calls | 1 running". */
+/** "14 calls", "14 calls | 1 failed", "5 calls | 1 running". */
 export function burstSummaryText(toolCalls: ToolCall[]): string {
-  const { total, ok, failed, running } = countToolStatuses(toolCalls)
+  const { total, failed, running } = countToolStatuses(toolCalls)
   const parts = [plural(total, 'call')]
-  if (failed > 0) parts.push(`${ok} ok`, `${failed} failed`)
+  if (failed > 0) parts.push(`${failed} failed`)
   if (running > 0) parts.push(`${running} running`)
   return parts.join(' | ')
 }

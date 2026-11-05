@@ -97,6 +97,8 @@ export interface SecretCodec {
   encrypted: boolean
   encode(text: string): string
   decode(data: string): string
+  /** For a codec that can't encrypt: reads a key file saved encrypted earlier, when possible here. */
+  decodeEncrypted?(data: string): string
 }
 
 interface SecretField {
@@ -212,6 +214,12 @@ export class SettingsService {
       writeFileAtomic(this.settingsPath, JSON.stringify(onDisk, null, 2))
     } else {
       writeFileAtomic(this.settingsPath, JSON.stringify(sanitized, null, 2))
+      // A key file this system can read was merged on load, so its keys are
+      // in settings.json now; left behind, it would put back keys cleared
+      // since. One it can't read (another session's keychain) is kept.
+      if (this.options.secretsPath && this.canReadOldKeyFile()) {
+        rmSync(this.options.secretsPath, { force: true })
+      }
     }
     this.currentSettings = sanitized
     this.resolvedSettings = this.resolveKeys(sanitized)
@@ -229,16 +237,28 @@ export class SettingsService {
     }
   }
 
+  /** Whether a codec that can't encrypt can still read a key file saved encrypted earlier. */
+  private canReadOldKeyFile(): boolean {
+    try {
+      return typeof this.options.getCodec?.().decodeEncrypted === 'function'
+    } catch {
+      return false
+    }
+  }
+
   /** Keys from the encrypted key file; empty when there is none or it can't be read here. */
   private readSecrets(): Record<string, string> {
-    const { secretsPath } = this.options
-    if (!secretsPath || !existsSync(secretsPath)) return {}
+    const { secretsPath, getCodec } = this.options
+    if (!secretsPath || !getCodec || !existsSync(secretsPath)) return {}
     try {
-      const storage = this.secretStorage()
-      if (!storage) throw new Error('Encryption is not available')
+      const codec = getCodec()
+      const decode = codec.encrypted
+        ? (data: string) => codec.decode(data)
+        : codec.decodeEncrypted ? (data: string) => codec.decodeEncrypted!(data) : null
+      if (!decode) throw new Error('Encryption is not available')
       const file = JSON.parse(readFileSync(secretsPath, 'utf-8')) as { data?: unknown }
       if (typeof file.data !== 'string') return {}
-      const parsed = JSON.parse(storage.codec.decode(file.data)) as unknown
+      const parsed = JSON.parse(decode(file.data)) as unknown
       if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return {}
       return Object.fromEntries(
         Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === 'string')
@@ -281,12 +301,15 @@ export class SettingsService {
           const value = field.get(settings)
           return value.length > 0 && !isApiKeyReference(value)
         })
-        this.addSavedKeys(settings)
-        if (hasPlainKeys && this.secretStorage()) {
+        const keysFromFile = this.addSavedKeys(settings)
+        const encrypting = this.secretStorage() !== null
+        // Or the other way: a key file that can be read but no longer
+        // written encrypted (see safeStorageCodec) moves into settings.json.
+        if ((hasPlainKeys && encrypting) || (keysFromFile > 0 && !encrypting)) {
           try {
             return this.save(settings)
           } catch (err) {
-            console.warn('[SettingsService] Could not move API keys to encrypted storage:', err)
+            console.warn('[SettingsService] Could not move API keys to their storage:', err)
           }
         }
         return settings
@@ -311,13 +334,18 @@ export class SettingsService {
     return defaults
   }
 
-  /** Fills blank key fields from the encrypted key file. */
-  private addSavedKeys(settings: Settings): void {
+  /** Fills blank key fields from the encrypted key file; returns how many it filled. */
+  private addSavedKeys(settings: Settings): number {
     const secrets = this.readSecrets()
+    let filled = 0
     for (const field of SECRET_FIELDS) {
       const saved = secrets[field.id]
-      if (saved && !field.get(settings)) field.set(settings, saved)
+      if (saved && !field.get(settings)) {
+        field.set(settings, saved)
+        filled += 1
+      }
     }
+    return filled
   }
 }
 

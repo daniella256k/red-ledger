@@ -48,7 +48,7 @@ export interface TurnServiceDeps {
    * Runs a reply's tool calls in the chat's folder, recording the files they
    * change under the reply so they can be undone.
    */
-  createToolRunner: (replyMessageId: string, workspaceRoot: string | null) => (toolCall: ToolCall) => Promise<ToolCall>
+  createToolRunner: (replyMessageId: string, workspaceRoot: string | null) => (toolCall: ToolCall, signal: AbortSignal) => Promise<ToolCall>
   /** Name of the context profile a chat's system prompt is built from. */
   getProfileName: (profileId: string | null | undefined) => string | null
   /** Sends an event to the page. */
@@ -320,7 +320,7 @@ export class TurnService {
   private async runReply(
     turn: RunningTurn,
     request: LLMRequest,
-    runTool: (toolCall: ToolCall) => Promise<ToolCall>
+    runTool: (toolCall: ToolCall, signal: AbortSignal) => Promise<ToolCall>
   ): Promise<void> {
     const sink: StreamSink = { send: (chunk) => this.onChunk(turn, chunk) }
     try {

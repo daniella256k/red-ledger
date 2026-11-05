@@ -20,6 +20,11 @@ export interface ToolContext {
    * its own folder after the user switches to a chat with another one.
    */
   workspace: WorkspaceService
+  /**
+   * Aborted when the user stops the reply. Tools pass it on to what they wait
+   * for (dialogs, MCP calls), so a stopped reply does nothing more.
+   */
+  signal?: AbortSignal
 }
 
 export interface ToolEntry {

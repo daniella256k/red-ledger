@@ -150,15 +150,22 @@ export function MessageList({
     try {
       const result = await window.redLedger.undoReplyFileChanges(messageId)
       if (!result) return
-      setUndoableReplies((current) => {
-        const next = new Set(current)
-        next.delete(messageId)
-        return next
-      })
+      // Files that failed stay undoable, so the action stays for another try.
+      if (result.failed.length === 0) {
+        setUndoableReplies((current) => {
+          const next = new Set(current)
+          next.delete(messageId)
+          return next
+        })
+      }
       useUIStore.getState().bumpFileTree()
       const undone = `Undid changes to ${result.undone.length} file${result.undone.length === 1 ? '' : 's'}.`
-      notify(result.skipped.length > 0
-        ? { type: 'warning', message: `${undone} Could not undo: ${result.skipped.join(', ')}` }
+      const problems = [
+        result.skipped.length > 0 ? `Could not undo: ${result.skipped.join(', ')}.` : '',
+        result.failed.length > 0 ? `Failed, try again: ${result.failed.join(', ')}.` : ''
+      ].filter(Boolean).join(' ')
+      notify(problems
+        ? { type: result.failed.length > 0 ? 'error' : 'warning', message: `${undone} ${problems}` }
         : { type: 'success', message: undone })
     } catch (err) {
       notify({ type: 'error', message: formatError(err) })

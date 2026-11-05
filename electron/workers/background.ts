@@ -22,9 +22,12 @@ import { AttachmentError } from '../services/AttachmentService'
  *   ran in is stopped; stopping a process is always safe, and a parser that
  *   crashes on a bad file only takes its own process down.
  *
- * A task that runs past its time limit stops its lane's runner (the next
- * task starts a fresh one), which also ends work a timeout inside the task
- * could not, like a walk over a huge folder.
+ * A task that runs past its time limit stops its lane's runner, which also
+ * ends work a timeout inside the task could not, like a walk over a huge
+ * folder. Only that task fails: the others waiting in the lane (another
+ * chat's read, say) start again in a fresh runner. Every task only reads, so
+ * running one again is safe. A runner that crashes fails everything it had,
+ * since there is no telling which task brought it down.
  */
 
 export type Lane = 'search' | 'documents'
@@ -57,6 +60,8 @@ const TASK_TIME_LIMIT_MS: Record<BackgroundTaskName, number> = {
 }
 
 interface Pending {
+  task: BackgroundTaskName
+  payload: unknown
   resolve: (value: unknown) => void
   reject: (err: Error) => void
   timer: ReturnType<typeof setTimeout>
@@ -115,18 +120,40 @@ class LaneRunner {
   constructor(private readonly factory: ChannelFactory) {}
 
   run(task: BackgroundTaskName, payload: unknown): Promise<unknown> {
-    const channel = this.ensureChannel()
     const id = this.nextId++
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        this.stop(Object.assign(
-          new Error(`This took longer than ${TASK_TIME_LIMIT_MS[task] / 1000} s and was stopped.`),
-          { code: 'TIMEOUT' }
-        ))
-      }, TASK_TIME_LIMIT_MS[task])
-      this.pending.set(id, { resolve, reject, timer })
-      channel.post({ id, task, payload })
+      this.pending.set(id, { task, payload, resolve, reject, timer: this.startTimer(id, task) })
+      this.ensureChannel().post({ id, task, payload })
     })
+  }
+
+  private startTimer(id: number, task: BackgroundTaskName): ReturnType<typeof setTimeout> {
+    return setTimeout(() => this.timeOut(id), TASK_TIME_LIMIT_MS[task])
+  }
+
+  /**
+   * A task ran too long: it fails, its runner is stopped, and the lane's
+   * other tasks are sent again to a fresh runner, each with its full time.
+   */
+  private timeOut(id: number): void {
+    const entry = this.pending.get(id)
+    if (!entry) return
+    this.pending.delete(id)
+    entry.reject(Object.assign(
+      new Error(`This took longer than ${TASK_TIME_LIMIT_MS[entry.task] / 1000} s and was stopped.`),
+      { code: 'TIMEOUT' }
+    ))
+
+    const channel = this.channel
+    this.channel = null
+    channel?.stop()
+    if (this.pending.size === 0) return
+    const fresh = this.ensureChannel()
+    for (const [otherId, other] of this.pending) {
+      clearTimeout(other.timer)
+      other.timer = this.startTimer(otherId, other.task)
+      fresh.post({ id: otherId, task: other.task, payload: other.payload })
+    }
   }
 
   /** Stops the runner; anything still waiting on it fails with `reason`. */

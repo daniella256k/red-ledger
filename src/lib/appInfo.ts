@@ -2,6 +2,7 @@ import packageJson from '../../package.json'
 
 interface PackageJsonShape {
   name?: string
+  version?: string
   build?: {
     productName?: string
   }
@@ -28,3 +29,6 @@ function resolveAppName(): string {
 }
 
 export const APP_NAME = resolveAppName()
+
+/** The version in package.json, as the app reports it (e.g. to MCP servers). */
+export const APP_VERSION = packageMetadata.version?.trim() || '0.0.0'

@@ -32,11 +32,13 @@ import {
   type OAuthCallbackServer
 } from './mcpOAuth'
 import type { McpServerConfig, McpServerStatus, McpSignInResult, Settings } from '../../src/types'
+import { APP_VERSION } from '../../src/lib/appInfo'
 
 /** Window handle the tool registry passes through to executors (BrowserWindow in production). */
 type ToolWindow = Parameters<ToolEntry['execute']>[1]['win']
 
-const CLIENT_INFO = { name: 'red-ledger', version: '1.0.0' }
+/** How Red Ledger introduces itself to MCP servers. */
+const CLIENT_INFO = { name: 'red-ledger', version: APP_VERSION }
 /** Per-call timeout; progress notifications from the server reset it. */
 const TOOL_CALL_TIMEOUT_MS = 120_000
 /** Results larger than this are clipped so one tool can't flood the context. */
@@ -277,7 +279,8 @@ interface Connection {
 export interface McpServiceDeps {
   getSettings: () => Settings
   /** Dialog for Strict Mode confirmations; null when no window is available. */
-  getDialog: (win: ToolWindow) => DialogAdapter | null
+  /** `signal` closes the dialog unanswered when the reply is stopped. */
+  getDialog: (win: ToolWindow, signal?: AbortSignal) => DialogAdapter | null
   registerTool: (entry: ToolEntry) => void
   unregisterTool: (name: string) => void
   onStatusChange?: (statuses: McpServerStatus[]) => void
@@ -727,7 +730,7 @@ export class McpService {
       connection.registered.set(name, tool.name)
       this.deps.registerTool({
         definition: toToolDefinition(name, tool, connection.config.name),
-        execute: (args, { win, workspace }) => this.callTool(connection, tool.name, args, win, workspace.getWorkspacePath())
+        execute: (args, { win, workspace, signal }) => this.callTool(connection, tool.name, args, win, workspace.getWorkspacePath(), signal)
       })
     }
   }
@@ -745,11 +748,12 @@ export class McpService {
     connection: Connection,
     toolName: string,
     args: Record<string, unknown>,
-    win: ToolWindow
+    win: ToolWindow,
+    signal: AbortSignal | undefined
   ): Promise<void> {
     if (!this.deps.getSettings().strictMode) return
 
-    const dialog = this.deps.getDialog(win)
+    const dialog = this.deps.getDialog(win, signal)
     if (!dialog) {
       throw new McpToolError('USER_DENIED', 'Strict Mode is on and no window is available to confirm this tool call')
     }
@@ -773,7 +777,8 @@ export class McpService {
     toolName: string,
     args: Record<string, unknown>,
     win: ToolWindow,
-    chatWorkspace: string | null
+    chatWorkspace: string | null,
+    signal?: AbortSignal
   ): Promise<unknown> {
     if (connection.retired || connection.state !== 'connected' || !connection.client) {
       throw new McpToolError('MCP_ERROR', `The "${connection.config.name}" connection is not available right now.`)
@@ -787,13 +792,15 @@ export class McpService {
       )
     }
 
-    await this.confirmToolCall(connection, toolName, args, win)
+    await this.confirmToolCall(connection, toolName, args, win, signal)
+    if (signal?.aborted) throw new McpToolError('CANCELLED', 'The reply was stopped, so the tool was not called.')
 
     try {
       const result = await connection.client.callTool(
         { name: toolName, arguments: args ?? {} },
         undefined,
-        { timeout: TOOL_CALL_TIMEOUT_MS, resetTimeoutOnProgress: true }
+        // Stopping the reply cancels the call on the server too.
+        { timeout: TOOL_CALL_TIMEOUT_MS, resetTimeoutOnProgress: true, ...(signal ? { signal } : {}) }
       )
       return flattenMcpToolResult(result)
     } catch (err) {

@@ -313,6 +313,17 @@ describe('SearchService.fetchUrl', () => {
     )
     expect(mockedAxios.get).toHaveBeenCalledTimes(1)
   })
+
+  it('refuses redirects to anything but http(s)', async () => {
+    for (const location of ['file:///etc/passwd', 'data:text/plain,hello', 'ftp://example.com/file']) {
+      mockedAxios.get.mockReset()
+      mockedAxios.get.mockResolvedValueOnce({ status: 301, headers: { location }, data: '' })
+      const service = new SearchService(() => ({} as never))
+
+      await expect(service.fetchUrl('https://example.com/moved')).rejects.toMatchObject({ code: 'INVALID_URL' })
+      expect(mockedAxios.get).toHaveBeenCalledTimes(1)
+    }
+  })
 })
 
 describe('sliceDocument', () => {

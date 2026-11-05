@@ -1,14 +1,8 @@
-import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import type { DialogAdapter } from '../../services/WorkspaceService'
+import { toolDialog } from './toolDialog'
 import { PathJailError } from '../../services/pathJail'
 import { renderMarkdownToPdf } from '../../services/PdfRenderService'
 import { optionalStringArg, requireObjectArgs, requireStringArg } from './args'
-
-function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
-  if (!win) return null
-  return { showMessageBox: (options) => dialog.showMessageBox(win, options) }
-}
 
 registerTool({
   definition: {
@@ -38,7 +32,7 @@ registerTool({
       }
     }
   },
-  execute: async (args, { win, workspace }) => {
+  execute: async (args, { win, workspace, signal }) => {
     const input = requireObjectArgs(args, 'write_pdf')
     const path = requireStringArg(input, 'path', 'write_pdf')
     const markdown = requireStringArg(input, 'markdown', 'write_pdf', {
@@ -52,7 +46,7 @@ registerTool({
     }
 
     const pdfBuffer = await renderMarkdownToPdf(markdown, { title })
-    await workspace.writeBinaryFile(dialogForWindow(win), path, pdfBuffer)
+    await workspace.writeBinaryFile(toolDialog(win, signal), path, pdfBuffer)
 
     return { success: true, path, bytes: pdfBuffer.byteLength }
   }

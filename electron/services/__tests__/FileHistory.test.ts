@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { ConversationService } from '../ConversationService'
@@ -92,6 +92,52 @@ describe('file history', () => {
 
     conversations.deleteConversation(chat.id)
 
+    expect(conversations.fileHistory.storedBytes()).toBe(0)
+  })
+
+  it('skips a path where a folder now stands and still undoes the rest', async () => {
+    writeFileSync(join(workspaceRoot, 'notes.md'), 'v1')
+    const { chat, reply, workspace } = replyWorkspace()
+    await workspace.writeFile(null, 'notes.md', 'v2', false)
+    await workspace.writeFile(null, 'made.md', 'created', false)
+
+    // The created file was replaced by a folder of the user's own.
+    rmSync(join(workspaceRoot, 'made.md'))
+    mkdirSync(join(workspaceRoot, 'made.md'))
+    writeFileSync(join(workspaceRoot, 'made.md', 'keep.txt'), 'mine')
+
+    expect(conversations.fileHistory.describeChanges(reply.id)[0]).toMatchObject({ path: 'made.md', action: 'unavailable' })
+    const result = conversations.fileHistory.undo(reply.id)
+
+    expect(result).toEqual({ undone: ['notes.md'], skipped: ['made.md'], failed: [] })
+    expect(read('notes.md')).toBe('v1')
+    expect(read('made.md/keep.txt')).toBe('mine')
+    expect(conversations.fileHistory.repliesWithChanges(chat.id)).toEqual([])
+  })
+
+  it.skipIf(process.getuid?.() === 0)('keeps a file whose undo failed, so undoing again retries it', async () => {
+    writeFileSync(join(workspaceRoot, 'a.md'), 'a1')
+    writeFileSync(join(workspaceRoot, 'b.md'), 'b1')
+    const { chat, reply, workspace } = replyWorkspace()
+    await workspace.writeFile(null, 'a.md', 'a2', false)
+    await workspace.writeFile(null, 'b.md', 'b2', false)
+
+    // Read-only: writing the old content back fails.
+    chmodSync(join(workspaceRoot, 'a.md'), 0o444)
+    try {
+      const first = conversations.fileHistory.undo(reply.id)
+      expect(first).toEqual({ undone: ['b.md'], skipped: [], failed: ['a.md'] })
+      expect(read('b.md')).toBe('b1')
+      expect(conversations.fileHistory.repliesWithChanges(chat.id)).toEqual([reply.id])
+      expect(conversations.fileHistory.describeChanges(reply.id).map((change) => change.path)).toEqual(['a.md'])
+    } finally {
+      chmodSync(join(workspaceRoot, 'a.md'), 0o644)
+    }
+
+    const second = conversations.fileHistory.undo(reply.id)
+    expect(second).toEqual({ undone: ['a.md'], skipped: [], failed: [] })
+    expect(read('a.md')).toBe('a1')
+    expect(conversations.fileHistory.repliesWithChanges(chat.id)).toEqual([])
     expect(conversations.fileHistory.storedBytes()).toBe(0)
   })
 

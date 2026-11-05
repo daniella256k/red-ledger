@@ -508,6 +508,48 @@ describe('SettingsService on disk', () => {
     })
   })
 
+  it('moves keys out of a key file that can be read but no longer written encrypted', () => {
+    withTempDir((dir) => {
+      const path = join(dir, 'settings.json')
+      const secretsPath = join(dir, 'api-keys.json')
+      // Saved when encryption counted as available (Linux basic_text before this fix).
+      const before = new SettingsService(path, { secretsPath, getCodec: () => fakeCodec() })
+      before.save({ ...before.getCurrent(), tavilyApiKey: 'tvly-old' })
+
+      // Now it counts as plain, but the old file can still be decrypted.
+      const plainButReads = (): SecretCodec => ({ ...fakeCodec(false), decodeEncrypted: fakeCodec().decode })
+      const service = new SettingsService(path, { secretsPath, getCodec: plainButReads })
+
+      expect(service.getCurrent().tavilyApiKey).toBe('tvly-old')
+      expect(service.keysEncrypted()).toBe(false)
+      expect(JSON.parse(readFileSync(path, 'utf-8')).tavilyApiKey).toBe('tvly-old')
+      expect(existsSync(secretsPath)).toBe(false)
+
+      // A key cleared later stays cleared.
+      service.save({ ...service.getCurrent(), tavilyApiKey: '' })
+      expect(new SettingsService(path, { secretsPath, getCodec: plainButReads }).getCurrent().tavilyApiKey).toBe('')
+    })
+  })
+
+  it('keeps a key file it cannot read when saving without a keychain', () => {
+    withTempDir((dir) => {
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+      try {
+        const path = join(dir, 'settings.json')
+        const secretsPath = join(dir, 'api-keys.json')
+        writeFileSync(path, '{}')
+        writeFileSync(secretsPath, JSON.stringify({ encrypted: true, data: 'b3RoZXI=' }))
+
+        const service = new SettingsService(path, { secretsPath, getCodec: () => fakeCodec(false) })
+        service.save({ ...service.getCurrent(), darkMode: true })
+
+        expect(existsSync(secretsPath)).toBe(true)
+      } finally {
+        warn.mockRestore()
+      }
+    })
+  })
+
   it('keeps ${env:NAME} keys as written and reads them from the environment', () => {
     withTempDir((dir) => {
       const path = join(dir, 'settings.json')

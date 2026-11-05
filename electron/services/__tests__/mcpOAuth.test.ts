@@ -154,6 +154,19 @@ describe('createFileAuthStore', () => {
     writeFileSync(path, '{not json')
     expect(createFileAuthStore(path, () => reversing).ids()).toEqual([])
   })
+
+  it('keeps sign-ins saved encrypted once encryption no longer counts, and saves them plain from then on', () => {
+    const path = tempFile()
+    createFileAuthStore(path, () => reversing).set('r1', { binding: 'b', tokens: { access_token: 'kept', token_type: 'Bearer' } })
+
+    const plainButReads: McpAuthCodec = { ...PLAIN_TEXT_CODEC, decodeEncrypted: reversing.decode }
+    const store = createFileAuthStore(path, () => plainButReads)
+    expect(store.get('r1')?.tokens?.access_token).toBe('kept')
+
+    store.set('r2', { binding: 'c' })
+    expect(JSON.parse(readFileSync(path, 'utf-8')).encrypted).toBe(false)
+    expect(createFileAuthStore(path, () => PLAIN_TEXT_CODEC).ids()).toEqual(['r1', 'r2'])
+  })
 })
 
 // ─── Callback page ──────────────────────────────────────────────────────────

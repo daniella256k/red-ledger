@@ -1,12 +1,6 @@
-import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import type { DialogAdapter } from '../../services/WorkspaceService'
+import { toolDialog } from './toolDialog'
 import { requireObjectArgs, requireStringArg } from './args'
-
-function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
-  if (!win) return null
-  return { showMessageBox: (options) => dialog.showMessageBox(win, options) }
-}
 
 registerTool({
   definition: {
@@ -34,7 +28,7 @@ registerTool({
       }
     }
   },
-  execute: async (args, { win, workspace }) => {
+  execute: async (args, { win, workspace, signal }) => {
     const input = requireObjectArgs(args, 'edit_file')
     const path = requireStringArg(input, 'path', 'edit_file')
     const oldString = requireStringArg(input, 'old_string', 'edit_file', {
@@ -53,7 +47,7 @@ registerTool({
       }
     }
 
-    const adapter = dialogForWindow(win)
+    const adapter = toolDialog(win, signal)
 
     // Read without a prompt: edit_file is one logical operation, so we only
     // want to prompt once (in editFile) when strict mode is on, not twice.

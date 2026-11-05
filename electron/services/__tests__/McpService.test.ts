@@ -409,6 +409,20 @@ describe('McpService tool calls', () => {
       expect(factory.servers[0].calls).toHaveLength(0)
     })
 
+    it('does not call the server once the reply is stopped', async () => {
+      const { service, registry, factory } = setup({ settings: { strictMode: false } })
+      activeService = service
+      service.applyServers([stdioServer()])
+      await waitForState(service, 'srv-1', 'connected')
+
+      const stopped = new AbortController()
+      stopped.abort()
+      const context = { win: null, workspace: { getWorkspacePath: () => null }, signal: stopped.signal } as never
+      await expect(registry.get('everything__echo')!.execute({ message: 'a' }, context))
+        .rejects.toMatchObject({ code: 'CANCELLED' })
+      expect(factory.servers[0].calls).toHaveLength(0)
+    })
+
     it('does not ask when Strict Mode is off', async () => {
       const dialog = dialogAnswering(0)
       const { service, registry } = setup({ settings: { strictMode: false }, dialog })

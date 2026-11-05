@@ -16,7 +16,7 @@ export function ToolCallBurst({ toolCalls }: { toolCalls: ToolCall[] }) {
     )
   }
 
-  const { total, ok, failed, running } = countToolStatuses(toolCalls)
+  const { total, failed, running } = countToolStatuses(toolCalls)
 
   return (
     <details className="tool-burst">
@@ -26,7 +26,7 @@ export function ToolCallBurst({ toolCalls }: { toolCalls: ToolCall[] }) {
         <span className="tool-burst-counts">
           {total} calls
           {failed > 0 && (
-            <> | {ok} ok | <span className="text-error">{failed} failed</span></>
+            <> | <span className="text-error">{failed} failed</span></>
           )}
           {running > 0 && <> | {running} running</>}
         </span>

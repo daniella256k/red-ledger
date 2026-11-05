@@ -154,9 +154,7 @@ export class FileHistoryStore {
       const fullPath = this.safePath(row)
       return {
         path: row.relative_path,
-        action: !fullPath || row.before_state === 'too_large'
-          ? 'unavailable'
-          : row.before_state === 'absent' ? 'delete' : 'restore',
+        action: fullPath ? this.undoAction(row, fullPath) : 'unavailable',
         changedSince: fullPath !== null && hashFile(fullPath) !== row.after_hash
       }
     })
@@ -164,38 +162,62 @@ export class FileHistoryStore {
 
   /**
    * Puts every file the reply changed back the way it was before the reply:
-   * old content written back, files it created deleted. The reply's history
-   * is then cleared, so an undo can't be applied twice.
+   * old content written back, files it created deleted. Each file is undone
+   * on its own, so one that fails doesn't stop the rest. Files undone, or
+   * beyond undoing, leave the reply's history, so an undo can't be applied
+   * twice; a file that failed (locked by another app, say) stays in it, so
+   * undoing again tries it again.
    */
   undo(messageId: string): FileUndoResult {
-    const result: FileUndoResult = { undone: [], skipped: [] }
+    const result: FileUndoResult = { undone: [], skipped: [], failed: [] }
     const getVersion = this.db.prepare('SELECT data FROM file_versions WHERE id = ?')
+    const settled: ChangeRow[] = []
 
     for (const row of this.changeRows(messageId)) {
       const fullPath = this.safePath(row)
-      if (!fullPath || row.before_state === 'too_large') {
+      const action = fullPath ? this.undoAction(row, fullPath) : 'unavailable'
+      const version = action === 'restore'
+        ? getVersion.get(row.before_version) as { data: Buffer } | undefined
+        : undefined
+      if (!fullPath || action === 'unavailable' || (action === 'restore' && !version)) {
         result.skipped.push(row.relative_path)
+        settled.push(row)
         continue
       }
-      if (row.before_state === 'absent') {
-        rmSync(fullPath, { force: true })
-      } else {
-        const version = getVersion.get(row.before_version) as { data: Buffer } | undefined
-        if (!version) {
-          result.skipped.push(row.relative_path)
-          continue
+      try {
+        if (action === 'delete') {
+          rmSync(fullPath, { force: true })
+        } else {
+          mkdirSync(dirname(fullPath), { recursive: true })
+          writeFileSync(fullPath, gunzipSync(version!.data))
         }
-        mkdirSync(dirname(fullPath), { recursive: true })
-        writeFileSync(fullPath, gunzipSync(version.data))
+        result.undone.push(row.relative_path)
+        settled.push(row)
+      } catch (err) {
+        console.warn(`[FileHistory] Could not undo ${row.relative_path}:`, err)
+        result.failed.push(row.relative_path)
       }
-      result.undone.push(row.relative_path)
     }
 
+    const forget = this.db.prepare(
+      'DELETE FROM file_changes WHERE message_id = ? AND workspace_root = ? AND relative_path = ?'
+    )
     this.db.transaction(() => {
-      this.db.prepare('DELETE FROM file_changes WHERE message_id = ?').run(messageId)
+      for (const row of settled) forget.run(messageId, row.workspace_root, row.relative_path)
       this.pruneUnusedVersions()
     })()
     return result
+  }
+
+  /**
+   * What undo does for one file. A folder now standing where the file was
+   * can't be replaced or deleted as the file: nothing of the reply's is left
+   * there.
+   */
+  private undoAction(row: ChangeRow, fullPath: string): FileChangeSummary['action'] {
+    if (row.before_state === 'too_large') return 'unavailable'
+    if (lstatSync(fullPath, { throwIfNoEntry: false })?.isDirectory()) return 'unavailable'
+    return row.before_state === 'absent' ? 'delete' : 'restore'
   }
 
   /** Deletes stored file contents no reply's history uses any more. */

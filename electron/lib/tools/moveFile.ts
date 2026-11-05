@@ -1,12 +1,6 @@
-import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import type { DialogAdapter } from '../../services/WorkspaceService'
+import { toolDialog } from './toolDialog'
 import { requireObjectArgs, requireStringArg } from './args'
-
-function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
-  if (!win) return null
-  return { showMessageBox: (options) => dialog.showMessageBox(win, options) }
-}
 
 registerTool({
   definition: {
@@ -30,11 +24,11 @@ registerTool({
       }
     }
   },
-  execute: async (args, { win, workspace }) => {
+  execute: async (args, { win, workspace, signal }) => {
     const input = requireObjectArgs(args, 'move_file')
     const source = requireStringArg(input, 'source', 'move_file')
     const destination = requireStringArg(input, 'destination', 'move_file')
-    const moved = await workspace.moveFile(dialogForWindow(win), source, destination)
+    const moved = await workspace.moveFile(toolDialog(win, signal), source, destination)
     return { success: true, ...moved }
   }
 })

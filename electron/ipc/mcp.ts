@@ -1,7 +1,7 @@
 import { BrowserWindow, shell } from 'electron'
 import { handleIpc } from './typedIpc'
 import { assertString } from './validate'
-import { dialogForWindow } from './fs'
+import { toolDialog } from '../lib/tools/toolDialog'
 import { McpService } from '../services/McpService'
 import { createFileAuthStore } from '../services/mcpOAuth'
 import { safeStorageCodec } from './safeStorageCodec'
@@ -27,7 +27,8 @@ export function getMcpService(): McpService {
 export function registerMcpHandlers(getSettings: () => Settings, authStorePath: string): void {
   service = new McpService({
     getSettings,
-    getDialog: dialogForWindow,
+    // Fails closed: with no window, Strict Mode questions count as denied.
+    getDialog: (win, signal) => toolDialog(win as BrowserWindow | null, signal),
     registerTool,
     unregisterTool,
     authStore: createFileAuthStore(authStorePath, safeStorageCodec),

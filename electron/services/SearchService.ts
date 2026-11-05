@@ -706,7 +706,13 @@ export class SearchService {
         throw new SearchError('HTTP_ERROR', 'URL redirected without a valid location header', { status })
       }
 
+      // Each hop is checked like the first: http(s) only, and (next time
+      // round) never a local or private address.
       currentUrl = new URL(location, currentUrl)
+      if (!['http:', 'https:'].includes(currentUrl.protocol)) {
+        throw new SearchError('INVALID_URL', `URL redirected to an unsupported address (${currentUrl.protocol}); only http:// and https:// are read`)
+      }
+      currentUrl.hash = ''
     }
 
     throw new SearchError('TOO_MANY_REDIRECTS', `Too many redirects (maximum ${MAX_FETCH_REDIRECTS})`)

@@ -72,9 +72,9 @@ export function registerTurnHandlers(deps: {
         : null
       const workspace = getWorkspaceService().snapshot(history)
       workspace.setWorkspacePath(workspaceRoot)
-      return (toolCall) => {
+      return (toolCall, signal) => {
         const win = deps.getWindow()
-        return executeTool(toolCall, { win: win && !win.isDestroyed() ? win : null, workspace })
+        return executeTool(toolCall, { win: win && !win.isDestroyed() ? win : null, workspace, signal })
       }
     },
     getProfileName: (profileId) => {

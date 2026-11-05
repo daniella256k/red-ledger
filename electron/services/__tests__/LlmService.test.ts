@@ -537,6 +537,50 @@ describe('LlmService cancellation', () => {
     expect(chunks[chunks.length - 1].type).toBe('done')
   })
 
+  it('ends the turn at once when stopped while a tool is still running', async () => {
+    let rounds = 0
+    class OneToolProvider extends BaseLLMProvider {
+      sendStreaming(options: ProviderSendOptions) {
+        rounds += 1
+        queueMicrotask(() => {
+          options.onChunk({ type: 'tool_call', toolCall: { id: 'slow-1', name: 'slow', arguments: {} } })
+          options.onChunk({ type: 'tool_call', toolCall: { id: 'slow-2', name: 'slow', arguments: {} } })
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+    }
+    registerProvider({ name: 'openai', displayName: 'Slow', defaultBaseUrl: '', factory: () => new OneToolProvider('', '') })
+    registerTool({
+      definition: { type: 'function', function: { name: 'slow', description: 'Never finishes', parameters: { type: 'object' } } },
+      execute: () => new Promise(() => {})
+    })
+
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system' })
+    const chunks: StreamChunk[] = []
+    const signals: AbortSignal[] = []
+    await service.orchestrateStream(
+      { conversationId: 'c1', model: 'test', provider: 'openai', messages: [{ role: 'user', content: 'go', timestamp: 't' }] },
+      'stream-stop-slow',
+      { send: (chunk) => chunks.push(chunk) },
+      (_tc, signal) => {
+        signals.push(signal)
+        setTimeout(() => service.cancelStream('stream-stop-slow'), 0)
+        return new Promise(() => {})
+      }
+    )
+
+    expect(rounds).toBe(1)
+    // The tool was told, and only the first one ever started.
+    expect(signals).toHaveLength(1)
+    expect(signals[0].aborted).toBe(true)
+    const results = chunks.filter((c) => c.type === 'tool_result')
+    expect(results).toHaveLength(1)
+    expect(results[0].toolCall?.result).toMatchObject({ code: 'CANCELLED' })
+    expect(chunks[chunks.length - 1].type).toBe('done')
+  })
+
   it('stops when cancelled while the context window is still being looked up', async () => {
     let requests = 0
     let releaseLookup: (value: number | null) => void = () => {}

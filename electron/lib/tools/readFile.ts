@@ -1,13 +1,7 @@
-import { dialog, BrowserWindow } from 'electron'
 import { registerTool } from './registry'
-import type { DialogAdapter } from '../../services/WorkspaceService'
+import { toolDialog } from './toolDialog'
 import { numberArg, requireObjectArgs, requireStringArg } from './args'
 import { READ_FILE_MAX_LINES } from './fileSlice'
-
-function dialogForWindow(win: BrowserWindow | null): DialogAdapter | null {
-  if (!win) return null
-  return { showMessageBox: (options) => dialog.showMessageBox(win, options) }
-}
 
 registerTool({
   definition: {
@@ -37,7 +31,7 @@ registerTool({
       }
     }
   },
-  execute: async (args, { win, workspace }) => {
+  execute: async (args, { win, workspace, signal }) => {
     const input = requireObjectArgs(args, 'read_file')
     const path = requireStringArg(input, 'path', 'read_file')
     const offset = input.offset === undefined || input.offset === null
@@ -46,6 +40,6 @@ registerTool({
     const limit = input.limit === undefined || input.limit === null
       ? undefined
       : numberArg(input, 'limit', 'read_file', { integer: true, min: 1, max: READ_FILE_MAX_LINES })
-    return { path, ...await workspace.readFileSlice(dialogForWindow(win), path, { offset, limit }) }
+    return { path, ...await workspace.readFileSlice(toolDialog(win, signal), path, { offset, limit }) }
   }
 })
