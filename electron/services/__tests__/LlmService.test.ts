@@ -7,7 +7,7 @@ import type { LLMMessage, ProviderSendOptions } from '../../lib/providers/base'
 import { registerProvider } from '../../lib/providers/registry'
 import { registerTool } from '../../lib/tools/registry'
 import { detectFileType } from '../../lib/fileType'
-import type { Attachment, LLMRequest, StreamChunk } from '../../../src/types'
+import type { Attachment, LLMRequest, StreamChunk, ToolCall } from '../../../src/types'
 
 function createService(): LlmService {
   return new LlmService({
@@ -227,6 +227,91 @@ describe('LlmService tool call history', () => {
     expect(messages[4].content).toContain('did not finish')
 
     expect(messages[5]).toEqual({ role: 'assistant', content: 'It is blue.' })
+  })
+
+  it('replays an earlier reply exactly as its last live request sent it, budget notices included', async () => {
+    // Two calls per round with no text between rounds, so rounds share a place
+    // in the text; 30 calls cross the 25-call notice.
+    const ROUNDS = 15
+    class ScriptedProvider extends BaseLLMProvider {
+      requests: LLMMessage[][] = []
+      sendStreaming(options: ProviderSendOptions) {
+        this.requests.push(JSON.parse(JSON.stringify(options.messages)))
+        const round = this.requests.length
+        queueMicrotask(() => {
+          if (round === 1) options.onChunk({ type: 'text', content: 'Looking. ' })
+          if (round <= ROUNDS) {
+            options.onChunk({ type: 'tool_call', toolCall: { id: `r${round}a`, name: 'noop', arguments: { n: round } } })
+            options.onChunk({ type: 'tool_call', toolCall: { id: `r${round}b`, name: 'noop', arguments: { n: round } } })
+          } else {
+            options.onChunk({ type: 'text', content: 'Done.' })
+          }
+          options.onChunk({ type: 'done' })
+        })
+        return { abort: () => {} }
+      }
+      async listModels() { return [] }
+    }
+    const provider = new ScriptedProvider('', '')
+    registerProvider({ name: 'openai', displayName: 'Scripted', defaultBaseUrl: '', factory: () => provider })
+    registerTool({
+      definition: { type: 'function', function: { name: 'noop', description: 'Does nothing', parameters: { type: 'object' } } },
+      execute: async () => ({ ok: true })
+    })
+    const service = new LlmService({ getSettings: () => sanitizeSettings(undefined), getSystemPrompt: () => 'system', timeZone: 'UTC' })
+    const prompt = { role: 'user' as const, content: 'research', timestamp: '2026-01-01T00:00:00.000Z' }
+
+    // Turn 1, saved the way TurnService saves a reply.
+    let content = ''
+    let saved: ToolCall[] = []
+    await service.orchestrateStream(
+      { conversationId: 'c1', model: 'test', provider: 'openai', messages: [prompt] },
+      'replay-1',
+      {
+        send: (chunk) => {
+          if (chunk.type === 'text') content += chunk.content ?? ''
+          if (chunk.type === 'tool_call' && chunk.toolCall) saved.push({ ...chunk.toolCall, contentOffset: content.length })
+          if (chunk.type === 'tool_result' && chunk.toolCall) {
+            const result = chunk.toolCall
+            saved = saved.map((tc) => (tc.id === result.id ? { ...result, contentOffset: tc.contentOffset } : tc))
+          }
+        }
+      },
+      async (tc) => ({ ...tc, result: { ok: true } })
+    )
+    const lastLive = provider.requests[provider.requests.length - 1]
+    expect(lastLive.some((m) => m.role === 'tool' && String(m.content).includes('[system: tool_call_budget used=26'))).toBe(true)
+
+    // Turn 2 starts from the saved reply.
+    const stored = JSON.parse(JSON.stringify(saved)) as ToolCall[]
+    await service.orchestrateStream(
+      {
+        conversationId: 'c1',
+        model: 'test',
+        provider: 'openai',
+        messages: [prompt, { role: 'assistant', content, toolCalls: stored, timestamp: '2026-01-01T00:00:01.000Z' }, { ...prompt, content: 'more' }]
+      },
+      'replay-2',
+      { send: () => {} },
+      async (tc) => ({ ...tc, result: { ok: true } })
+    )
+    const replayed = provider.requests[ROUNDS + 1]
+    expect(replayed.slice(0, lastLive.length)).toEqual(lastLive)
+  })
+
+  it('keeps rounds with no text between them apart, and an unfinished call with its round', () => {
+    const messages = buildPastReplyMessages('Done.', [
+      { id: 'a', name: 'web_search', arguments: {}, result: { ok: 1 }, round: 1, contentOffset: 0 },
+      { id: 'b', name: 'fetch_url', arguments: {}, result: { ok: 2 }, round: 2, contentOffset: 0 },
+      // Stopped before it ran: no result and no round recorded.
+      { id: 'c', name: 'fetch_url', arguments: {}, contentOffset: 0 }
+    ], new Set(), ['first', 'second', 'closing'])
+
+    expect(messages.map((m) => m.role)).toEqual(['assistant', 'tool', 'assistant', 'tool', 'tool', 'assistant'])
+    expect(messages[0].tool_calls!.map((tc) => tc.id)).toEqual(['a'])
+    expect(messages[2].tool_calls!.map((tc) => tc.id)).toEqual(['b', 'c'])
+    // Each round keeps its own stretch of thinking (DeepSeek).
+    expect(messages.filter((m) => m.role === 'assistant').map((m) => m.reasoning_content)).toEqual(['first', 'second', 'closing'])
   })
 
   it('puts calls stored without an offset before the reply text', () => {

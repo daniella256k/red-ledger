@@ -135,6 +135,11 @@ export function buildToolCallBudgetNotice(previousTotal: number, nextTotal: numb
     + `Only continue if more tool calls are clearly needed. At ${MAX_TOOL_CALLS} tool calls, tools stop running and you must answer with what you have.`
 }
 
+/** A round's last tool result with the budget notice after it, live and on replay alike. */
+function withBudgetNotice(result: string, notice: string): string {
+  return `${result}\n\n${notice}`
+}
+
 /** What a past tool call that never returned is replayed with. */
 const UNFINISHED_TOOL_RESULT = { error: 'This tool call did not finish: the reply was stopped while it ran.' }
 /**
@@ -207,10 +212,39 @@ function uniqueToolCallId(id: string, usedIds: Set<string>): string {
 }
 
 /**
+ * A reply's tool calls in the rounds the model made them, in order. Calls
+ * record their round; a call without one (left unfinished by Stop, or saved
+ * before rounds were recorded) belongs with the call before it when they sit
+ * at the same place in the text, and otherwise starts a round of its own
+ * there. Calls at one place in the text can still be several rounds: a round
+ * with no text before it starts where the last one did.
+ */
+function groupToolRounds(toolCalls: ToolCall[], offsetOf: (tc: ToolCall) => number): ToolCall[][] {
+  // Array sort is stable, so calls at one place keep the order they were made in.
+  const ordered = [...toolCalls].sort((a, b) => offsetOf(a) - offsetOf(b))
+  const rounds: ToolCall[][] = []
+  let previous: { key: string; offset: number } | null = null
+
+  for (const tc of ordered) {
+    const offset = offsetOf(tc)
+    const key: string = typeof tc.round === 'number'
+      ? `round:${tc.round}`
+      : previous && previous.offset === offset ? previous.key : `offset:${offset}`
+    if (!previous || previous.key !== key) rounds.push([])
+    rounds[rounds.length - 1].push(tc)
+    previous = { key, offset }
+  }
+  return rounds
+}
+
+/**
  * An earlier assistant reply as the exchange the model actually had: each
  * round's text with its tool calls, the full tool results, then the closing
- * text. Rounds are recovered from where each call happened in the reply text
- * (contentOffset); calls stored without one ran before any text.
+ * text. Rounds come from the round each call records, and where it happened
+ * in the reply text (contentOffset); calls stored without one ran before any
+ * text. A round that crossed a tool budget threshold gets the same budget
+ * notice the live request carried, so the replayed chat matches what the
+ * provider has cached.
  *
  * With `reasoningBlocks` (the reply's stretches of thinking, in order), each
  * assistant message carries its round's as `reasoning_content`, for servers
@@ -229,15 +263,16 @@ export function buildPastReplyMessages(
   if (!toolCalls || toolCalls.length === 0) return [{ role: 'assistant', content, ...reasoning() }]
 
   const offsetOf = (tc: ToolCall) => Math.min(Math.max(tc.contentOffset ?? 0, 0), content.length)
-  // Array sort is stable, so the calls of one round keep their order.
-  const ordered = [...toolCalls].sort((a, b) => offsetOf(a) - offsetOf(b))
   const messages: LLMMessage[] = []
   let cursor = 0
+  // Counted as the live loop counts (see orchestrateStream).
+  let totalToolCalls = 0
 
-  for (let i = 0; i < ordered.length;) {
-    const offset = offsetOf(ordered[i])
-    const round: ToolCall[] = []
-    while (i < ordered.length && offsetOf(ordered[i]) === offset) round.push(ordered[i++])
+  for (const round of groupToolRounds(toolCalls, offsetOf)) {
+    const offset = offsetOf(round[0])
+    const previousTotal = totalToolCalls
+    totalToolCalls += Math.min(round.length, Math.max(0, MAX_TOOL_CALLS - totalToolCalls))
+    const budgetNotice = buildToolCallBudgetNotice(previousTotal, totalToolCalls)
 
     const ids = round.map((tc) => uniqueToolCallId(tc.id, usedIds))
     messages.push({
@@ -251,9 +286,10 @@ export function buildPastReplyMessages(
       ...reasoning()
     })
     round.forEach((tc, k) => {
+      const result = formatToolResultForModel(tc.name, tc.result === undefined ? UNFINISHED_TOOL_RESULT : tc.result)
       messages.push({
         role: 'tool',
-        content: formatToolResultForModel(tc.name, tc.result === undefined ? UNFINISHED_TOOL_RESULT : tc.result),
+        content: budgetNotice && k === round.length - 1 ? withBudgetNotice(result, budgetNotice) : result,
         tool_call_id: ids[k]
       })
     })
@@ -823,7 +859,7 @@ export class LlmService {
           const toolMessage: LLMMessage = {
             role: 'tool',
             content: isLastInRound && budgetNotice
-              ? `${resultContent}\n\n${budgetNotice}`
+              ? withBudgetNotice(resultContent, budgetNotice)
               : resultContent,
             tool_call_id: tc.id
           }
