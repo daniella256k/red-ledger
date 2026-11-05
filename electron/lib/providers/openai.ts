@@ -153,29 +153,121 @@ function computeBackoffMs(attempt: number): number {
   return Math.min(exponential, MAX_RETRY_DELAY_MS)
 }
 
-/** Optional request fields some OpenAI-compatible servers reject with a 400. */
-const OPTIONAL_BODY_FIELDS = [
-  'reasoning_effort',
-  'reasoning',
-  'stream_options',
+/**
+ * Optional request fields some servers or models reject with a 400, in the
+ * groups they are left out in. A rejected request is retried without one
+ * group at a time: first a group the error message names, otherwise in this
+ * order, so the prompt caching hints (which save the most) go last. One
+ * rejected setting never takes the others with it: a model that can't switch
+ * reasoning off (Claude Sonnet 5.5) still gets its caching hints.
+ */
+interface OptionalFieldGroup {
+  name: 'reasoning' | 'usage' | 'cache'
+  fields: string[]
+  /** Words in an error message that point at this group. */
+  hints: RegExp
+  /**
+   * What was rejected, for remembering it: the reasoning setting by value
+   * (a model may reject "off" but take "on"), the others by which fields
+   * were sent (the cache key changes with every chat).
+   */
+  byValue: boolean
+}
+
+const OPTIONAL_FIELD_GROUPS: OptionalFieldGroup[] = [
+  { name: 'reasoning', fields: ['reasoning_effort', 'reasoning'], hints: /reasoning|thinking|effort/i, byValue: true },
+  { name: 'usage', fields: ['stream_options'], hints: /stream_options|include_usage/i, byValue: false },
   // Prompt caching hints (see buildCacheControls).
-  'prompt_cache_key',
-  'session_id',
-  'cache_control'
+  { name: 'cache', fields: ['prompt_cache_key', 'session_id', 'cache_control'], hints: /cache|session_id/i, byValue: false }
 ]
 
-function removeOptionalControls(body: Record<string, unknown>): Record<string, unknown> | null {
-  let changed = false
-  const nextBody: Record<string, unknown> = { ...body }
+function hasGroup(body: Record<string, unknown>, group: OptionalFieldGroup): boolean {
+  return group.fields.some((field) => field in body)
+}
 
-  for (const field of OPTIONAL_BODY_FIELDS) {
-    if (field in nextBody) {
-      delete nextBody[field]
-      changed = true
+function groupSignature(body: Record<string, unknown>, group: OptionalFieldGroup): string {
+  const sent = group.fields.filter((field) => field in body)
+  return `${group.name}:${JSON.stringify(group.byValue ? sent.map((field) => [field, body[field]]) : sent)}`
+}
+
+function withoutGroup(body: Record<string, unknown>, group: OptionalFieldGroup): Record<string, unknown> {
+  const next = { ...body }
+  for (const field of group.fields) delete next[field]
+  return next
+}
+
+/** The next group to leave out after a 400: one the message names first, then in order. */
+function nextGroupToDrop(body: Record<string, unknown>, errorMessage: string | null): OptionalFieldGroup | null {
+  const present = OPTIONAL_FIELD_GROUPS.filter((group) => hasGroup(body, group))
+  return present.find((group) => errorMessage !== null && group.hints.test(errorMessage)) ?? present[0] ?? null
+}
+
+/**
+ * What each server and model rejected this session (by groupSignature), so
+ * later requests leave it out at once instead of failing first every round.
+ */
+const rejectedFields = new Map<string, Set<string>>()
+/** Models already told the user they can't switch reasoning off. */
+const reasoningOffNoticeShown = new Set<string>()
+const MAX_REMEMBERED_MODELS = 200
+
+function rememberRejection(key: string, signature: string): void {
+  if (!rejectedFields.has(key) && rejectedFields.size >= MAX_REMEMBERED_MODELS) rejectedFields.clear()
+  const signatures = rejectedFields.get(key) ?? new Set<string>()
+  signatures.add(signature)
+  rejectedFields.set(key, signatures)
+}
+
+/** The body without what this server and model are known to reject, and which groups that left out. */
+function withoutKnownRejections(key: string, body: Record<string, unknown>): { body: Record<string, unknown>; dropped: OptionalFieldGroup[] } {
+  const known = rejectedFields.get(key)
+  if (!known) return { body, dropped: [] }
+  let next = body
+  const dropped: OptionalFieldGroup[] = []
+  for (const group of OPTIONAL_FIELD_GROUPS) {
+    if (hasGroup(next, group) && known.has(groupSignature(next, group))) {
+      next = withoutGroup(next, group)
+      dropped.push(group)
     }
   }
+  return { body: next, dropped }
+}
 
-  return changed ? nextBody : null
+/** Forgets what servers rejected; for tests. */
+export function forgetRejectedFields(): void {
+  rejectedFields.clear()
+  reasoningOffNoticeShown.clear()
+}
+
+/** The message in an error response's body (read once; the body is a stream). */
+const errorMessages = new WeakMap<object, Promise<string | null>>()
+
+function apiErrorMessage(err: unknown): Promise<string | null> {
+  if (!axios.isAxiosError(err) || !err.response?.data) return Promise.resolve(null)
+  const cached = errorMessages.get(err)
+  if (cached) return cached
+  const data = err.response.data as unknown
+  const read = (async () => {
+    try {
+      let text: string
+      if (typeof data === 'string') text = data
+      else if (data && typeof (data as AsyncIterable<unknown>)[Symbol.asyncIterator] === 'function') {
+        const chunks: Buffer[] = []
+        for await (const chunk of data as AsyncIterable<Buffer | string>) chunks.push(Buffer.from(chunk))
+        text = Buffer.concat(chunks).toString('utf-8')
+      } else text = JSON.stringify(data)
+      try {
+        const parsed = JSON.parse(text) as { error?: { message?: unknown } }
+        return typeof parsed?.error?.message === 'string' ? parsed.error.message : text
+      } catch {
+        return text
+      }
+    } catch {
+      return null
+    }
+  })()
+  errorMessages.set(err, read)
+  return read
 }
 
 async function sleep(ms: number, signal: AbortSignal): Promise<void> {
@@ -325,22 +417,9 @@ export class OpenAIProvider extends BaseLLMProvider {
 
     const throwAxiosError = async (err: unknown): Promise<never> => {
       if (axios.isAxiosError(err)) {
-        // Try to extract API error message from the response body
-        if (err.response?.data) {
-          try {
-            const chunks: Buffer[] = []
-            for await (const chunk of err.response.data) {
-              chunks.push(Buffer.from(chunk))
-            }
-            const errorBody = JSON.parse(Buffer.concat(chunks).toString('utf-8'))
-            const apiMessage = errorBody?.error?.message || JSON.stringify(errorBody)
-            throw new Error(`API error (${err.response.status}): ${apiMessage}`)
-          } catch (parseErr) {
-            if (parseErr instanceof Error && parseErr.message.startsWith('API error')) {
-              throw parseErr
-            }
-          }
-        }
+        // The API's own message from the response body, when it sent one.
+        const apiMessage = await apiErrorMessage(err)
+        if (apiMessage && err.response) throw new Error(`API error (${err.response.status}): ${apiMessage}`)
         throw new Error(`API error: ${err.message}`)
       }
       throw err
@@ -379,23 +458,39 @@ export class OpenAIProvider extends BaseLLMProvider {
       throw new Error('API request failed without a response')
     }
 
+    // Leave out what this server and model already rejected this session; on
+    // a 400, leave out one more optional group and try again (see
+    // OPTIONAL_FIELD_GROUPS). The group whose removal got the request
+    // through is remembered.
+    const rejectionKey = `${this.baseUrl}|${model}`
+    const known = withoutKnownRejections(rejectionKey, body)
+    let requestBody = known.body
+    const dropped = [...known.dropped]
     let response: AxiosResponse | null = null
+    let lastDropped: string | null = null
 
-    try {
-      response = await requestStream(body)
-    } catch (err) {
-      const status = axios.isAxiosError(err) ? err.response?.status : undefined
-      const fallbackBody = status === 400 ? removeOptionalControls(body) : null
-
-      if (fallbackBody) {
-        try {
-          response = await requestStream(fallbackBody)
-        } catch (retryErr) {
-          await throwAxiosError(retryErr)
-        }
-      } else {
-        await throwAxiosError(err)
+    while (!response) {
+      try {
+        response = await requestStream(requestBody)
+        if (lastDropped) rememberRejection(rejectionKey, lastDropped)
+      } catch (err) {
+        const status = axios.isAxiosError(err) ? err.response?.status : undefined
+        const group = status === 400 && !controller.signal.aborted
+          ? nextGroupToDrop(requestBody, await apiErrorMessage(err))
+          : null
+        // Nothing optional left to leave out: the 400 is about something else.
+        if (!group) return throwAxiosError(err)
+        lastDropped = groupSignature(requestBody, group)
+        requestBody = withoutGroup(requestBody, group)
+        dropped.push(group)
       }
+    }
+
+    // Asked for no reasoning, but the model can't switch it off: say so once.
+    if (reasoningEnabled === false && dropped.some((group) => group.name === 'reasoning')
+      && !reasoningOffNoticeShown.has(rejectionKey)) {
+      reasoningOffNoticeShown.add(rejectionKey)
+      onChunk({ type: 'notice', content: `${model} can't switch reasoning off, so it reasons anyway.` })
     }
 
     if (!response) {

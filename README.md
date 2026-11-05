@@ -73,6 +73,7 @@ Unpackaged runs (`npm run dev`, `npm run preview`) use their own profile folder,
 - LM Studio uses its OpenAI-compatible endpoints (`/v1`), which support tools.
 - Custom (OpenAI-compatible) takes any base URL up to the `/v1` path (default `http://localhost:8080/v1`, llama.cpp's server). The API key is optional and only sent when set.
 - A reply cut off by the Max Tokens limit shows a warning instead of passing as a complete answer.
+- Optional request settings (reasoning on or off, usage reporting, prompt caching hints) are left out one at a time if a server or model rejects them, and the app remembers what each model rejected until it quits. A model that can't switch reasoning off (Claude Sonnet 5.5, Opus 5.5) says so once and keeps prompt caching.
 - Prompt caching: a reply that calls tools resends the whole chat with every request, and providers can serve the part they have seen from a cache (cheaper and faster). Through OpenRouter every chat request carries the chat's id as `session_id`, so it keeps reaching the same provider's cache, and Anthropic models are asked to cache (`cache_control`, kept 5 minutes). OpenAI gets the chat's id as `prompt_cache_key`. OpenAI, DeepSeek, Grok, Moonshot and Gemini 2.5+ cache on their own. Requests start with the same tools and history every time so the cached part keeps matching. When the provider reports it, the context meter's tooltip and the chat info popover show how much of the last reply's input came from the cache.
 
 ## Context Meter

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Readable } from 'stream'
 import axios from 'axios'
-import { OpenAIProvider, ReasoningCollector } from '../openai'
+import { OpenAIProvider, ReasoningCollector, forgetRejectedFields } from '../openai'
 import { OpenRouterProvider } from '../openrouter'
 import type { ProviderChunk, ProviderSendOptions } from '../base'
 
@@ -33,6 +33,8 @@ const STOP = { choices: [{ delta: { content: 'Hi' }, finish_reason: 'stop' }] }
 
 afterEach(() => {
   vi.restoreAllMocks()
+  // What servers rejected is remembered per model for the session.
+  forgetRejectedFields()
 })
 
 describe('OpenAI-compatible request body', () => {
@@ -219,6 +221,85 @@ describe('prompt caching', () => {
     expect(retryBody).not.toHaveProperty('cache_control')
     expect(retryBody).not.toHaveProperty('session_id')
     expect(chunks).toContainEqual({ type: 'text', content: 'Hi' })
+  })
+
+  describe('a server rejecting optional fields', () => {
+    const badRequest = (message: string) => Object.assign(new axios.AxiosError('Request failed with status code 400'), {
+      response: { status: 400, data: Readable.from([JSON.stringify({ error: { message } })]) }
+    })
+
+    function send(provider: OpenAIProvider, options: Partial<ProviderSendOptions> = {}) {
+      const chunks: ProviderChunk[] = []
+      return new Promise<ProviderChunk[]>((resolve) => {
+        provider.sendStreaming({
+          messages: [{ role: 'user', content: 'hi' }],
+          model: 'anthropic/claude-sonnet-5.5',
+          tools: [],
+          cacheKey: 'chat-1',
+          ...options,
+          onChunk: (chunk) => {
+            chunks.push(chunk)
+            if (chunk.type === 'done' || chunk.type === 'error') resolve(chunks)
+          }
+        })
+      })
+    }
+
+    it('keeps caching when a model rejects reasoning off, says so once, and stops asking', async () => {
+      // Claude Sonnet 5.5 can't switch thinking off.
+      const post = vi.spyOn(axios, 'post')
+        .mockRejectedValueOnce(badRequest('thinking.type "disabled" is not supported for this model'))
+        .mockResolvedValue(sse(STOP))
+
+      const first = await send(new OpenRouterProvider('key'), { reasoningEnabled: false })
+
+      expect(post.mock.calls[0][1]).toHaveProperty('reasoning', { enabled: false })
+      const retried = post.mock.calls[1][1] as Record<string, unknown>
+      expect(retried).not.toHaveProperty('reasoning')
+      expect(retried.cache_control).toEqual({ type: 'ephemeral' })
+      expect(retried.session_id).toBe('chat-1')
+      expect(retried).toHaveProperty('stream_options')
+      expect(first).toContainEqual({ type: 'notice', content: "anthropic/claude-sonnet-5.5 can't switch reasoning off, so it reasons anyway." })
+      expect(first).toContainEqual({ type: 'text', content: 'Hi' })
+
+      // The next round (a new provider, as each request makes) doesn't fail first, and isn't told again.
+      const second = await send(new OpenRouterProvider('key'), { reasoningEnabled: false, cacheKey: 'chat-2' })
+      expect(post).toHaveBeenCalledTimes(3)
+      const next = post.mock.calls[2][1] as Record<string, unknown>
+      expect(next).not.toHaveProperty('reasoning')
+      expect(next.session_id).toBe('chat-2')
+      expect(second.some((chunk) => chunk.type === 'notice')).toBe(false)
+
+      // Reasoning on is a different value, still sent.
+      await send(new OpenRouterProvider('key'), { reasoningEnabled: true })
+      expect(post.mock.calls[3][1]).toHaveProperty('reasoning', { enabled: true })
+    })
+
+    it('leaves groups out one at a time, caching hints last, when the message names none', async () => {
+      const post = vi.spyOn(axios, 'post')
+        .mockRejectedValueOnce(badRequest('Invalid request'))
+        .mockRejectedValueOnce(badRequest('Invalid request'))
+        .mockResolvedValue(sse(STOP))
+
+      await send(new OpenRouterProvider('key'), { reasoningEnabled: true })
+
+      const bodies = post.mock.calls.map((call) => call[1] as Record<string, unknown>)
+      expect(bodies.map((body) => ['reasoning', 'stream_options', 'cache_control'].filter((field) => field in body))).toEqual([
+        ['reasoning', 'stream_options', 'cache_control'],
+        ['stream_options', 'cache_control'],
+        ['cache_control']
+      ])
+    })
+
+    it('reports the real error once nothing optional is left to leave out', async () => {
+      const post = vi.spyOn(axios, 'post').mockImplementation(async () => { throw badRequest('messages: too long') })
+
+      const chunks = await send(new OpenAIProvider('', 'http://localhost:8080/v1'))
+
+      // Only stream_options is optional here: one retry, then the server's own message.
+      expect(post).toHaveBeenCalledTimes(2)
+      expect(chunks[chunks.length - 1]).toEqual({ type: 'error', error: 'API error (400): messages: too long' })
+    })
   })
 
   it('reads cache reads and writes from the usage report', async () => {
