@@ -18,7 +18,7 @@ function parseEcho(value: unknown): ReasoningEcho | null {
     if (key === 'reasoning_details') {
       if (!Array.isArray(field)) return null
       echo.reasoning_details = field
-    } else if (key === 'reasoning_content' || key === 'reasoning') {
+    } else if (key === 'reasoning_content' || key === 'reasoning' || key === 'thinking') {
       if (typeof field !== 'string') return null
       echo[key] = field
     } else {

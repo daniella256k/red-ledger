@@ -83,7 +83,27 @@ export interface ProviderSendOptions {
    * marks requests worth caching at all (a title request has none).
    */
   cacheKey?: string
+  /**
+   * The context window set for this model (local servers). Unset leaves the
+   * server's own setting in place.
+   */
+  contextWindow?: number
   onChunk: (chunk: ProviderChunk) => void
+}
+
+/**
+ * What a model can do, as its server reports it. Undefined means the server
+ * didn't say (older servers, or providers that don't report it).
+ */
+export interface ModelCapabilities {
+  tools?: boolean
+  vision?: boolean
+}
+
+/** A model's context window (null when unknown) and capabilities, from one lookup. */
+export interface ModelInfo {
+  contextLength: number | null
+  capabilities: ModelCapabilities
 }
 
 export interface AbortHandle {
@@ -93,6 +113,10 @@ export interface AbortHandle {
 /** Shown when a reply stops because it hit the output token limit. */
 export const TRUNCATED_REPLY_NOTICE =
   'The reply was cut off because it reached the max tokens limit. Raise or turn off Max Tokens in Settings for longer replies.'
+
+/** Shown when a local server stopped a reply because the model's context window was full. */
+export const CONTEXT_FULL_NOTICE =
+  "The reply was cut off because the model's context window is full. Set a bigger context window for this model in Settings, or compact the chat."
 
 function countOrUndefined(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined
@@ -190,5 +214,13 @@ export abstract class BaseLLMProvider {
    */
   async getContextLength(_model: string): Promise<number | null> {
     return null
+  }
+
+  /**
+   * The context window plus what the model can do. Failures resolve to
+   * unknowns: the request then goes out as it would without the lookup.
+   */
+  async getModelInfo(model: string): Promise<ModelInfo> {
+    return { contextLength: await this.getContextLength(model).catch(() => null), capabilities: {} }
   }
 }

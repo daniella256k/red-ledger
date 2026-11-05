@@ -447,6 +447,29 @@ describe('TurnService auto-compaction', () => {
     expect(unknown.conversations.listMessages(unknown.chat.id).map((m) => m.role)).toEqual(['user', 'assistant'])
   })
 
+  it('does not compact again right after a compaction, since that frees nothing, and says why', async () => {
+    // Seen live: tool definitions filled most of a 4096 window, so every turn compacted.
+    const { conversations, events, turns, chat } = fullChat({ promptTokens: 9_500, contextLength: 10_000 })
+    conversations.createMessage({ conversationId: chat.id, role: 'user', content: 'Earlier' })
+    conversations.createMessage({ conversationId: chat.id, role: 'assistant', content: 'Earlier answer.' })
+    conversations.createMessage({ conversationId: chat.id, role: 'system', content: 'Summary so far.' })
+
+    turns.start({ conversationId: chat.id, kind: 'send', content: 'Next' })
+    await settle(turns, chat.id)
+    expect(conversations.listMessages(chat.id).map((m) => m.role)).toEqual(['user', 'assistant', 'system', 'user', 'assistant'])
+    expect(events.flatMap((e) => (e.type === 'started' ? [e.turn.kind] : []))).toEqual(['reply'])
+    expect(events).toContainEqual(expect.objectContaining({
+      type: 'notice',
+      level: 'warning',
+      message: expect.stringContaining("96% of the model's context window right after compacting, so it wasn't compacted again")
+    }))
+
+    // A second exchange since the summary gives it something to summarize.
+    turns.start({ conversationId: chat.id, kind: 'send', content: 'And more' })
+    await settle(turns, chat.id)
+    expect(conversations.listMessages(chat.id).at(-1)).toMatchObject({ role: 'system', content: 'Summary of the long chat.' })
+  })
+
   it('does not compact after a reply that was stopped', async () => {
     const { conversations, llm, turns, chat } = fullChat({ promptTokens: 9_900, contextLength: 10_000 })
     // A stopped reply gets no usage report from LlmService.

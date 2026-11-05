@@ -4,6 +4,7 @@ import type {
   LLMMessageContent,
   LLMImageUrlContentPart,
   LLMTextContentPart,
+  ModelInfo,
   ProviderChunk,
   ReasoningEcho,
   ToolDefinition
@@ -36,6 +37,9 @@ import '../lib/providers/openrouter'
 import '../lib/providers/ollama'
 import '../lib/providers/lmstudio'
 import '../lib/providers/custom'
+
+/** Servers on this computer, whose models report what they can do and load with a window the user can set. */
+const LOCAL_PROVIDERS = new Set<ProviderName>(['ollama', 'lmstudio'])
 
 /** Hard ceiling on tool calls the assistant may run in a single turn. */
 export const MAX_TOOL_CALLS = 75
@@ -547,8 +551,8 @@ export class LlmService {
    * In-flight turns by channel (see ActiveStream).
    */
   private activeStreams = new Map<string, ActiveStream>()
-  /** Context windows by provider + base URL + model, so each turn doesn't refetch model listings. */
-  private contextLengthCache = new Map<string, { value: number | null; expiresAt: number }>()
+  /** Context windows and capabilities by provider + base URL + model, so each turn doesn't refetch model listings. */
+  private contextLengthCache = new Map<string, { value: ModelInfo; expiresAt: number }>()
 
   constructor(deps: {
     getSettings: () => Settings
@@ -565,8 +569,38 @@ export class LlmService {
     this.timeZone = deps.timeZone ?? Intl.DateTimeFormat().resolvedOptions().timeZone
   }
 
-  private supportsVisionParts(provider: ProviderName): boolean {
-    return provider === 'openai' || provider === 'openrouter' || provider === 'custom'
+  /**
+   * Whether images go to the model as images. Cloud and custom servers take
+   * them; a local model only when its server says it has vision.
+   */
+  private acceptsImages(provider: ProviderName, info: ModelInfo): boolean {
+    return LOCAL_PROVIDERS.has(provider) ? info.capabilities.vision === true : true
+  }
+
+  /** The context window set for a local model, or undefined (left to its server). */
+  private contextWindowSetting(settings: Settings, provider: ProviderName, model: string): number | undefined {
+    if (!LOCAL_PROVIDERS.has(provider)) return undefined
+    return settings.providers?.[provider]?.modelOptions?.[model]?.contextWindow
+  }
+
+  /**
+   * The window requests are fitted to. Ollama loads the model with the set
+   * window (num_ctx on every request). LM Studio loads with it only when the
+   * model isn't loaded yet, so a loaded copy's own window wins.
+   */
+  private effectiveContextLength(provider: ProviderName, info: ModelInfo, windowSetting: number | undefined): number | null {
+    if (provider === 'ollama' && windowSetting) return windowSetting
+    return info.contextLength ?? windowSetting ?? null
+  }
+
+  /**
+   * The tools this model gets. The per-model switch: Off sends none, On all,
+   * and Auto (the default) all unless the server says the model can't use them.
+   */
+  private toolsFor(settings: Settings, provider: ProviderName, model: string, info: ModelInfo): ToolDefinition[] {
+    const mode = settings.providers?.[provider]?.modelOptions?.[model]?.tools ?? 'auto'
+    if (mode === 'off' || (mode === 'auto' && info.capabilities.tools === false)) return []
+    return this.availableTools(settings)
   }
 
   private isImageAttachment(attachment: Attachment): attachment is ImageAttachment {
@@ -683,7 +717,7 @@ export class LlmService {
   private buildUserMessageContent(
     content: string,
     attachments: Attachment[] | undefined,
-    provider: ProviderName,
+    acceptsImages: boolean,
     sentAt: string | null
   ): LLMMessageContent {
     const parts: Array<LLMTextContentPart | LLMImageUrlContentPart> = []
@@ -699,8 +733,8 @@ export class LlmService {
       const url = this.imageDataUrl(image)
       if (!url) {
         text.push(`${label} [removed by the user to free space]`)
-      } else if (!this.supportsVisionParts(provider)) {
-        text.push(`${label} [not shown: this provider doesn't accept images]`)
+      } else if (!acceptsImages) {
+        text.push(`${label} [not shown: this model didn't report image support]`)
       } else {
         text.push(label)
         flushText()
@@ -730,9 +764,7 @@ export class LlmService {
   ): Promise<void> {
     const provider = this.createProvider(request.provider)
     const settings = this.getSettings()
-    const messages = this.buildHistory(request, settings)
-    const tools = this.availableTools(settings)
-    const availableToolNames = new Set(tools.map((tool) => tool.function.name))
+    const windowSetting = this.contextWindowSetting(settings, request.provider, request.model)
     let totalToolCalls = 0
     let roundsAfterToolLimit = 0
     // Prompt cache use over the turn's requests, when the provider reports it.
@@ -753,12 +785,17 @@ export class LlmService {
 
     try {
       // Known before the first request so a long chat is shortened even on its
-      // first turn after launch; cached, and capped at a few seconds when not.
-      const contextLength = await this.lookupContextLength(request.provider, request.model)
+      // first turn after launch, and so the model only gets tools and images
+      // it can use; cached, and capped at a few seconds when not.
+      const info = await this.lookupModelInfo(request.provider, request.model)
       if (stream.cancelled) {
         sink.send({ type: 'done' })
         return
       }
+      let contextLength = this.effectiveContextLength(request.provider, info, windowSetting)
+      const messages = this.buildHistory(request, settings, this.acceptsImages(request.provider, info))
+      const tools = this.toolsFor(settings, request.provider, request.model, info)
+      const availableToolNames = new Set(tools.map((tool) => tool.function.name))
 
       for (let round = 1; ; round++) {
         // Every round: one turn's own tool results can outgrow the window.
@@ -785,6 +822,7 @@ export class LlmService {
             reasoningEnabled: settings.reasoningEnabled,
             // Every round resends the chat so far; the provider can serve that prefix from its cache.
             cacheKey: request.conversationId,
+            ...(windowSetting ? { contextWindow: windowSetting } : {}),
             onChunk: (chunk: ProviderChunk) => {
               switch (chunk.type) {
                 case 'thinking':
@@ -834,6 +872,17 @@ export class LlmService {
         stream.handle = null
         const roundUsage = reportedUsage as ContextUsage | null
         if (roundUsage) cache = addCacheUsage(cache, roundUsage)
+
+        // A local model that wasn't loaded before the first request is now, so
+        // its server can say what window it was loaded with.
+        if (round === 1 && contextLength === null && streamDone !== 'error' && !stream.cancelled
+          && LOCAL_PROVIDERS.has(request.provider)) {
+          contextLength = this.effectiveContextLength(
+            request.provider,
+            await this.lookupModelInfo(request.provider, request.model),
+            windowSetting
+          )
+        }
 
         // Saved before any tool runs, so a reply stopped mid-round keeps it. A
         // round that ended without tool calls wrote the closing text.
@@ -964,7 +1013,7 @@ export class LlmService {
    * for everything before it: it joins the system prompt, and earlier
    * messages are left out.
    */
-  private buildHistory(request: LLMRequest, settings: Settings): LLMMessage[] {
+  private buildHistory(request: LLMRequest, settings: Settings, acceptsImages: boolean): LLMMessage[] {
     const summaryIndex = request.messages.map((msg) => msg.role).lastIndexOf('system')
     const summary = summaryIndex >= 0 ? request.messages[summaryIndex].content : null
 
@@ -983,7 +1032,7 @@ export class LlmService {
     for (const msg of request.messages.slice(summaryIndex + 1)) {
       if (msg.role === 'user') {
         const sentAt = formatMessageTime(msg.timestamp, this.timeZone)
-        messages.push({ role: msg.role, content: this.buildUserMessageContent(msg.content, msg.attachments, request.provider, sentAt) })
+        messages.push({ role: msg.role, content: this.buildUserMessageContent(msg.content, msg.attachments, acceptsImages, sentAt) })
         continue
       }
 
@@ -1031,10 +1080,13 @@ export class LlmService {
     const stream = newActiveStream(request.conversationId)
     this.activeStreams.set(channel, stream)
     try {
-      const contextLength = await this.lookupContextLength(request.provider, request.model)
+      const info = await this.lookupModelInfo(request.provider, request.model)
       if (stream.cancelled) return null
+      const windowSetting = this.contextWindowSetting(settings, request.provider, request.model)
+      const contextLength = this.effectiveContextLength(request.provider, info, windowSetting)
+      const acceptsImages = this.acceptsImages(request.provider, info)
 
-      const messages = this.buildHistory(request, settings)
+      const messages = this.buildHistory(request, settings, acceptsImages)
       const instruction: LLMMessage = { role: 'user', content: compactionPrompt() }
 
       // The chat may already be past the window: shorten old tool results, then
@@ -1057,6 +1109,7 @@ export class LlmService {
           reasoningEnabled: settings.reasoningEnabled,
           // The same history the chat's replies sent, so it can be read from the cache.
           cacheKey: request.conversationId,
+          ...(windowSetting ? { contextWindow: windowSetting } : {}),
           onChunk: (chunk: ProviderChunk) => {
             if (chunk.type === 'text') text += chunk.content || ''
             else if (chunk.type === 'error') resolve({ error: chunk.error || 'The summary request failed.' })
@@ -1070,8 +1123,8 @@ export class LlmService {
       const summary = text.trim()
       if (!summary) throw new Error('The model returned an empty summary, so nothing was compacted.')
 
-      const tools = this.availableTools(settings)
-      const after = this.buildHistory({ ...request, messages: [{ role: 'system', content: summary, timestamp: '' }] }, settings)
+      const tools = this.toolsFor(settings, request.provider, request.model, info)
+      const after = this.buildHistory({ ...request, messages: [{ role: 'system', content: summary, timestamp: '' }] }, settings, acceptsImages)
       return { summary, usage: { ...estimateUsage(after, tools, ''), contextLength } }
     } finally {
       if (this.activeStreams.get(channel) === stream) this.activeStreams.delete(channel)
@@ -1092,26 +1145,32 @@ export class LlmService {
   }
 
   /**
-   * The model's context window, for fitting requests and the meter; null when
-   * unknown, slow or failing. An expired value is still used while a fresh
-   * lookup runs in the background, so a chat left idle doesn't wait on it.
+   * The model's context window (for fitting requests and the meter) and
+   * capabilities; unknowns when slow or failing. An expired value is still
+   * used while a fresh lookup runs in the background, so a chat left idle
+   * doesn't wait on it. Local servers are asked every time: the lookup stays
+   * on this computer, and their models are loaded and unloaded (with a new
+   * window) at any time.
    */
-  private lookupContextLength(providerName: ProviderName, model: string): Promise<number | null> {
+  private lookupModelInfo(providerName: ProviderName, model: string): Promise<ModelInfo> {
     const key = this.contextLengthKey(providerName, model)
     const cached = this.contextLengthCache.get(key)
     if (cached && cached.expiresAt > Date.now()) return Promise.resolve(cached.value)
 
+    const unknown: ModelInfo = { contextLength: null, capabilities: {} }
     let timer: ReturnType<typeof setTimeout> | undefined
-    const timeout = new Promise<null>((resolve) => {
-      timer = setTimeout(() => resolve(null), CONTEXT_LENGTH_TIMEOUT_MS)
+    const timeout = new Promise<ModelInfo>((resolve) => {
+      timer = setTimeout(() => resolve(cached?.value ?? unknown), CONTEXT_LENGTH_TIMEOUT_MS)
     })
     const lookup = Promise.resolve()
-      .then(() => this.createProvider(providerName).getContextLength(model))
+      .then(() => this.createProvider(providerName).getModelInfo(model))
       .then((value) => {
-        this.contextLengthCache.set(key, { value, expiresAt: Date.now() + CONTEXT_LENGTH_CACHE_MS })
+        if (!LOCAL_PROVIDERS.has(providerName)) {
+          this.contextLengthCache.set(key, { value, expiresAt: Date.now() + CONTEXT_LENGTH_CACHE_MS })
+        }
         return value
       })
-      .catch(() => null)
+      .catch(() => cached?.value ?? unknown)
 
     if (cached) {
       clearTimeout(timer)

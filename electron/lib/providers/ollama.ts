@@ -2,12 +2,16 @@ import axios, { type AxiosResponse } from 'axios'
 import { randomUUID } from 'crypto'
 import {
   BaseLLMProvider,
+  CONTEXT_FULL_NOTICE,
   TRUNCATED_REPLY_NOTICE,
   readContextLength,
   reportedUsageChunk,
   type ProviderSendOptions,
   type AbortHandle,
-  type LLMMessageContent
+  type LLMMessage,
+  type LLMMessageContent,
+  type ModelCapabilities,
+  type ModelInfo
 } from './base'
 import { registerProvider } from './registry'
 
@@ -28,12 +32,18 @@ function extractThinking(value: unknown): string {
   return ''
 }
 
-function toPlainTextContent(content: LLMMessageContent | null): string {
-  if (typeof content === 'string') return content
-  if (!content) return ''
+/**
+ * A message's content as Ollama takes it: the text, and the images as base64
+ * in a separate list (their "Image N: name" labels stay in the text). LlmService
+ * only sends images to models that report vision.
+ */
+function toOllamaContent(content: LLMMessageContent | null): { content: string; images?: string[] } {
+  if (typeof content === 'string') return { content }
+  if (!content) return { content: '' }
 
   const textParts: string[] = []
-  let imageCount = 0
+  const images: string[] = []
+  let unreadable = 0
 
   for (const part of content) {
     if (part.type === 'text') {
@@ -42,14 +52,73 @@ function toPlainTextContent(content: LLMMessageContent | null): string {
       }
       continue
     }
-    imageCount++
+    const match = /^data:[^;,]+;base64,(.+)$/s.exec(part.image_url.url)
+    if (match) images.push(match[1])
+    else unreadable++
   }
 
-  if (imageCount > 0) {
-    textParts.push(`[${imageCount} image attachment${imageCount === 1 ? '' : 's'} omitted for this provider]`)
+  if (unreadable > 0) {
+    textParts.push(`[${unreadable} image attachment${unreadable === 1 ? '' : 's'} omitted for this provider]`)
   }
 
-  return textParts.join('\n\n')
+  return { content: textParts.join('\n\n'), ...(images.length > 0 ? { images } : {}) }
+}
+
+function toPlainTextContent(content: LLMMessageContent | null): string {
+  return toOllamaContent(content).content
+}
+
+/**
+ * The chat in Ollama's message format. Ollama matches tool results to calls
+ * by tool name rather than id, so each result names its tool, and each
+ * assistant message carries back its `thinking` (see the ReasoningEcho
+ * collected below), as Ollama's tool calling docs ask.
+ */
+export function toOllamaMessages(messages: LLMMessage[]): Array<Record<string, unknown>> {
+  const toolNames = new Map<string, string>()
+  return messages.map((m) => {
+    if (m.role === 'tool') {
+      const toolName = m.tool_call_id ? toolNames.get(m.tool_call_id) : undefined
+      return { role: 'tool', content: toPlainTextContent(m.content), ...(toolName ? { tool_name: toolName } : {}) }
+    }
+    if (m.role === 'assistant') {
+      for (const tc of m.tool_calls ?? []) toolNames.set(tc.id, tc.function.name)
+      return {
+        role: m.role,
+        content: toPlainTextContent(m.content),
+        ...(m.thinking ? { thinking: m.thinking } : {}),
+        // Ollama takes tool call arguments as an object, not a JSON string.
+        ...(m.tool_calls && m.tool_calls.length > 0
+          ? {
+            tool_calls: m.tool_calls.map((tc) => ({
+              function: { name: tc.function.name, arguments: parseToolArguments(tc.function.arguments) }
+            }))
+          }
+          : {})
+      }
+    }
+    return { role: m.role, ...toOllamaContent(m.content) }
+  })
+}
+
+/**
+ * Models this session found without tool support (by server and model), so
+ * later requests leave tools out at once and the notice shows once.
+ */
+const modelsWithoutTools = new Set<string>()
+const MAX_REMEMBERED_MODELS = 200
+
+/** Forgets which models rejected tools; for tests. */
+export function forgetModelsWithoutTools(): void {
+  modelsWithoutTools.clear()
+}
+
+/** The `num_ctx` line of a model's Modelfile parameters (what Ollama loads it with), if any. */
+function parseNumCtx(parameters: unknown): number | null {
+  if (typeof parameters !== 'string') return null
+  const match = /^\s*num_ctx\s+(\d+)\s*$/m.exec(parameters)
+  const value = match ? Number(match[1]) : NaN
+  return Number.isFinite(value) && value > 0 ? value : null
 }
 
 function parseToolArguments(json: string): Record<string, unknown> {
@@ -116,37 +185,20 @@ export class OllamaProvider extends BaseLLMProvider {
   }
 
   private async _stream(options: ProviderSendOptions, controller: AbortController): Promise<void> {
-    const { messages, model, tools, temperature, maxTokens, reasoningEnabled, onChunk } = options
-
-    // Convert messages to Ollama format
-    // Ollama uses the same role/content structure but uses 'tool' role differently
-    const ollamaMessages = messages.map((m) => {
-      if (m.role === 'tool') {
-        // Ollama wants tool responses as role: 'tool' with content
-        return { role: 'tool' as const, content: toPlainTextContent(m.content) }
-      }
-      if (m.role === 'assistant' && m.tool_calls && m.tool_calls.length > 0) {
-        // Ollama takes tool call arguments as an object, not a JSON string.
-        return {
-          role: m.role,
-          content: toPlainTextContent(m.content),
-          tool_calls: m.tool_calls.map((tc) => ({
-            function: { name: tc.function.name, arguments: parseToolArguments(tc.function.arguments) }
-          }))
-        }
-      }
-      return { role: m.role, content: toPlainTextContent(m.content) }
-    })
+    const { messages, model, tools, temperature, maxTokens, reasoningEnabled, contextWindow, onChunk } = options
+    const modelKey = `${this.baseUrl}|${model}`
 
     const body: Record<string, unknown> = {
       model,
-      messages: ollamaMessages,
+      messages: toOllamaMessages(messages),
       stream: true,
       options: {
         // Left out unless set, so the model's own default applies.
         ...(temperature !== undefined ? { temperature } : {}),
         // Ollama's name for the output token limit.
-        ...(maxTokens ? { num_predict: maxTokens } : {})
+        ...(maxTokens ? { num_predict: maxTokens } : {}),
+        // Unset leaves the window to the server (the Modelfile, or Ollama's default).
+        ...(contextWindow ? { num_ctx: contextWindow } : {})
       }
     }
 
@@ -154,8 +206,8 @@ export class OllamaProvider extends BaseLLMProvider {
       body.think = reasoningEnabled
     }
 
-    // Include tools if any are defined — newer Ollama versions support this
-    if (tools.length > 0) {
+    // Tools go out unless this model already turned them down this session.
+    if (tools.length > 0 && !modelsWithoutTools.has(modelKey)) {
       body.tools = tools
     }
 
@@ -178,7 +230,9 @@ export class OllamaProvider extends BaseLLMProvider {
         const reason = await readErrorBody(err)
         if (body.tools && /does not support tools/i.test(reason)) {
           delete body.tools
-          onChunk({ type: 'notice', content: `${model} doesn't support tools, so it replied without them.` })
+          if (modelsWithoutTools.size >= MAX_REMEMBERED_MODELS) modelsWithoutTools.clear()
+          modelsWithoutTools.add(modelKey)
+          onChunk({ type: 'notice', content: `${model} doesn't support tools, so it replies without them.` })
         } else if (Object.prototype.hasOwnProperty.call(body, 'think')) {
           delete body.think
         } else {
@@ -192,6 +246,11 @@ export class OllamaProvider extends BaseLLMProvider {
     // A character can be split across network chunks; the decoder holds its
     // first bytes until the rest arrive instead of writing a replacement character.
     const decoder = new TextDecoder('utf-8')
+    // The reply's thinking, sent back on its message (see toOllamaMessages).
+    let thinkingText = ''
+    const echoThinking = () => {
+      if (thinkingText) onChunk({ type: 'reasoning_echo', reasoning: { thinking: thinkingText } })
+    }
 
     for await (const chunk of stream) {
       if (controller.signal.aborted) break
@@ -211,6 +270,7 @@ export class OllamaProvider extends BaseLLMProvider {
 
           const thinking = extractThinking(data.message?.thinking)
           if (thinking) {
+            thinkingText += thinking
             onChunk({ type: 'thinking', content: thinking })
           }
 
@@ -239,9 +299,12 @@ export class OllamaProvider extends BaseLLMProvider {
           if (data.done === true) {
             const usageChunk = reportedUsageChunk(data.prompt_eval_count, data.eval_count)
             if (usageChunk) onChunk(usageChunk)
+            // Ollama says 'length' both for Max Tokens and for a full context window.
             if (data.done_reason === 'length') {
-              onChunk({ type: 'notice', content: TRUNCATED_REPLY_NOTICE })
+              const hitMaxTokens = !!maxTokens && typeof data.eval_count === 'number' && data.eval_count >= maxTokens
+              onChunk({ type: 'notice', content: hitMaxTokens ? TRUNCATED_REPLY_NOTICE : CONTEXT_FULL_NOTICE })
             }
+            echoThinking()
             onChunk({ type: 'done' })
             return
           }
@@ -251,7 +314,9 @@ export class OllamaProvider extends BaseLLMProvider {
       }
     }
 
-    // If we exited the loop without done=true, send done anyway.
+    // If we exited the loop without done=true, send done anyway; a stopped
+    // reply's unfinished thinking isn't kept for replay.
+    if (!controller.signal.aborted) echoThinking()
     onChunk({ type: 'done' })
   }
 
@@ -292,6 +357,26 @@ export class OllamaProvider extends BaseLLMProvider {
     } catch {
       return null
     }
+  }
+
+  /**
+   * Capabilities from /api/show (Ollama lists `tools`, `vision`, `thinking`
+   * and more). The window is the loaded one; before the model is loaded, the
+   * Modelfile's num_ctx when it sets one, otherwise unknown (Ollama's default
+   * applies, which no endpoint reports).
+   */
+  override async getModelInfo(model: string): Promise<ModelInfo> {
+    const [loaded, shown] = await Promise.all([
+      this.getContextLength(model),
+      axios.post(`${this.baseUrl}/api/show`, { model }, { timeout: 10_000 })
+        .then((response) => response.data as { capabilities?: unknown; parameters?: unknown } | undefined)
+        .catch(() => undefined)
+    ])
+    const listed = Array.isArray(shown?.capabilities) ? shown.capabilities : null
+    const capabilities: ModelCapabilities = listed
+      ? { tools: listed.includes('tools'), vision: listed.includes('vision') }
+      : {}
+    return { contextLength: loaded ?? parseNumCtx(shown?.parameters), capabilities }
   }
 }
 

@@ -5,6 +5,7 @@ import type {
   Settings,
   ProviderName,
   ProviderSettings,
+  ModelOptions,
   McpServerConfig
 } from '../../src/types'
 import {
@@ -15,6 +16,7 @@ import {
   sanitizeStringRecord
 } from '../../src/lib/mcpConfig'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, PROVIDER_NAMES, isProviderName } from '../../src/lib/providers'
+import { MAX_CONTEXT_WINDOW, MIN_CONTEXT_WINDOW } from '../../src/lib/modelOptions'
 
 const DEFAULT_SETTINGS: Settings = {
   activeProvider: DEFAULT_PROVIDER,
@@ -378,8 +380,30 @@ function sanitizeProviderSettings(value: unknown, defaults: ProviderSettings): P
     selectedModel: typeof raw.selectedModel === 'string'
       ? raw.selectedModel
       : defaults.selectedModel,
-    favoriteModels
+    favoriteModels,
+    ...sanitizeModelOptionsField(raw.modelOptions)
   }
+}
+
+/** One model's settings, keeping only valid fields; null when none are left (the defaults apply). */
+export function sanitizeModelOptions(value: unknown): ModelOptions | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const raw = value as Record<string, unknown>
+  const options: ModelOptions = {}
+  if (typeof raw.contextWindow === 'number' && Number.isInteger(raw.contextWindow)
+    && raw.contextWindow >= MIN_CONTEXT_WINDOW && raw.contextWindow <= MAX_CONTEXT_WINDOW) {
+    options.contextWindow = raw.contextWindow
+  }
+  if (raw.tools === 'on' || raw.tools === 'off') options.tools = raw.tools
+  return Object.keys(options).length > 0 ? options : null
+}
+
+function sanitizeModelOptionsField(value: unknown): Pick<ProviderSettings, 'modelOptions'> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  const entries = Object.entries(value as Record<string, unknown>)
+    .map(([model, options]) => [model.trim(), sanitizeModelOptions(options)] as const)
+    .filter((entry): entry is readonly [string, ModelOptions] => entry[0].length > 0 && entry[1] !== null)
+  return entries.length > 0 ? { modelOptions: Object.fromEntries(entries) } : {}
 }
 
 function sanitizeMcpServer(value: unknown, index: number): McpServerConfig | null {

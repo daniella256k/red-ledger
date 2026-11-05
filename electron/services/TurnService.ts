@@ -562,6 +562,20 @@ export class TurnService {
     if (this.closed || !usage || !this.deps.getSettings().autoCompact) return
     if (!shouldAutoCompact(usage)) return
     const usedShare = contextRatio(usage) ?? 1
+
+    // Right after a compaction, the chat is the summary plus this one
+    // exchange: summarizing that again frees almost nothing, because what
+    // fills the window is the fixed part (system prompt and tool definitions).
+    if (this.onlyExchangeSinceSummary(conversationId)) {
+      this.deps.emit({
+        type: 'notice',
+        conversationId,
+        level: 'warning',
+        message: `This chat used ${Math.round(usedShare * 100)}% of the model's context window right after compacting, so it wasn't compacted again. A bigger context window for this model, or Tools off, leaves more room.`
+      })
+      return
+    }
+
     try {
       this.compact(conversationId, { auto: { usedShare } })
     } catch (err) {
@@ -571,6 +585,17 @@ export class TurnService {
         level: 'warning',
         message: `This chat is nearly full, but it could not be compacted automatically: ${errorMessage(err)}`
       })
+    }
+  }
+
+  /** Whether the branch on screen is a compaction summary followed by just one prompt and its reply. */
+  private onlyExchangeSinceSummary(conversationId: string): boolean {
+    try {
+      const messages = this.deps.conversations.listMessages(conversationId)
+      const summaryIndex = messages.map((m) => m.role).lastIndexOf('system')
+      return summaryIndex >= 0 && messages.length - summaryIndex - 1 <= 2
+    } catch {
+      return false
     }
   }
 

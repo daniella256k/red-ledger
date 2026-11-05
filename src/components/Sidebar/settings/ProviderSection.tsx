@@ -1,7 +1,10 @@
+import { useState } from 'react'
 import { Star } from 'lucide-react'
-import type { ProviderName, ProviderSettings, Settings } from '@/types'
+import type { ModelOptions, ProviderName, ProviderSettings, Settings, ToolsMode } from '@/types'
+import { parseContextWindow, withModelOptions } from '@/lib/modelOptions'
 import {
   ApiKeyInput,
+  HelpIcon,
   INLINE_LABEL_CLASS,
   LABEL_CLASS,
   SMALL_BUTTON_CLASS,
@@ -18,6 +21,9 @@ import {
 import type { ProviderModelsState } from './useProviderModels'
 
 type ProviderSectionProps = SettingsSectionProps & ProviderModelsState
+
+/** Providers on this computer, whose models can be given a context window. */
+const LOCAL_PROVIDERS = new Set<ProviderName>(['ollama', 'lmstudio'])
 
 export function ProviderSection({
   settings,
@@ -47,6 +53,14 @@ export function ProviderSection({
     const allowBlank = PROVIDERS_ALLOW_BLANK_MODEL.has(settings.activeProvider)
     if (!allowBlank && trimmed.length === 0) return
     saveActiveProvider({ selectedModel: trimmed }, trimmed ? { defaultModel: trimmed } : {})
+  }
+
+  // Settings for the model picked above; chats on that model use them.
+  const activeModelOptions: ModelOptions = activeProvider.modelOptions?.[activeProviderModel.trim()] ?? {}
+  const saveActiveModelOptions = (patch: Partial<ModelOptions>) => {
+    const model = activeProviderModel.trim()
+    if (!model) return
+    saveActiveProvider({ modelOptions: withModelOptions(activeProvider.modelOptions, model, patch) })
   }
 
   const favoriteModels = activeProvider.favoriteModels ?? []
@@ -206,8 +220,83 @@ export function ProviderSection({
               </div>
             )}
           </div>
+
+          {/* The model's own settings */}
+          {activeProviderModel.trim() && (
+            <div className="flex items-end gap-2">
+              {LOCAL_PROVIDERS.has(settings.activeProvider) && (
+                <div className="flex-1 min-w-0">
+                  <div className="mb-1 flex items-center gap-1 whitespace-nowrap">
+                    <label htmlFor="model-context-window" className={INLINE_LABEL_CLASS}>Context window</label>
+                    <HelpIcon
+                      title="Tokens the model is loaded with. Empty uses the server's own setting. Bigger windows use more memory."
+                      label="Context window help"
+                    />
+                  </div>
+                  <ContextWindowInput
+                    key={`${settings.activeProvider}|${activeProviderModel}|${activeModelOptions.contextWindow ?? ''}`}
+                    value={activeModelOptions.contextWindow}
+                    onCommit={(contextWindow) => saveActiveModelOptions({ contextWindow })}
+                  />
+                </div>
+              )}
+              <div className={LOCAL_PROVIDERS.has(settings.activeProvider) ? 'w-20 shrink-0' : 'flex-1 min-w-0'}>
+                <div className="mb-1 flex items-center gap-1 whitespace-nowrap">
+                  <label htmlFor="model-tools" className={INLINE_LABEL_CLASS}>Tools</label>
+                  <HelpIcon
+                    title="Auto sends tools unless the server says this model can't use them."
+                    label="Tools help"
+                  />
+                </div>
+                <select
+                  id="model-tools"
+                  value={activeModelOptions.tools ?? 'auto'}
+                  onChange={(e) => saveActiveModelOptions({ tools: e.target.value as ToolsMode })}
+                  className="select select-sm w-full"
+                >
+                  <option value="auto">Auto</option>
+                  <option value="on">On</option>
+                  <option value="off">Off</option>
+                </select>
+              </div>
+            </div>
+          )}
         </>
       )}
     </>
+  )
+}
+
+/**
+ * Typed freely, saved on Enter or leaving the field: a whole number in range
+ * sets the window, an empty field leaves it to the server, anything else goes
+ * back to the saved value.
+ */
+function ContextWindowInput({ value, onCommit }: { value: number | undefined; onCommit: (value: number | undefined) => void }) {
+  // Starts from the saved value; the parent's key resets it when that changes.
+  const [draft, setDraft] = useState(value === undefined ? '' : String(value))
+
+  const commit = () => {
+    if (draft.trim() === '') {
+      if (value !== undefined) onCommit(undefined)
+      return
+    }
+    const parsed = parseContextWindow(draft)
+    if (parsed === null) setDraft(value === undefined ? '' : String(value))
+    else if (parsed !== value) onCommit(parsed)
+  }
+
+  return (
+    <input
+      id="model-context-window"
+      type="text"
+      inputMode="numeric"
+      value={draft}
+      placeholder="Server default"
+      onChange={(e) => setDraft(e.target.value)}
+      onBlur={commit}
+      onKeyDown={(e) => { if (e.key === 'Enter') commit() }}
+      className="input input-sm w-full"
+    />
   )
 }

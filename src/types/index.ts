@@ -8,6 +8,22 @@ export interface ProviderSettings {
   models: string[]
   selectedModel?: string
   favoriteModels?: string[]
+  /** Settings for single models, by model id. A model without an entry uses the defaults. */
+  modelOptions?: Record<string, ModelOptions>
+}
+
+/** Whether a model is sent tools: 'auto' sends them unless the server says the model can't use them. */
+export type ToolsMode = 'auto' | 'on' | 'off'
+
+export interface ModelOptions {
+  /**
+   * Context window in tokens, for Ollama and LM Studio. Unset leaves it to
+   * the server. Ollama gets it on every request (num_ctx); LM Studio loads the
+   * model with it when the model isn't loaded yet.
+   */
+  contextWindow?: number
+  /** Default 'auto'. */
+  tools?: ToolsMode
 }
 
 // ─── Settings ────────────────────────────────────────────────────────────────
@@ -340,6 +356,8 @@ export interface ReasoningEcho {
   reasoning_content?: string
   /** vLLM and others that name the field `reasoning`. */
   reasoning?: string
+  /** Ollama's native API. */
+  thinking?: string
 }
 
 /** One request's reasoning within a saved reply. */

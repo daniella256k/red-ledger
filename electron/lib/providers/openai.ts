@@ -7,6 +7,7 @@ import {
   reportedUsageChunk,
   type ProviderSendOptions,
   type AbortHandle,
+  type ModelInfo,
   type ReasoningEcho
 } from './base'
 import { registerProvider } from './registry'
@@ -672,20 +673,43 @@ export class OpenAIProvider extends BaseLLMProvider {
     }
   }
 
+  /** The model's entry in the /models listing, or undefined. */
+  private async findModelEntry(model: string): Promise<unknown> {
+    const response = await axios.get(`${this.baseUrl}/models`, {
+      headers: this.getAuthHeaders(),
+      timeout: 15_000
+    })
+    const entries: unknown[] = Array.isArray(response.data?.data) ? response.data.data : []
+    return entries.find((item) =>
+      Boolean(item) && typeof item === 'object' && (item as { id?: unknown }).id === model
+    )
+  }
+
   /** Read from the /models listing; OpenAI itself doesn't report it, OpenRouter and vLLM do. */
   override async getContextLength(model: string): Promise<number | null> {
     try {
-      const response = await axios.get(`${this.baseUrl}/models`, {
-        headers: this.getAuthHeaders(),
-        timeout: 15_000
-      })
-      const entries: unknown[] = Array.isArray(response.data?.data) ? response.data.data : []
-      const entry = entries.find((item) =>
-        Boolean(item) && typeof item === 'object' && (item as { id?: unknown }).id === model
-      )
-      return readContextLength(entry)
+      return readContextLength(await this.findModelEntry(model))
     } catch {
       return null
+    }
+  }
+
+  /**
+   * One listing read for both. OpenRouter lists each model's request fields
+   * (`supported_parameters`), which say whether it takes tools.
+   */
+  override async getModelInfo(model: string): Promise<ModelInfo> {
+    try {
+      const entry = await this.findModelEntry(model)
+      const supported = entry && typeof entry === 'object'
+        ? (entry as { supported_parameters?: unknown }).supported_parameters
+        : undefined
+      return {
+        contextLength: readContextLength(entry),
+        capabilities: Array.isArray(supported) ? { tools: supported.includes('tools') } : {}
+      }
+    } catch {
+      return { contextLength: null, capabilities: {} }
     }
   }
 }
