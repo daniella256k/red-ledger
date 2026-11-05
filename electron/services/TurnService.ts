@@ -14,6 +14,7 @@ import type {
   LLMRequest,
   Message,
   ProviderName,
+  SavedReasoning,
   Settings,
   StreamChunk,
   ToolCall,
@@ -39,7 +40,7 @@ const WORKSPACE_WRITE_TOOLS = new Set(['write_file', 'edit_file', 'append_file',
 export interface TurnServiceDeps {
   conversations: Pick<ConversationService,
     'getConversation' | 'updateConversation' | 'listMessages' | 'createMessage'
-    | 'updateMessage' | 'deleteMessageBranch' | 'selectBranch'>
+    | 'updateMessage' | 'deleteMessageBranch' | 'selectBranch' | 'saveReasoning' | 'getSavedReasoning'>
   llm: Pick<LlmService, 'orchestrateStream' | 'compactConversation' | 'cancelStream' | 'generateTitle'>
   getSettings: () => Settings
   /** The folder the app has open now; a chat without a folder of its own takes it. */
@@ -68,23 +69,37 @@ interface RunningTurn {
    * a reply that finished normally (not stopped, not failed).
    */
   usage: ContextUsage | null
+  /**
+   * The reply's reasoning blocks so far (see StreamSink.saveReasoning). Kept
+   * out of `live`, which the page sees; saved with the reply when changed.
+   */
+  reasoning: SavedReasoning | null
+  reasoningChanged: boolean
   updateTimer: ReturnType<typeof setTimeout> | null
   persistTimer: ReturnType<typeof setTimeout> | null
   /** Settles once the turn is over and saved. */
   done: Promise<void>
 }
 
-/** A chat's messages in the shape an LLM request carries them. */
-export function toRequestMessages(messages: Message[]): LLMRequest['messages'] {
+/**
+ * A chat's messages in the shape an LLM request carries them, each reply
+ * with its saved reasoning blocks (by message id) when it has any.
+ */
+export function toRequestMessages(
+  messages: Message[],
+  savedReasoning: Map<string, SavedReasoning> = new Map()
+): LLMRequest['messages'] {
   return messages.map((m) => {
     const toolCalls = m.role === 'assistant' ? parseStoredToolCalls(m.toolCalls) : undefined
+    const reasoning = m.role === 'assistant' ? savedReasoning.get(m.id) : undefined
     return {
       role: m.role,
       content: m.content,
       timestamp: m.timestamp,
       ...(m.role === 'user' && m.attachments && m.attachments.length > 0 ? { attachments: m.attachments } : {}),
       ...(toolCalls ? { toolCalls } : {}),
-      ...(m.role === 'assistant' && m.thinking ? { thinking: m.thinking } : {})
+      ...(m.role === 'assistant' && m.thinking ? { thinking: m.thinking } : {}),
+      ...(reasoning ? { savedReasoning: reasoning } : {})
     }
   })
 }
@@ -193,7 +208,7 @@ export class TurnService {
 
     const llmRequest: LLMRequest = {
       conversationId,
-      messages: toRequestMessages(conversations.listMessages(conversationId)),
+      messages: this.requestMessages(conversations.listMessages(conversationId)),
       model,
       provider,
       ...(settings.temperatureEnabled ? { temperature: settings.temperature } : {}),
@@ -244,7 +259,7 @@ export class TurnService {
     const provider = conversation.provider || settings.activeProvider
     const request: LLMRequest = {
       conversationId,
-      messages: toRequestMessages(messages),
+      messages: this.requestMessages(messages),
       model: conversation.model || settings.providers[provider]?.selectedModel || settings.defaultModel,
       provider,
       ...(settings.temperatureEnabled ? { temperature: settings.temperature } : {}),
@@ -285,6 +300,12 @@ export class TurnService {
 
   // ─── Running a turn ───────────────────────────────────────────────────────
 
+  /** The branch as a request carries it, replies with their saved reasoning blocks. */
+  private requestMessages(messages: Message[]): LLMRequest['messages'] {
+    const replyIds = messages.filter((m) => m.role === 'assistant').map((m) => m.id)
+    return toRequestMessages(messages, this.deps.conversations.getSavedReasoning(replyIds))
+  }
+
   private assertCanStart(conversationId: string): void {
     if (this.closed) throw new Error('The app is closing.')
     if (this.turns.has(conversationId)) {
@@ -308,6 +329,8 @@ export class TurnService {
       lastChunk: null,
       toolCallsChanged: false,
       usage: null,
+      reasoning: null,
+      reasoningChanged: false,
       updateTimer: null,
       persistTimer: null,
       done: Promise.resolve()
@@ -322,7 +345,14 @@ export class TurnService {
     request: LLMRequest,
     runTool: (toolCall: ToolCall, signal: AbortSignal) => Promise<ToolCall>
   ): Promise<void> {
-    const sink: StreamSink = { send: (chunk) => this.onChunk(turn, chunk) }
+    const sink: StreamSink = {
+      send: (chunk) => this.onChunk(turn, chunk),
+      saveReasoning: (reasoning) => {
+        turn.reasoning = reasoning
+        turn.reasoningChanged = true
+        this.schedulePersist(turn)
+      }
+    }
     try {
       await this.deps.llm.orchestrateStream(request, turn.live.turnId, sink, runTool)
     } catch (err) {
@@ -474,6 +504,11 @@ export class TurnService {
         thinking: thinking || undefined,
         toolCalls: toolCalls.length > 0 ? JSON.stringify(toolCalls) : undefined
       })
+      // Written only when a round brought more: each write is the whole reply's.
+      if (turn.reasoningChanged) {
+        this.deps.conversations.saveReasoning(messageId, turn.reasoning)
+        turn.reasoningChanged = false
+      }
     } catch (err) {
       console.warn('[TurnService] Could not save the reply so far:', err)
     }

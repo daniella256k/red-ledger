@@ -1,4 +1,6 @@
-import type { ContextUsage, StreamChunk } from '../../../src/types'
+import type { ContextUsage, ReasoningEcho, StreamChunk } from '../../../src/types'
+
+export type { ReasoningEcho }
 
 /**
  * JSON Schema for a tool's arguments. Built-in tools use the simple
@@ -43,21 +45,6 @@ export interface LLMMessage extends ReasoningEcho {
     }
   }>
   tool_call_id?: string
-}
-
-/**
- * A reasoning model's reasoning for one reply, in the fields the server sent
- * it in. Within a turn it goes back, unchanged, on the assistant message that
- * made the tool calls, so the model continues from its own reasoning after
- * the results. Only fields the server itself sent are ever set.
- */
-export interface ReasoningEcho {
-  /** OpenRouter: structured blocks, which may include signed or encrypted reasoning. */
-  reasoning_details?: unknown[]
-  /** DeepSeek, Moonshot (Kimi) and similar servers. */
-  reasoning_content?: string
-  /** vLLM and others that name the field `reasoning`. */
-  reasoning?: string
 }
 
 /**

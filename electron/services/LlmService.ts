@@ -14,6 +14,7 @@ import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
 import { splitThinkingBlocks } from '../../src/lib/thinking'
 import { findMcpServerByPrefix, parseMcpToolName } from '../../src/lib/mcpConfig'
 import { detectFileType } from '../lib/fileType'
+import { normalizeBaseUrl, reasoningMatches } from '../lib/savedReasoning'
 import type { AttachmentBlob } from './ConversationService'
 import type {
   LLMRequest,
@@ -25,7 +26,8 @@ import type {
   ImageAttachment,
   TitleGenerationRequest,
   ContextUsage,
-  CacheUsage
+  CacheUsage,
+  SavedReasoning
 } from '../../src/types'
 
 // Side-effect imports: each provider self-registers when loaded
@@ -237,6 +239,38 @@ function groupToolRounds(toolCalls: ToolCall[], offsetOf: (tc: ToolCall) => numb
   return rounds
 }
 
+/** Which of a replayed reply's assistant messages wants its reasoning. */
+export interface PastReasoningSlot {
+  /** Position among the reply's assistant messages, from 0. */
+  index: number
+  /** The model round its tool calls record; null for the closing text, or calls saved without one. */
+  round: number | null
+  /** The closing text, which the reply's last round wrote. */
+  final: boolean
+}
+
+/**
+ * Where a replayed reply's reasoning comes from: its saved blocks, looked up
+ * per message, or (chats saved before 1.10, DeepSeek only) its stretches of
+ * thinking in order, sent as `reasoning_content`.
+ */
+export type PastReasoning = string[] | ((slot: PastReasoningSlot) => ReasoningEcho | undefined)
+
+/**
+ * Looks up a reply's saved blocks: a tool round's by the round its calls
+ * record, the closing text's from the last round. With `fillEmpty`, a message
+ * without any gets an empty `reasoning_content` (DeepSeek rejects earlier tool
+ * rounds without the field).
+ */
+export function savedReasoningLookup(saved: SavedReasoning, fillEmpty = false): PastReasoning {
+  return ({ round, final }) => {
+    const entry = final
+      ? saved.rounds.find((r) => r.final)
+      : round === null ? undefined : saved.rounds.find((r) => r.round === round && !r.final)
+    return entry?.reasoning ?? (fillEmpty ? { reasoning_content: '' } : undefined)
+  }
+}
+
 /**
  * An earlier assistant reply as the exchange the model actually had: each
  * round's text with its tool calls, the full tool results, then the closing
@@ -246,21 +280,25 @@ function groupToolRounds(toolCalls: ToolCall[], offsetOf: (tc: ToolCall) => numb
  * notice the live request carried, so the replayed chat matches what the
  * provider has cached.
  *
- * With `reasoningBlocks` (the reply's stretches of thinking, in order), each
- * assistant message carries its round's as `reasoning_content`, for servers
- * that reject earlier tool rounds without it.
+ * With `reasoning`, each assistant message carries its round's reasoning
+ * fields (see PastReasoning) after the others, where the live request had
+ * them, so the message is byte for byte what the provider saw.
  */
 export function buildPastReplyMessages(
   content: string,
   toolCalls: ToolCall[] | undefined,
   usedIds: Set<string> = new Set(),
-  reasoningBlocks?: string[]
+  reasoning?: PastReasoning
 ): LLMMessage[] {
   let assistantCount = 0
-  const reasoning = (): Pick<LLMMessage, 'reasoning_content'> =>
-    reasoningBlocks ? { reasoning_content: reasoningBlocks[assistantCount++] ?? '' } : {}
+  const reasoningFor = (round: number | null, final: boolean): ReasoningEcho => {
+    const index = assistantCount++
+    if (!reasoning) return {}
+    if (Array.isArray(reasoning)) return { reasoning_content: reasoning[index] ?? '' }
+    return reasoning({ index, round, final }) ?? {}
+  }
 
-  if (!toolCalls || toolCalls.length === 0) return [{ role: 'assistant', content, ...reasoning() }]
+  if (!toolCalls || toolCalls.length === 0) return [{ role: 'assistant', content, ...reasoningFor(null, true) }]
 
   const offsetOf = (tc: ToolCall) => Math.min(Math.max(tc.contentOffset ?? 0, 0), content.length)
   const messages: LLMMessage[] = []
@@ -275,6 +313,7 @@ export function buildPastReplyMessages(
     const budgetNotice = buildToolCallBudgetNotice(previousTotal, totalToolCalls)
 
     const ids = round.map((tc) => uniqueToolCallId(tc.id, usedIds))
+    const roundNumber = round.find((tc) => typeof tc.round === 'number')?.round ?? null
     messages.push({
       role: 'assistant',
       content: content.slice(cursor, offset) || null,
@@ -283,7 +322,7 @@ export function buildPastReplyMessages(
         type: 'function' as const,
         function: { name: tc.name, arguments: JSON.stringify(tc.arguments ?? {}) }
       })),
-      ...reasoning()
+      ...reasoningFor(roundNumber, false)
     })
     round.forEach((tc, k) => {
       const result = formatToolResultForModel(tc.name, tc.result === undefined ? UNFINISHED_TOOL_RESULT : tc.result)
@@ -297,7 +336,7 @@ export function buildPastReplyMessages(
   }
 
   const closingText = content.slice(cursor)
-  if (closingText.trim().length > 0) messages.push({ role: 'assistant', content: closingText, ...reasoning() })
+  if (closingText.trim().length > 0) messages.push({ role: 'assistant', content: closingText, ...reasoningFor(null, true) })
   return messages
 }
 
@@ -428,8 +467,26 @@ const CONTEXT_LENGTH_CACHE_MS = 10 * 60_000
 const CONTEXT_LENGTH_TIMEOUT_MS = 3_000
 
 /**
+ * Readable reasoning a message carries back to the model. Models that keep
+ * earlier reasoning in context (recent Claude models) read it as input.
+ * Signatures and encrypted blocks aren't counted: their size says little
+ * about their tokens.
+ */
+function reasoningChars(message: LLMMessage): number {
+  let chars = (message.reasoning_content?.length ?? 0) + (message.reasoning?.length ?? 0)
+  for (const detail of message.reasoning_details ?? []) {
+    if (!detail || typeof detail !== 'object') continue
+    const record = detail as Record<string, unknown>
+    if (typeof record.text === 'string') chars += record.text.length
+    if (typeof record.summary === 'string') chars += record.summary.length
+  }
+  return chars
+}
+
+/**
  * Token estimate for a request the provider gave no usage for: the text of
- * every message, tool call and tool definition, at ~4 characters per token.
+ * every message, tool call, readable reasoning sent back and tool
+ * definition, at ~4 characters per token.
  */
 export function estimateUsage(messages: LLMMessage[], tools: ToolDefinition[], replyText: string): ContextUsage {
   let chars = JSON.stringify(tools).length
@@ -447,6 +504,7 @@ export function estimateUsage(messages: LLMMessage[], tools: ToolDefinition[], r
     for (const toolCall of message.tool_calls ?? []) {
       chars += toolCall.function.name.length + toolCall.function.arguments.length
     }
+    chars += reasoningChars(message)
   }
 
   return {
@@ -468,6 +526,11 @@ const TOOL_LIMIT_REACHED_ERROR =
  */
 export interface StreamSink {
   send(chunk: StreamChunk): void
+  /**
+   * The reply's reasoning blocks so far, after each round that returned any,
+   * for saving with the reply (main process only; never sent to the page).
+   */
+  saveReasoning?(reasoning: SavedReasoning): void
 }
 
 /**
@@ -674,6 +737,14 @@ export class LlmService {
     let roundsAfterToolLimit = 0
     // Prompt cache use over the turn's requests, when the provider reports it.
     let cache: CacheUsage | null = null
+    // Each round's reasoning, saved with the reply so later turns replay it unchanged.
+    const savedReasoning: SavedReasoning = {
+      v: 1,
+      provider: request.provider,
+      baseUrl: normalizeBaseUrl(settings.providers?.[request.provider]?.baseUrl),
+      model: request.model,
+      rounds: []
+    }
 
     // Tracked from the start so Stop ends the turn at any point: during the
     // context window lookup below, between rounds, and while tools run.
@@ -763,6 +834,14 @@ export class LlmService {
         stream.handle = null
         const roundUsage = reportedUsage as ContextUsage | null
         if (roundUsage) cache = addCacheUsage(cache, roundUsage)
+
+        // Saved before any tool runs, so a reply stopped mid-round keeps it. A
+        // round that ended without tool calls wrote the closing text.
+        const roundReasoning = reasoningEcho as ReasoningEcho | null
+        if (roundReasoning && streamDone !== 'error') {
+          savedReasoning.rounds.push({ round, ...(streamDone === 'done' ? { final: true as const } : {}), reasoning: roundReasoning })
+          sink.saveReasoning?.({ ...savedReasoning, rounds: [...savedReasoning.rounds] })
+        }
 
         if (streamDone === 'done' && !stream.cancelled) {
           // The final round's request holds the whole turn, so it is the turn's peak context use.
@@ -899,7 +978,8 @@ export class LlmService {
     // are replayed with their tool calls and full results, in the same shape
     // as the live tool loop.
     const replayedToolCallIds = new Set<string>()
-    const replayReasoning = needsReasoningReplay(settings.providers?.[request.provider]?.baseUrl)
+    const baseUrl = settings.providers?.[request.provider]?.baseUrl
+    const reasoningRequired = needsReasoningReplay(baseUrl)
     for (const msg of request.messages.slice(summaryIndex + 1)) {
       if (msg.role === 'user') {
         const sentAt = formatMessageTime(msg.timestamp, this.timeZone)
@@ -912,12 +992,16 @@ export class LlmService {
         const content = msg.content === LEGACY_NO_TEXT_PLACEHOLDER ? '' : msg.content
         // Nothing to replay: no text and no tool calls (e.g. only reasoning).
         if (!content.trim() && !msg.toolCalls?.length) continue
-        messages.push(...buildPastReplyMessages(
-          content,
-          msg.toolCalls,
-          replayedToolCallIds,
-          replayReasoning ? splitThinkingBlocks(msg.thinking) : undefined
-        ))
+        // Its own saved blocks when they came from this server and model.
+        // Otherwise none, except where the server requires reasoning: replies
+        // saved before 1.10 rebuild it from their thinking text.
+        const saved = msg.savedReasoning && reasoningMatches(msg.savedReasoning, request.provider, baseUrl, request.model)
+          ? msg.savedReasoning
+          : null
+        const reasoning = saved
+          ? savedReasoningLookup(saved, reasoningRequired)
+          : reasoningRequired ? splitThinkingBlocks(msg.thinking) : undefined
+        messages.push(...buildPastReplyMessages(content, msg.toolCalls, replayedToolCallIds, reasoning))
       }
     }
     return messages

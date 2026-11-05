@@ -97,6 +97,27 @@ describe('database schema versions', () => {
     expect(userVersion(path)).toBe(latest)
   })
 
+  it('adds the reply reasoning column to a 1.9 database, whose replies have none', () => {
+    const path = dbFile()
+    const service = open(path)
+    const chat = service.createConversation({})
+    service.createMessage({ conversationId: chat.id, role: 'user', content: 'q' })
+    const reply = service.createMessage({ conversationId: chat.id, role: 'assistant', content: 'a', thinking: 'thought' })
+    close(service)
+    // As 1.9 left it: schema 8, no replay column.
+    withRaw(path, (db) => {
+      db.exec('ALTER TABLE messages DROP COLUMN replay')
+      db.pragma('user_version = 8')
+    })
+
+    const upgraded = open(path)
+    const columns = withRaw(path, (db) => (db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>).map((c) => c.name))
+    expect(columns).toContain('replay')
+    expect(upgraded.listMessages(chat.id).map((m) => m.content)).toEqual(['q', 'a'])
+    expect(upgraded.getSavedReasoning([reply.id]).size).toBe(0)
+    expect(userVersion(path)).toBe(9)
+  })
+
   it('refuses a database from a newer version and leaves it as it was', () => {
     const path = dbFile()
     const service = open(path)

@@ -23,7 +23,9 @@ export function parseStoredToolCalls(toolCallsJson: string | undefined): ToolCal
       name: tc.name,
       arguments: tc.arguments && typeof tc.arguments === 'object' ? tc.arguments : {},
       ...(tc.result !== undefined ? { result: tc.result } : {}),
-      ...(typeof tc.contentOffset === 'number' ? { contentOffset: tc.contentOffset } : {})
+      ...(typeof tc.contentOffset === 'number' ? { contentOffset: tc.contentOffset } : {}),
+      // Rounds with no text between them share an offset; this keeps them apart on replay.
+      ...(typeof tc.round === 'number' ? { round: tc.round } : {})
     }))
 
   return toolCalls.length > 0 ? toolCalls : undefined

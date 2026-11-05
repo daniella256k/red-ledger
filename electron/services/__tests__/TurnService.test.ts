@@ -218,6 +218,44 @@ describe('TurnService replies', () => {
     expect(updates.some((e) => e.type === 'update' && e.toolCalls?.length === 1)).toBe(true)
   })
 
+  it('saves each round\'s reasoning blocks with the reply, out of the page\'s sight, and sends them with the next turn', async () => {
+    const { conversations, llm, events, turns } = setup()
+    const chat = conversations.createConversation({})
+    const saved = (rounds: number) => ({
+      v: 1 as const,
+      provider: 'openrouter' as const,
+      baseUrl: 'https://openrouter.ai/api/v1',
+      model: 'm',
+      rounds: Array.from({ length: rounds }, (_, i) => ({ round: i + 1, reasoning: { reasoning_details: [{ type: 'reasoning.text', text: `t${i + 1}`, signature: `secret-sig-${i + 1}` }] } }))
+    })
+    const roundOneSaved = deferred()
+    const finish = deferred()
+    llm.scripts.set(chat.id, async ({ sink }) => {
+      sink.send({ type: 'thinking', content: 't1' })
+      sink.saveReasoning!(saved(1))
+      roundOneSaved.resolve()
+      await finish.promise
+      sink.send({ type: 'text', content: 'Answer.' })
+      sink.saveReasoning!(saved(2))
+    })
+
+    turns.start({ conversationId: chat.id, kind: 'send', content: 'q' })
+    const replyId = conversations.listMessages(chat.id).at(-1)!.id
+    await roundOneSaved.promise
+    // Saved partway through, like the rest of the reply.
+    await vi.waitFor(() => expect(conversations.getSavedReasoning([replyId]).get(replyId)).toEqual(saved(1)))
+    finish.resolve()
+    await turns.whenIdle(chat.id)
+    expect(conversations.getSavedReasoning([replyId]).get(replyId)).toEqual(saved(2))
+    expect(JSON.stringify(events)).not.toContain('secret-sig')
+
+    llm.scripts.set(chat.id, async ({ sink }) => sink.send({ type: 'text', content: 'ok' }))
+    turns.start({ conversationId: chat.id, kind: 'send', content: 'more' })
+    await turns.whenIdle(chat.id)
+    const next = llm.requests.at(-1)!
+    expect(next.messages.map((m) => m.savedReasoning)).toEqual([undefined, saved(2), undefined])
+  })
+
   it('adds a retry beside the earlier reply, and an edit beside the original message', async () => {
     const { conversations, llm, turns } = setup()
     const chat = conversations.createConversation({})

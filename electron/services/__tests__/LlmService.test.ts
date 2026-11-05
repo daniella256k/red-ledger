@@ -283,7 +283,8 @@ describe('LlmService tool call history', () => {
     expect(lastLive.some((m) => m.role === 'tool' && String(m.content).includes('[system: tool_call_budget used=26'))).toBe(true)
 
     // Turn 2 starts from the saved reply.
-    const stored = JSON.parse(JSON.stringify(saved)) as ToolCall[]
+    // Read back as TurnService reads it: the parser must keep each call's round.
+    const stored = parseStoredToolCalls(JSON.stringify(saved))!
     await service.orchestrateStream(
       {
         conversationId: 'c1',

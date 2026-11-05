@@ -3,6 +3,7 @@ import type Database from 'better-sqlite3'
 import { FileHistoryStore } from './FileHistoryService'
 import { DEFAULT_MODEL, DEFAULT_PROVIDER, isProviderName } from '../../src/lib/providers'
 import { BLOB_ID_PATTERN, isImageMimeType } from '../../src/lib/attachments'
+import { parseSavedReasoning } from '../lib/savedReasoning'
 import type {
   Attachment,
   ChatStorageInfo,
@@ -13,6 +14,7 @@ import type {
   Message,
   ImageAttachmentMimeType,
   RemoveImageResult,
+  SavedReasoning,
   SelectBranchOptions,
   StoredImageInfo
 } from '../../src/types'
@@ -67,6 +69,12 @@ function parseAttachment(value: unknown): Attachment | null {
 const MAX_BRANCH_DEPTH = 100_000
 
 /** A message and every message below it, on all branches. Bind the message id. */
+/**
+ * A message's columns as the page sees them: everything but `replay` (saved
+ * reasoning blocks), which only the main process reads, when it builds a request.
+ */
+const MESSAGE_COLUMNS = 'id, conversation_id, parent_id, role, content, attachments, thinking, tool_calls, timestamp, created_at'
+
 const SUBTREE_CTE = `WITH RECURSIVE subtree(id, depth) AS (
   SELECT ?, 0
   UNION ALL
@@ -185,7 +193,8 @@ export class ConversationService {
     { name: 'message search index', run: () => { this.ensureMessageSearchIndex() } },
     { name: 'images out of message text', run: () => this.moveInlineImagesToAttachmentStore() },
     { name: 'message tree', run: () => this.addMessageTree() },
-    { name: 'file history', run: () => FileHistoryStore.createSchema(this.db) }
+    { name: 'file history', run: () => FileHistoryStore.createSchema(this.db) },
+    { name: 'reply reasoning', run: () => this.addReplyReasoningColumn() }
   ]
 
   /** The schema version this build writes (see `migrations`). */
@@ -419,6 +428,18 @@ export class ConversationService {
       }
       this.db.exec('CREATE INDEX IF NOT EXISTS idx_messages_parent ON messages(parent_id)')
     })()
+  }
+
+  /**
+   * Each reply's reasoning blocks as the server sent them (SavedReasoning, as
+   * JSON), so later turns replay the reply exactly. Null for replies without
+   * any, and for every reply saved before 1.10.
+   */
+  private addReplyReasoningColumn(): void {
+    const columns = this.db.prepare('PRAGMA table_info(messages)').all() as Array<{ name: string }>
+    if (!columns.some((column) => column.name === 'replay')) {
+      this.db.exec('ALTER TABLE messages ADD COLUMN replay TEXT')
+    }
   }
 
   /**
@@ -743,16 +764,7 @@ export class ConversationService {
     }
 
     // A fork is the branch leading to this message, without the other versions.
-    const sourceMessages = this.pathRows(conversationId, messageId) as Array<{
-      id: string
-      role: Message['role']
-      content: string
-      attachments: string | null
-      thinking: string | null
-      tool_calls: string | null
-      timestamp: string
-      created_at: number
-    }>
+    const sourceMessages = this.pathRows(conversationId, messageId) as Array<{ id: string }>
 
     if (sourceMessages.length === 0) {
       throw new Error(`Message not found in conversation: ${messageId}`)
@@ -780,10 +792,12 @@ export class ConversationService {
         (sourceConversation.profile_id as string | null) ?? null
       )
 
+      // Copied from the source row, saved reasoning included (the fork keeps its model).
       const insertForkMessage = this.stmt(
-        'insertForkMessage',
-        `INSERT INTO messages (id, conversation_id, parent_id, role, content, attachments, thinking, tool_calls, timestamp, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        'insertForkMessageCopy',
+        `INSERT INTO messages (id, conversation_id, parent_id, role, content, attachments, thinking, tool_calls, timestamp, created_at, replay)
+         SELECT ?, ?, ?, role, content, attachments, thinking, tool_calls, timestamp, created_at, replay
+           FROM messages WHERE id = ?`
       )
 
       // The fork's messages share the source's stored images rather than copying them.
@@ -796,18 +810,7 @@ export class ConversationService {
       let forkParentId: string | null = null
       for (const message of sourceMessages) {
         const forkMessageId = randomUUID()
-        insertForkMessage.run(
-          forkMessageId,
-          forkConversationId,
-          forkParentId,
-          message.role,
-          message.content,
-          message.attachments,
-          message.thinking,
-          message.tool_calls,
-          message.timestamp,
-          message.created_at
-        )
+        insertForkMessage.run(forkMessageId, forkConversationId, forkParentId, message.id)
         shareForkMessageBlobs.run(forkMessageId, message.id)
         forkParentId = forkMessageId
       }
@@ -877,7 +880,7 @@ export class ConversationService {
     const message = this.toMessage(
       this.stmt(
         'getMessage',
-        'SELECT * FROM messages WHERE id = ?'
+        `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE id = ?`
       ).get(id) as Record<string, unknown>
     )
     return this.withSiblings([message], this.childrenByParent(data.conversationId))[0]
@@ -914,6 +917,31 @@ export class ConversationService {
     })
 
     updateInTransaction()
+  }
+
+  /**
+   * Saves a reply's reasoning blocks (null clears them). Main process only:
+   * nothing the page reads includes them.
+   */
+  saveReasoning(messageId: string, reasoning: SavedReasoning | null): void {
+    this.stmt('saveReasoning', 'UPDATE messages SET replay = ? WHERE id = ?')
+      .run(reasoning ? JSON.stringify(reasoning) : null, messageId)
+  }
+
+  /** The saved reasoning of whichever of these messages have it, by message id. */
+  getSavedReasoning(messageIds: string[]): Map<string, SavedReasoning> {
+    const found = new Map<string, SavedReasoning>()
+    if (messageIds.length === 0) return found
+    const rows = this.stmt(
+      'getSavedReasoning',
+      `SELECT id, replay FROM messages
+        WHERE id IN (SELECT value FROM json_each(?)) AND replay IS NOT NULL`
+    ).all(JSON.stringify(messageIds)) as Array<{ id: string; replay: string }>
+    for (const row of rows) {
+      const reasoning = parseSavedReasoning(row.replay)
+      if (reasoning) found.set(row.id, reasoning)
+    }
+    return found
   }
 
   // ─── Branches ─────────────────────────────────────────────────────────────
@@ -982,7 +1010,7 @@ export class ConversationService {
            JOIN path ON m.id = path.id
           WHERE m.parent_id IS NOT NULL AND path.depth < ${MAX_BRANCH_DEPTH}
        )
-       SELECT m.* FROM path
+       SELECT ${MESSAGE_COLUMNS.split(', ').map((column) => `m.${column}`).join(', ')} FROM path
          JOIN messages m ON m.id = path.id
         WHERE m.conversation_id = ?
         ORDER BY path.depth DESC`
@@ -1145,7 +1173,7 @@ export class ConversationService {
   exportMessages(conversationId: string): { messages: Message[]; activeMessageId: string | null } {
     const rows = this.stmt(
       'listAllMessages',
-      'SELECT * FROM messages WHERE conversation_id = ? ORDER BY rowid ASC'
+      `SELECT ${MESSAGE_COLUMNS} FROM messages WHERE conversation_id = ? ORDER BY rowid ASC`
     ).all(conversationId) as Record<string, unknown>[]
 
     const messages = rows.map((row) => this.toMessage(row)).map((message) => {
@@ -1196,7 +1224,8 @@ export class ConversationService {
                 SUM(length(CAST(content AS BLOB))
                   + COALESCE(length(CAST(thinking AS BLOB)), 0)
                   + COALESCE(length(CAST(tool_calls AS BLOB)), 0)
-                  + COALESCE(length(CAST(attachments AS BLOB)), 0)) AS text_bytes
+                  + COALESCE(length(CAST(attachments AS BLOB)), 0)
+                  + COALESCE(length(CAST(replay AS BLOB)), 0)) AS text_bytes
            FROM messages
           GROUP BY conversation_id
        ),

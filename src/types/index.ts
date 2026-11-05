@@ -319,6 +319,50 @@ export interface LLMRequestMessage {
   toolCalls?: ToolCall[]
   /** An earlier assistant reply's thinking, for servers that need it sent back. */
   thinking?: string
+  /**
+   * An earlier assistant reply's reasoning blocks, as the server sent them.
+   * Main process only: read from the database when a request is built, never
+   * sent to the page.
+   */
+  savedReasoning?: SavedReasoning
+}
+
+/**
+ * A reasoning model's reasoning for one request, in the fields the server
+ * sent it in. It goes back unchanged on the assistant message it came with,
+ * so the model continues from its own reasoning and the provider's prompt
+ * cache still matches. Only fields the server itself sent are ever set.
+ */
+export interface ReasoningEcho {
+  /** OpenRouter: structured blocks, which may include signed or encrypted reasoning. */
+  reasoning_details?: unknown[]
+  /** DeepSeek, Moonshot (Kimi) and similar servers. */
+  reasoning_content?: string
+  /** vLLM and others that name the field `reasoning`. */
+  reasoning?: string
+}
+
+/** One request's reasoning within a saved reply. */
+export interface SavedReasoningRound {
+  /** The model round it came from, from 1: the same number the round's tool calls record. */
+  round: number
+  /** The reply's last round, whose reasoning goes with the closing text. */
+  final?: true
+  reasoning: ReasoningEcho
+}
+
+/**
+ * A reply's reasoning blocks, saved so later turns replay the reply exactly
+ * as the provider saw it. Replayed only to the same provider, base URL and
+ * model: other servers can't use (or would reject) another's blocks.
+ * Stored as JSON in messages.replay; never exported, never sent to the page.
+ */
+export interface SavedReasoning {
+  v: 1
+  provider: ProviderName
+  baseUrl: string
+  model: string
+  rounds: SavedReasoningRound[]
 }
 
 // ─── Stream Chunks ───────────────────────────────────────────────────────────
