@@ -8,7 +8,8 @@ import { parseMcpToolName } from '../../../src/lib/mcpConfig'
  * Tool registry — maps tool names to definitions + executors.
  * Each tool file self-registers at import time.
  * Adding a new tool = one file + one registerTool() call.
- * MCP tools are registered and unregistered at runtime by McpService.
+ * MCP tools are registered and unregistered at runtime by McpService, and
+ * custom tools (JSON files in the profile's tools folder) by CustomToolService.
  */
 
 /** What a tool call runs against. */
@@ -36,9 +37,30 @@ export interface ToolEntry {
    * what the chat stores and the tool card shows.
    */
   formatForModel?: (result: unknown) => string
+  /**
+   * Where the tool comes from: the app itself, a custom tool file, or an MCP
+   * connection. Left out, a `<server>__<tool>` name counts as MCP and any
+   * other as built-in.
+   */
+  source?: ToolSource
+  /** Custom tools only: whether calls need the network (hidden in offline mode). */
+  network?: boolean
 }
 
+export type ToolSource = 'builtin' | 'custom' | 'mcp'
+
 const tools = new Map<string, ToolEntry>()
+
+function sourceOf(name: string, entry: ToolEntry): ToolSource {
+  return entry.source ?? (parseMcpToolName(name) ? 'mcp' : 'builtin')
+}
+
+/** A registered tool's source and whether it needs the network; null when not registered. */
+export function getToolInfo(name: string): { source: ToolSource; network?: boolean } | null {
+  const entry = tools.get(name)
+  if (!entry) return null
+  return { source: sourceOf(name, entry), ...(entry.network !== undefined ? { network: entry.network } : {}) }
+}
 
 export function registerTool(entry: ToolEntry): void {
   tools.set(entry.definition.function.name, entry)
@@ -50,19 +72,20 @@ export function unregisterTool(name: string): void {
 
 /**
  * Every tool's definition, in an order that only changes when the set of
- * tools does: built-in tools as registered, then MCP tools by name. Tools go
- * first in every request, so a reconnecting MCP server re-registering its
- * tools must not reshuffle them, which would make the provider's prompt
- * cache miss from the very start.
+ * tools does: built-in tools as registered, then custom tools by name, then
+ * MCP tools by name. Tools go first in every request, so a reconnecting MCP
+ * server (or a reloaded tool file) re-registering its tools must not
+ * reshuffle them, which would make the provider's prompt cache miss from the
+ * very start.
  */
 export function getToolDefinitions(): ToolDefinition[] {
-  const builtIn: ToolDefinition[] = []
-  const mcp: ToolDefinition[] = []
+  const bySource: Record<ToolSource, ToolDefinition[]> = { builtin: [], custom: [], mcp: [] }
   for (const [name, entry] of tools) {
-    (parseMcpToolName(name) ? mcp : builtIn).push(entry.definition)
+    bySource[sourceOf(name, entry)].push(entry.definition)
   }
-  mcp.sort((a, b) => (a.function.name < b.function.name ? -1 : a.function.name > b.function.name ? 1 : 0))
-  return [...builtIn, ...mcp]
+  const byName = (a: ToolDefinition, b: ToolDefinition) =>
+    (a.function.name < b.function.name ? -1 : a.function.name > b.function.name ? 1 : 0)
+  return [...bySource.builtin, ...bySource.custom.sort(byName), ...bySource.mcp.sort(byName)]
 }
 
 function isErrorResult(result: unknown): boolean {

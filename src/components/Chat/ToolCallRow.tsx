@@ -2,8 +2,11 @@ import { useCallback, useState } from 'react'
 import type { FetchUrlResult, SearchResponse, SearchResult, ToolCall } from '@/types'
 import { cn } from '@/lib/utils'
 import { findMcpServerByPrefix, parseMcpToolName } from '@/lib/mcpConfig'
+import { useCustomToolsStatus } from '@/lib/customToolsStatus'
+import type { CustomToolResult } from '@/lib/customTools'
 import {
   describeToolCall,
+  isCustomToolCall,
   modelTextFor,
   summarizeToolResult,
   toolError,
@@ -23,11 +26,17 @@ const TAB_LABELS: Record<DetailTab, string> = {
 
 const READABLE_TOOLS = new Set(['web_search', 'org_search', 'wiki_search', 'fetch_url'])
 
-/** Display name of the connection an MCP tool came from, falling back to its name prefix. */
-function useMcpServerLabel(toolName: string): { server: string; tool: string } | null {
+/**
+ * Display name of the custom tool file or MCP connection a `<prefix>__<tool>`
+ * tool came from, falling back to its name prefix.
+ */
+function useToolSourceLabel(toolName: string): { server: string; tool: string } | null {
   const servers = useSettingsStore((s) => s.settings?.mcpServers)
+  const customTools = useCustomToolsStatus()
   const parsed = parseMcpToolName(toolName)
   if (!parsed) return null
+  const toolset = customTools?.toolsets.find((entry) => entry.prefix === parsed.server)
+  if (toolset) return { server: toolset.name, tool: parsed.tool }
   const match = servers ? findMcpServerByPrefix(servers, parsed.server) : undefined
   return { server: match?.name ?? parsed.server, tool: parsed.tool }
 }
@@ -74,9 +83,10 @@ function ToolCallDetails({ toolCall }: { toolCall: ToolCall }) {
   const finished = toolCall.result !== undefined
   const error = toolError(toolCall)
   const readable = finished && !error && READABLE_TOOLS.has(toolCall.name)
+  const apiResult = finished && !error && isCustomToolCall(toolCall) ? (toolCall.result as CustomToolResult) : null
   const tabs: DetailTab[] = !finished
     ? ['arguments']
-    : readable ? ['result', 'arguments', 'model', 'raw'] : ['result', 'arguments', 'model']
+    : readable || apiResult ? ['result', 'arguments', 'model', 'raw'] : ['result', 'arguments', 'model']
   const [tab, setTab] = useState<DetailTab>(tabs[0])
   const [copied, setCopied] = useState(false)
 
@@ -106,6 +116,9 @@ function ToolCallDetails({ toolCall }: { toolCall: ToolCall }) {
     body = toolCall.name === 'fetch_url'
       ? <FetchResultView result={toolCall.result} />
       : <SearchResultsView result={toolCall.result} />
+  } else if (tab === 'result' && apiResult) {
+    // A custom tool's answer is text (JSON or Markdown): show it as sent, not escaped inside JSON.
+    body = <pre className="tool-call-pre">{apiResult.content || '(empty response)'}</pre>
   } else {
     body = <pre className="tool-call-pre">{textFor(tab)}</pre>
   }
@@ -137,7 +150,7 @@ function ToolCallDetails({ toolCall }: { toolCall: ToolCall }) {
 /** One tool call as a single plain line; click it for the readable result, tabs and stats. */
 export function ToolCallRow({ toolCall }: { toolCall: ToolCall }) {
   const [isOpen, setIsOpen] = useState(false)
-  const mcp = useMcpServerLabel(toolCall.name)
+  const mcp = useToolSourceLabel(toolCall.name)
   const status = toolStatus(toolCall)
   const { subject, filters } = describeToolCall(toolCall)
 

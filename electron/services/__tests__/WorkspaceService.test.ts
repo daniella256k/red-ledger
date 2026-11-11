@@ -33,6 +33,7 @@ const BASE_SETTINGS: Settings = {
   searchSectionExpanded: true,
   advancedSectionExpanded: false,
   connectionsSectionExpanded: false,
+  customToolsSectionExpanded: false,
   mcpServers: []
 }
 

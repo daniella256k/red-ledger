@@ -4,6 +4,7 @@ import { useProviderModels } from './settings/useProviderModels'
 import { ProviderSection } from './settings/ProviderSection'
 import { SearchSection } from './settings/SearchSection'
 import { McpConnectionsSection } from './settings/McpConnectionsSection'
+import { CustomToolsSection } from './settings/CustomToolsSection'
 import { AdvancedSection } from './settings/AdvancedSection'
 import { StorageSection } from './settings/StorageSection'
 import { DarkModeCard } from './settings/DarkModeCard'
@@ -54,6 +55,15 @@ export function SettingsPanel() {
         {settings.connectionsSectionExpanded && (
           <McpConnectionsSection settings={settings} saveSettings={saveSettings} />
         )}
+
+        <SectionToggle
+          label="Custom Tools"
+          expanded={settings.customToolsSectionExpanded}
+          onToggle={() =>
+            saveSettings({ ...settings, customToolsSectionExpanded: !settings.customToolsSectionExpanded })
+          }
+        />
+        {settings.customToolsSectionExpanded && <CustomToolsSection />}
 
         <AdvancedSection settings={settings} saveSettings={saveSettings} />
         <StorageSection />

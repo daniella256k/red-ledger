@@ -22,6 +22,7 @@ import { registerLlmHandlers } from './ipc/llm'
 import { cancelAllTurns, cancelConversationTurn, registerTurnHandlers, shutdownTurns } from './ipc/turns'
 import { initSearchService } from './ipc/search'
 import { registerMcpHandlers, getMcpService } from './ipc/mcp'
+import { registerCustomToolHandlers, getCustomToolService } from './ipc/customTools'
 import { registerTransferHandlers } from './ipc/transfer'
 import { registerStorageHandlers } from './ipc/storage'
 import { registerFileHistoryHandlers } from './ipc/fileHistory'
@@ -411,6 +412,12 @@ function registerIpcHandlers(): void {
     } catch {
       // McpService not initialized yet — initial connect handled below
     }
+    // A renamed connection may now share a tool file's name prefix.
+    try {
+      getCustomToolService().syncReservedPrefixes()
+    } catch {
+      // CustomToolService not initialized yet — initial load handled below
+    }
   })
 
   // 3. File system (needs settings for strict mode checks)
@@ -428,6 +435,10 @@ function registerIpcHandlers(): void {
   // Sign-in tokens live next to settings.json (so portable mode keeps them together).
   registerMcpHandlers(getCurrentSettings, join(dirname(settingsPath), 'mcp-auth.json'))
   getMcpService().applyServers(getCurrentSettings().mcpServers, getCurrentSettings().lastWorkspacePath ?? null)
+
+  // 6a. Custom tools: JSON files in the tools folder next to settings.json
+  // (so portable mode keeps them together), sent through the search service.
+  registerCustomToolHandlers(join(dirname(settingsPath), 'tools'), getCurrentSettings)
 
   // 7. LLM streaming (needs settings + context for system prompt)
   registerLlmHandlers({

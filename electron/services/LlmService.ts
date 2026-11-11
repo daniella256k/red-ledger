@@ -10,7 +10,7 @@ import type {
   ToolDefinition
 } from '../lib/providers/base'
 import { createProvider } from '../lib/providers/registry'
-import { formatToolResultForModel, getToolDefinitions } from '../lib/tools/registry'
+import { formatToolResultForModel, getToolDefinitions, getToolInfo } from '../lib/tools/registry'
 import { sanitizeGeneratedChatTitle } from '../../src/lib/chatTitle'
 import { splitThinkingBlocks } from '../../src/lib/thinking'
 import { findMcpServerByPrefix, parseMcpToolName } from '../../src/lib/mcpConfig'
@@ -82,6 +82,9 @@ function sentAtNote(timeZone: string): string {
 /** Whether a tool reaches the network: built-in web tools and tools from HTTP MCP servers. */
 function isNetworkTool(name: string, settings: Settings): boolean {
   if (NETWORK_TOOLS.has(name)) return true
+  // Custom tools say for themselves: only one for an API on this computer works offline.
+  const info = getToolInfo(name)
+  if (info?.source === 'custom') return info.network !== false
   const parsed = parseMcpToolName(name)
   if (!parsed) return false
   const server = findMcpServerByPrefix(settings.mcpServers, parsed.server)

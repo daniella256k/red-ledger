@@ -730,6 +730,7 @@ export class McpService {
       connection.registered.set(name, tool.name)
       this.deps.registerTool({
         definition: toToolDefinition(name, tool, connection.config.name),
+        source: 'mcp',
         execute: (args, { win, workspace, signal }) => this.callTool(connection, tool.name, args, win, workspace.getWorkspacePath(), signal)
       })
     }

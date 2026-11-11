@@ -5,12 +5,12 @@
  * The page gets only what it uses: file and message writes, and web
  * searches, happen in the main process (tools and turns), never from the page.
  * Events the main process sends on its own (turn:event, mcp:status,
- * menu:action) don't fit invoke/handle; their payloads are typed in src/types.
+ * customTools:status, menu:action) don't fit invoke/handle; their payloads are typed in src/types.
  */
 import type {
   Conversation, Message, Settings, FileNode,
   Attachment, AttachmentParseResult, ContextProfile,
-  McpServerStatus, McpSignInResult,
+  McpServerStatus, McpSignInResult, CustomToolsStatus,
   StorageOverview, ChatStorageInfo, StoredImageInfo, RemoveImageResult, CompactResult,
   SelectBranchOptions, FileUndoResult,
   TurnStartRequest, CompactStartResult, LiveTurn
@@ -86,6 +86,11 @@ export interface IpcContract {
   'mcp:signIn':                 { params: [serverId: string];                          result: McpSignInResult }
   'mcp:cancelSignIn':           { params: [serverId: string];                          result: void }
   'mcp:signOut':                { params: [serverId: string];                          result: void }
+
+  // Custom tools (JSON files in the profile's tools folder)
+  'customTools:getStatus':      { params: [];                                          result: CustomToolsStatus }
+  'customTools:reload':         { params: [];                                          result: CustomToolsStatus }
+  'customTools:openFolder':     { params: [];                                          result: void }
 
   // LLM
   'llm:listModels':             { params: [provider: string];                          result: string[] }

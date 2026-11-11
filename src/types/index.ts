@@ -52,6 +52,7 @@ export interface Settings {
   searchSectionExpanded: boolean
   advancedSectionExpanded: boolean
   connectionsSectionExpanded: boolean
+  customToolsSectionExpanded: boolean
   mcpServers: McpServerConfig[]
 }
 
@@ -113,6 +114,28 @@ export interface McpServerStatus {
 }
 
 export type McpSignInResult = { ok: true } | { ok: false; error: string; cancelled?: boolean }
+
+// ─── Custom Tools ────────────────────────────────────────────────────────────
+
+/** One JSON file in the tools folder: the tools it loaded, or why it didn't load. */
+export interface CustomToolsetStatus {
+  /** File name, e.g. "my-api.json". */
+  file: string
+  /** The toolset's name; the file name when the file couldn't be read. */
+  name: string
+  /** Prefix of its tools' names (`<prefix>__<tool>`); absent when it didn't load. */
+  prefix?: string
+  baseUrl?: string
+  allowLocal?: boolean
+  tools: McpToolInfo[]
+  error?: string
+}
+
+export interface CustomToolsStatus {
+  /** Full path of the tools folder. */
+  folder: string
+  toolsets: CustomToolsetStatus[]
+}
 
 // ─── Conversations ───────────────────────────────────────────────────────────
 
@@ -673,6 +696,14 @@ export interface RedLedgerAPI {
   cancelMcpSignIn(serverId: string): Promise<void>
   signOutMcpServer(serverId: string): Promise<void>
   onMcpStatus(handler: (statuses: McpServerStatus[]) => void): () => void
+
+  // Custom Tools (JSON files in the profile's tools folder)
+  getCustomToolsStatus(): Promise<CustomToolsStatus>
+  /** Read the tools folder again. */
+  reloadCustomTools(): Promise<CustomToolsStatus>
+  /** Show the tools folder in the system file manager. */
+  openCustomToolsFolder(): Promise<void>
+  onCustomToolsStatus(handler: (status: CustomToolsStatus) => void): () => void
 
   // Dialogs
   showConfirmDialog(options: { title: string; message: string; detail?: string }): Promise<boolean>

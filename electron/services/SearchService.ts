@@ -46,8 +46,35 @@ const FETCH_CACHE_MAX_ENTRIES = 20
 /** Says plainly who is asking, so sites can decide; it doesn't pose as a browser. */
 const USER_AGENT = 'RedLedger/1.0'
 const SEARCH_TIMEOUT_MS = 15_000
+/** API answers are text; anything near this size is not one a model can read. */
+const API_MAX_BYTES = 5_000_000
+/** How much of an error answer's body is passed on to the model. */
+const API_ERROR_BODY_CHARS = 600
+
+/** A custom tool's request (see requestApi). */
+export interface ApiRequestOptions {
+  headers?: Record<string, string>
+  /** The one host allowed to be a local or private address. */
+  allowLocalHost?: string
+  signal?: AbortSignal
+}
+
+export interface ApiResponse {
+  /** The URL the answer came from, after redirects. */
+  url: string
+  status: number
+  contentType: string
+  text: string
+}
+
+interface RedirectFetchOptions extends ApiRequestOptions {
+  maxBytes?: number
+  /** Return error answers (4xx, 5xx) to the caller instead of throwing. */
+  anyStatus?: boolean
+}
 
 export type SearchErrorCode =
+  | 'CANCELLED'
   | 'INVALID_URL'
   | 'BLOCKED_HOST'
   | 'DNS_FAILED'
@@ -674,25 +701,95 @@ export class SearchService {
     return `${trimmedQuery} site:${normalizedSite}`
   }
 
-  private async fetchUrlWithRedirects(initialUrl: URL): Promise<{
+  /**
+   * A GET for a custom tool: the response body as text, whatever text format
+   * the API answers in. Goes through the same checks as fetch_url (http(s)
+   * only, no local or private addresses, each redirect checked again), with
+   * the toolset's own headers. `allowLocalHost` names the one host that may
+   * be a local or private address. An error answer is thrown with the start
+   * of its body, since APIs say there what was wrong with the request.
+   */
+  async requestApi(url: string, options: ApiRequestOptions = {}): Promise<ApiResponse> {
+    let parsedUrl: URL
+    try {
+      parsedUrl = new URL(url)
+    } catch {
+      throw new SearchError('INVALID_URL', 'Invalid URL')
+    }
+    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
+      throw new SearchError('INVALID_URL', 'Only http:// and https:// URLs are supported')
+    }
+    parsedUrl.hash = ''
+
+    let fetched: { response: RedirectableResponse; finalUrl: URL }
+    try {
+      fetched = await this.fetchUrlWithRedirects(parsedUrl, {
+        headers: options.headers,
+        allowLocalHost: options.allowLocalHost,
+        signal: options.signal,
+        maxBytes: API_MAX_BYTES,
+        anyStatus: true
+      })
+    } catch (err) {
+      if (options.signal?.aborted) throw new SearchError('CANCELLED', 'The reply was stopped, so the request was dropped.')
+      if (err instanceof Error && /maxContentLength/i.test(err.message)) {
+        throw new SearchError('TOO_LARGE', `${parsedUrl.hostname} sent more than ${API_MAX_BYTES / 1_000_000} MB, too much to read.`)
+      }
+      throw toSearchError(err, parsedUrl.hostname)
+    }
+
+    const { response, finalUrl } = fetched
+    const status = typeof response.status === 'number' ? response.status : 200
+    const bytes = toBytes(response.data)
+    const contentTypeHeader = this.readHeaderValue(response.headers, 'content-type') ?? ''
+    const contentType = contentTypeHeader.split(';')[0]?.trim().toLowerCase() || 'unknown'
+    const kind = bytes.length === 0 ? 'text' : documentKind(contentType, bytes)
+    const text = kind === 'text' || kind === 'html' ? decodeBody(bytes, contentTypeHeader).trim() : ''
+
+    if (status < 200 || status >= 300) {
+      const retryAfter = this.readHeaderValue(response.headers, 'retry-after')
+      const detail = text.replace(/\s+/g, ' ').slice(0, API_ERROR_BODY_CHARS)
+      let message = `${finalUrl.hostname} returned HTTP ${status}`
+      if (detail) message += `: ${detail}`
+      if (retryAfter) message += ` (retry after ${retryAfter} seconds)`
+      throw new SearchError('HTTP_ERROR', message, {
+        status,
+        retryable: status === 408 || status === 429 || status >= 500
+      })
+    }
+    if (kind !== 'text' && kind !== 'html') {
+      throw new SearchError('UNSUPPORTED_TYPE', `Unsupported content type: ${contentType}. Custom tools read JSON and other text formats.`)
+    }
+
+    return { url: finalUrl.toString(), status, contentType, text }
+  }
+
+  private async fetchUrlWithRedirects(initialUrl: URL, options: RedirectFetchOptions = {}): Promise<{
     response: RedirectableResponse
     finalUrl: URL
   }> {
     let currentUrl = initialUrl
+    const maxBytes = options.maxBytes ?? FETCH_MAX_BYTES
+    const localHost = options.allowLocalHost ? normalizeHost(options.allowLocalHost) : null
 
     for (let redirectCount = 0; redirectCount <= MAX_FETCH_REDIRECTS; redirectCount++) {
-      const safeAddresses = await this.resolveSafeFetchAddresses(currentUrl)
+      const allowLocal = localHost !== null && normalizeHost(currentUrl.hostname) === localHost
+      const safeAddresses = await this.resolveSafeFetchAddresses(currentUrl, allowLocal)
 
       const response = await axios.get<ArrayBuffer>(currentUrl.toString(), {
         responseType: 'arraybuffer',
         timeout: FETCH_TIMEOUT_MS,
-        maxContentLength: FETCH_MAX_BYTES,
-        maxBodyLength: FETCH_MAX_BYTES,
+        maxContentLength: maxBytes,
+        maxBodyLength: maxBytes,
         maxRedirects: 0,
-        validateStatus: (status) => (status >= 200 && status < 300) || this.isRedirectStatus(status),
+        validateStatus: (status) => options.anyStatus === true || (status >= 200 && status < 300) || this.isRedirectStatus(status),
         lookup: this.createPinnedLookup(currentUrl.hostname, safeAddresses),
+        ...(options.signal ? { signal: options.signal } : {}),
         headers: {
-          'User-Agent': USER_AGENT
+          'User-Agent': USER_AGENT,
+          // A toolset's headers (its API key, say) go to its own site only,
+          // never on to wherever a redirect leads.
+          ...(currentUrl.origin === initialUrl.origin ? options.headers : {})
         }
       }) as RedirectableResponse
 
@@ -782,17 +879,22 @@ export class SearchService {
     }
   }
 
-  private async resolveSafeFetchAddresses(targetUrl: URL): Promise<SafeLookupAddress[]> {
+  /**
+   * The addresses a request to this URL may connect to. `allowLocal` is for a
+   * custom toolset's own host when its file sets allowLocal: local and private
+   * addresses are then let through.
+   */
+  private async resolveSafeFetchAddresses(targetUrl: URL, allowLocal = false): Promise<SafeLookupAddress[]> {
     const hostname = normalizeHost(targetUrl.hostname)
     if (!hostname) {
       throw new SearchError('INVALID_URL', 'Invalid URL host')
     }
 
-    if (hostname === 'localhost' || hostname.endsWith('.localhost')) {
+    if (!allowLocal && (hostname === 'localhost' || hostname.endsWith('.localhost'))) {
       throw new SearchError('BLOCKED_HOST', 'Refusing to fetch local or private network resources')
     }
 
-    if (isBlockedIpAddress(hostname)) {
+    if (!allowLocal && isBlockedIpAddress(hostname)) {
       throw new SearchError('BLOCKED_HOST', 'Refusing to fetch local or private network resources')
     }
 
@@ -815,7 +917,7 @@ export class SearchService {
       throw new SearchError('DNS_FAILED', `Unable to resolve host: ${hostname}`)
     }
 
-    if (records.some((record) => isBlockedIpAddress(record.address))) {
+    if (!allowLocal && records.some((record) => isBlockedIpAddress(record.address))) {
       throw new SearchError('BLOCKED_HOST', 'Refusing to fetch local or private network resources')
     }
 

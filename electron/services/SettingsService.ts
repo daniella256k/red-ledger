@@ -67,6 +67,7 @@ const DEFAULT_SETTINGS: Settings = {
   searchSectionExpanded: true,
   advancedSectionExpanded: false,
   connectionsSectionExpanded: false,
+  customToolsSectionExpanded: false,
   mcpServers: []
 }
 
@@ -551,6 +552,9 @@ export function sanitizeSettings(settings: Partial<Settings> | undefined): Setti
     connectionsSectionExpanded: typeof s.connectionsSectionExpanded === 'boolean'
       ? s.connectionsSectionExpanded
       : DEFAULT_SETTINGS.connectionsSectionExpanded,
+    customToolsSectionExpanded: typeof s.customToolsSectionExpanded === 'boolean'
+      ? s.customToolsSectionExpanded
+      : DEFAULT_SETTINGS.customToolsSectionExpanded,
     mcpServers: sanitizeMcpServers(s.mcpServers)
   }
 }

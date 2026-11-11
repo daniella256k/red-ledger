@@ -1,5 +1,7 @@
 import type { FetchUrlResult, SearchRecency, SearchResponse, ToolCall } from '../types'
 import { displayDomain, formatFetchUrlResult, formatSearchResponse } from './toolResultText'
+import { formatCustomToolResult, isCustomToolResult } from './customTools'
+import { parseMcpToolName } from './mcpConfig'
 
 /**
  * What the chat shows for a tool call: a one-line description, a short
@@ -54,6 +56,11 @@ export function toolError(toolCall: ToolCall): ToolErrorResult | null {
     ...(typeof status === 'number' ? { status } : {}),
     ...(typeof retryable === 'boolean' ? { retryable } : {})
   }
+}
+
+/** A finished call to a custom tool (a JSON tool file's GET), told by its name and result shape. */
+export function isCustomToolCall(toolCall: ToolCall): boolean {
+  return parseMcpToolName(toolCall.name) !== null && isCustomToolResult(toolCall.result)
 }
 
 export function toolStatus(toolCall: ToolCall): ToolStatus {
@@ -186,6 +193,8 @@ export function summarizeToolResult(toolCall: ToolCall): string {
 
   if (Array.isArray(result)) return toolCall.name === 'list_files' ? plural(countNodes(result), 'item') : 'done'
 
+  if (isCustomToolCall(toolCall)) return `${formatCount((result.content as string).length)} chars`
+
   switch (toolCall.name) {
     case 'list_files':
       // A listing cut off at its entry limit: { entries, truncated, note }.
@@ -248,6 +257,7 @@ export function modelTextFor(toolCall: ToolCall): string {
     try {
       if (toolCall.name === 'fetch_url') return formatFetchUrlResult(result)
       if (SEARCH_TOOLS.has(toolCall.name)) return formatSearchResponse(result)
+      if (isCustomToolCall(toolCall)) return formatCustomToolResult(result)
     } catch {
       // Unexpected shape: the main process falls back to JSON too.
     }
@@ -275,6 +285,7 @@ export function toolStatsLine(toolCall: ToolCall): string {
   if (!error && result && typeof result === 'object' && !Array.isArray(result)) {
     const record = result as Partial<SearchResponse & FetchUrlResult>
     if (SEARCH_TOOLS.has(toolCall.name) && record.backend) parts.push(BACKEND_LABELS[record.backend] ?? record.backend)
+    if (isCustomToolCall(toolCall) && record.content_type) parts.push(record.content_type)
     if (toolCall.name === 'fetch_url') {
       if (record.content_type) parts.push(record.content_type)
       if (record.extraction) parts.push(record.extraction)

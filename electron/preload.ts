@@ -1,5 +1,5 @@
 import { contextBridge, ipcRenderer, webUtils } from 'electron'
-import type { AttachmentParseResult, McpServerStatus, MenuAction, RedLedgerAPI, TurnEvent } from '../src/types'
+import type { AttachmentParseResult, CustomToolsStatus, McpServerStatus, MenuAction, RedLedgerAPI, TurnEvent } from '../src/types'
 
 function getFileName(value: unknown): string {
   if (!value || typeof value !== 'object') return 'Unknown file'
@@ -182,6 +182,27 @@ const api: RedLedgerAPI = {
     ipcRenderer.on('mcp:status', listener)
     return () => {
       ipcRenderer.removeListener('mcp:status', listener)
+    }
+  },
+
+  // ─── Custom Tools ────────────────────────────────────────────────────────
+
+  getCustomToolsStatus: () =>
+    ipcRenderer.invoke('customTools:getStatus'),
+
+  reloadCustomTools: () =>
+    ipcRenderer.invoke('customTools:reload'),
+
+  openCustomToolsFolder: () =>
+    ipcRenderer.invoke('customTools:openFolder'),
+
+  onCustomToolsStatus: (handler) => {
+    const listener = (_event: Electron.IpcRendererEvent, status: unknown) => {
+      if (status && typeof status === 'object') handler(status as CustomToolsStatus)
+    }
+    ipcRenderer.on('customTools:status', listener)
+    return () => {
+      ipcRenderer.removeListener('customTools:status', listener)
     }
   },
 
