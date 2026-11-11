@@ -13,7 +13,8 @@ import type {
   McpServerStatus, McpSignInResult, CustomToolsStatus,
   StorageOverview, ChatStorageInfo, StoredImageInfo, RemoveImageResult, CompactResult,
   SelectBranchOptions, FileUndoResult,
-  TurnStartRequest, CompactStartResult, LiveTurn
+  TurnStartRequest, CompactStartResult, LiveTurn,
+  DrawingFormat, DrawingSaveResult
 } from '../../src/types'
 
 export type ChatExportFormat = 'markdown' | 'xml'
@@ -122,6 +123,9 @@ export interface IpcContract {
   // Chat import/export
   'chat:export':                { params: [conversationId: string, format: ChatExportFormat]; result: ChatExportResult }
   'chat:import':                { params: [];                                          result: ChatImportResult }
+
+  // Drawings (draw_svg): save one to a file the user picks
+  'drawing:save':               { params: [name: string, format: DrawingFormat, data: string | Uint8Array]; result: DrawingSaveResult }
 }
 
 // ─── Derived helper types ───────────────────────────────────────────────────

@@ -155,6 +155,8 @@ export function describeToolCall(toolCall: ToolCall): { subject: string; filters
       const path = str(args.path)
       return { subject: `"${str(args.pattern) ?? ''}"`, ...(path ? { filters: `in ${path}` } : {}) }
     }
+    case 'draw_svg':
+      return { subject: str(args.title) ?? 'drawing' }
     default:
       return { subject: argumentsPreview(args) }
   }
@@ -222,6 +224,8 @@ export function summarizeToolResult(toolCall: ToolCall): string {
       return 'edited'
     case 'move_file':
       return 'moved'
+    case 'draw_svg':
+      return 'drawn'
     default:
       return 'done'
   }

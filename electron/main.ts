@@ -24,6 +24,7 @@ import { initSearchService } from './ipc/search'
 import { registerMcpHandlers, getMcpService } from './ipc/mcp'
 import { registerCustomToolHandlers, getCustomToolService } from './ipc/customTools'
 import { registerTransferHandlers } from './ipc/transfer'
+import { registerDrawingHandlers } from './ipc/drawing'
 import { registerStorageHandlers } from './ipc/storage'
 import { registerFileHistoryHandlers } from './ipc/fileHistory'
 import { handleIpc } from './ipc/typedIpc'
@@ -458,6 +459,7 @@ function registerIpcHandlers(): void {
 
   // 8. Chat import/export
   registerTransferHandlers(getConversationService())
+  registerDrawingHandlers()
 
   // 8a. Undoing a reply's file changes
   registerFileHistoryHandlers(getConversationService().fileHistory)

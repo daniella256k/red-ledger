@@ -263,6 +263,11 @@ const api: RedLedgerAPI = {
   importChat: () =>
     ipcRenderer.invoke('chat:import'),
 
+  // ─── Drawings ────────────────────────────────────────────────────────────
+
+  saveDrawing: (name, format, data) =>
+    ipcRenderer.invoke('drawing:save', name, format, data),
+
   onMenuAction: (handler) => {
     const listener = (_event: Electron.IpcRendererEvent, action: unknown) => {
       if (action === 'exportChat' || action === 'importChat') {

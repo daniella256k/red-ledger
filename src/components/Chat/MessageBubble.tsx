@@ -2,7 +2,9 @@ import { useMemo, useState, useRef, useEffect, useCallback } from 'react'
 import { ChevronDown, ChevronRight, ChevronUp, FoldVertical, Paperclip } from 'lucide-react'
 import type { Attachment, ImageAttachment, Message, ToolCall } from '@/types'
 import { ToolCallBurst } from './ToolCallBurst'
+import { SvgFigure } from './SvgFigure'
 import { imageSrc } from '@/lib/attachments'
+import { svgDrawingOf, type SvgDrawing } from '@/lib/svgDrawing'
 import { burstSummaryText, groupToolRuns } from '@/lib/toolDisplay'
 import { codeBlockHtml, copyCodeOnClick, renderMarkdown, splitFencedCode } from '@/lib/markdown'
 import {
@@ -40,10 +42,14 @@ type Segment =
   | { kind: 'text'; text: string; html: string }
   | { kind: 'tool'; toolCall: ToolCall }
 
-/** What the reply shows: text blocks, and runs of consecutive tool calls as one burst. */
+/**
+ * What the reply shows: text blocks, runs of consecutive tool calls as one
+ * burst, and each draw_svg drawing as a figure of its own.
+ */
 type DisplaySegment =
   | Extract<Segment, { kind: 'text' }>
   | { kind: 'tools'; toolCalls: ToolCall[] }
+  | { kind: 'drawing'; toolCall: ToolCall; drawing: SvgDrawing }
 
 type CollapsedPreviewBlock =
   | { kind: 'text'; content: string }
@@ -142,10 +148,14 @@ function buildSegments(content: string, toolCalls: ToolCall[]): Segment[] {
 }
 
 function groupSegments(segments: Segment[]): DisplaySegment[] {
-  return groupToolRuns(segments, (seg) => (seg.kind === 'tool' ? seg.toolCall : undefined))
-    .map((item) => (Array.isArray(item)
-      ? { kind: 'tools' as const, toolCalls: item }
-      : item as Extract<Segment, { kind: 'text' }>))
+  // A drawing is content, not a step: it stays out of the bursts around it.
+  // A draw_svg call that failed has no drawing and shows as an ordinary call.
+  return groupToolRuns(segments, (seg) => (seg.kind === 'tool' && !svgDrawingOf(seg.toolCall) ? seg.toolCall : undefined))
+    .map((item): DisplaySegment => {
+      if (Array.isArray(item)) return { kind: 'tools', toolCalls: item }
+      if (item.kind === 'tool') return { kind: 'drawing', toolCall: item.toolCall, drawing: svgDrawingOf(item.toolCall)! }
+      return item
+    })
 }
 
 function truncateCollapsedBlock(text: string): string {
@@ -214,6 +224,10 @@ export function MessageBubble({
     for (const seg of segments) {
       if (seg.kind === 'tools') {
         blocks.push({ kind: 'tool', content: `[Tools] ${burstSummaryText(seg.toolCalls)}` })
+        continue
+      }
+      if (seg.kind === 'drawing') {
+        blocks.push({ kind: 'tool', content: `[Drawing] ${seg.drawing.title}` })
         continue
       }
 
@@ -513,6 +527,9 @@ export function MessageBubble({
               if (seg.kind === 'tools') {
                 return <ToolCallBurst key={seg.toolCalls[0].id || `tools-${i}`} toolCalls={seg.toolCalls} />
               }
+              if (seg.kind === 'drawing') {
+                return <SvgFigure key={seg.toolCall.id || `drawing-${i}`} drawing={seg.drawing} toolCall={seg.toolCall} />
+              }
 
               // Text segment
               const isLastTextSegment = i === segments.length - 1 && seg.kind === 'text'
@@ -562,7 +579,7 @@ export function MessageBubble({
             )}
 
             {/* A finished reply with only reasoning or tool calls; its saved text is empty. */}
-            {!isStreaming && !message.content.trim() && (
+            {!isStreaming && !message.content.trim() && !segments.some((seg) => seg.kind === 'drawing') && (
               <div className="message-bubble assistant">
                 <span className="text-xs italic text-soft-charcoal/50">No text response</span>
               </div>

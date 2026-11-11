@@ -15,6 +15,7 @@ import './webSearch'
 import './orgSearch'
 import './wikiSearch'
 import './fetchUrl'
+import './drawSvg'
 
 /**
  * Execute a tool call from the LLM and return the same ToolCall with

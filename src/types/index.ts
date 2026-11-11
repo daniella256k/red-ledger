@@ -616,6 +616,14 @@ export type ChatImportResult =
 
 export type MenuAction = 'exportChat' | 'importChat'
 
+/** A draw_svg drawing saved from the chat: its SVG source, or a PNG rendered from it. */
+export type DrawingFormat = 'svg' | 'png'
+
+export type DrawingSaveResult =
+  | { ok: true; path: string }
+  | { ok: false; canceled: true }
+  | { ok: false; canceled: false; error: string }
+
 // ─── Toast ───────────────────────────────────────────────────────────────────
 
 export interface Toast {
@@ -723,6 +731,11 @@ export interface RedLedgerAPI {
   // Chat Export / Import
   exportChat(conversationId: string, format: ChatExportFormat): Promise<ChatExportResult>
   importChat(): Promise<ChatImportResult>
+
+  // Drawings
+  /** Ask where to save a drawing, then write it: SVG source as text, PNG as bytes. */
+  saveDrawing(name: string, format: DrawingFormat, data: string | Uint8Array): Promise<DrawingSaveResult>
+
   onMenuAction(handler: (action: MenuAction) => void): () => void
 }
 

@@ -117,6 +117,7 @@ The LLM can invoke these tools during a conversation:
 | `org_search` | Search the web (Tavily or SerpAPI) using optional site specification (Org Site in settings) |
 | `wiki_search` | Search Wikipedia for article summaries |
 | `fetch_url` | Fetch and parse a full webpage by URL (includes extracted `links` for navigation) |
+| `draw_svg` | Draw an SVG picture, diagram or chart, shown in the chat with buttons to copy or save it as SVG or PNG |
 
 MCP servers configured under Settings → Connections add their tools as `<server>__<tool>` (servers whose names collide get `-2`, `-3`, ...). Click a connected server's tool count to switch individual tools on or off; switched-off tools are never sent to the model, and tools a server adds later start on. View JSON shows the whole server list in the usual `mcpServers` format, with env and header values masked until revealed, and can be edited and applied in place.
 

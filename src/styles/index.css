@@ -396,6 +396,64 @@
     @apply m-0 font-mono text-[11px] text-soft-charcoal/50 break-words;
   }
 
+  /* A draw_svg drawing: the image on a light backing, title and actions below. */
+  .svg-figure {
+    @apply m-0 w-full max-w-full border border-weathered rounded-card bg-base-100 overflow-hidden text-xs;
+  }
+
+  .svg-figure-canvas {
+    @apply flex justify-center bg-white p-3;
+  }
+
+  .svg-figure-canvas img {
+    @apply block h-auto max-w-full select-none;
+  }
+
+  .svg-figure-open {
+    @apply block max-w-full cursor-zoom-in;
+  }
+
+  /* The drawing enlarged over the whole window. */
+  .svg-viewer {
+    @apply fixed inset-0 z-[1000] overflow-hidden bg-black/80;
+    -webkit-app-region: no-drag;
+  }
+
+  .svg-viewer img {
+    @apply absolute max-w-none select-none bg-white shadow-2xl;
+    touch-action: none;
+  }
+
+  .svg-viewer-close {
+    @apply absolute right-3 top-3 inline-flex rounded-full bg-black/50 p-2 text-white/70;
+  }
+
+  .svg-viewer-close:hover {
+    @apply text-white;
+  }
+
+  .svg-viewer-caption {
+    /* A dark pill, so it stays readable over a zoomed drawing's white backing. */
+    @apply pointer-events-none absolute bottom-3 left-1/2 m-0 -translate-x-1/2 truncate rounded-full bg-black/60 px-3 py-1 text-center text-xs text-white/80;
+    max-width: calc(100% - 2rem);
+  }
+
+  .svg-figure-bar {
+    @apply flex flex-wrap items-baseline gap-x-3 gap-y-1 border-t border-weathered px-3 py-2 text-[11px] text-soft-charcoal/50;
+  }
+
+  .svg-figure-title {
+    @apply mr-auto min-w-0 truncate text-xs text-soft-charcoal;
+  }
+
+  .svg-figure-action:hover:not(:disabled) {
+    @apply text-soft-charcoal;
+  }
+
+  .svg-figure-note {
+    @apply m-0 border-t border-weathered px-3 py-2 text-soft-charcoal/50;
+  }
+
   /* Editor Container */
   .editor-container {
     @apply border border-weathered rounded-card overflow-hidden;
